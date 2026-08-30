@@ -496,15 +496,19 @@ createApp({
       (solution.value && solution.value.counterfactual) || []);
 
     /* Most categories reach nothing in a given crate, and a column of zeroes
-       pushes the ones that matter off the screen. Rows that move something
-       come first, ordered by how much; the inert ones stay reachable behind
-       a disclosure. */
+       pushes the ones that matter off the screen. What decides the split is
+       whether a category is reached at all, not whether assuming it away
+       clears anybody: a category every one of whose functions also reaches
+       something else clears nobody, and calling that "reaches nothing" would
+       hide it while the flame graph is still drawing it. Rows that move the
+       most come first; the inert ones stay reachable behind a disclosure. */
     const activeRows = computed(() => counterfactual.value
-      .filter(c => c.functions_cleared > 0 || c.suppressed)
+      .filter(c => c.functions_reaching > 0 || c.suppressed)
       .sort((a, b) => b.functions_cleared - a.functions_cleared
+        || b.functions_reaching - a.functions_reaching
         || (a.category < b.category ? -1 : 1)));
     const inertRows = computed(() => counterfactual.value
-      .filter(c => c.functions_cleared === 0 && !c.suppressed));
+      .filter(c => !c.functions_reaching && !c.suppressed));
     const shownRows = computed(() =>
       (showInert.value ? [...activeRows.value, ...inertRows.value]
         : activeRows.value));
@@ -767,8 +771,9 @@ createApp({
 
     <h2>Assume impossible</h2>
     <p class="k" style="color:var(--text-muted);font-size:11px;margin:0 0 8px">
-      The bar is how many functions stop being interesting if that category
-      alone is assumed impossible.
+      The count is how many functions reach that category. The bar is how
+      many stop being interesting if it alone is assumed impossible, which
+      is fewer whenever those functions also reach something else.
     </p>
     <div v-for="c in shownRows" :key="c.category" class="cat"
       :class="{ off: activePolicy.has(c.category) && !exclusive,
@@ -788,8 +793,10 @@ createApp({
             : 'Show only ' + c.category + ', assuming every other category impossible'">
           only
         </button>
-        <span class="n" :class="{ stale: busy > 0 }">
-          {{ c.functions_cleared }}</span>
+        <span class="n" :class="{ stale: busy > 0 }"
+          :title="c.functions_reaching + ' functions reach ' + c.category
+            + ', ' + c.functions_cleared + ' of them only through it'">
+          {{ c.functions_reaching }}</span>
       </div>
       <span class="bar-track" :class="{ stale: busy > 0 }">
         <span class="bar" :style="{ width: (100 * c.functions_cleared / maxCleared) + '%' }"></span>
@@ -875,12 +882,14 @@ createApp({
         <h2 style="margin-top:0">Panic categories</h2>
         <table class="data">
           <thead><tr><th>category</th><th>assumed impossible</th>
-            <th class="n">direct sites</th><th class="n">functions cleared</th></tr></thead>
+            <th class="n">direct sites</th><th class="n">functions reaching</th>
+            <th class="n">functions cleared</th></tr></thead>
           <tbody>
             <tr v-for="c in counterfactual" :key="c.category">
               <td>{{ c.category }}</td>
               <td>{{ c.suppressed ? 'yes' : 'no' }}</td>
               <td class="n">{{ c.sites }}</td>
+              <td class="n">{{ c.functions_reaching }}</td>
               <td class="n">{{ c.functions_cleared }}</td>
             </tr>
           </tbody>

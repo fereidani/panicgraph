@@ -137,7 +137,7 @@ pub fn solve(
             "can_panic": dirty,
             "clean_by_suppression": solution.cleared_by_suppression(g)?,
         },
-        "counterfactual": counterfactual(g, suppressed, follow_inexact, dirty)?,
+        "counterfactual": counterfactual(g, &solution, dirty)?,
     }))
 }
 
@@ -149,20 +149,34 @@ fn local_dirty(g: &Graph, solution: &Solution) -> usize {
         .count()
 }
 
-/// The marginal effect of each category on the result.
+/// How many local functions reach one category under a solution.
+fn local_reaching(g: &Graph, solution: &Solution, kind: Category) -> usize {
+    g.iter()
+        .filter(|(_, b)| b.local && !b.opaque)
+        .filter(|(id, _)| solution.enabled(*id).contains(kind))
+        .count()
+}
+
+/// The reach and the marginal effect of each category on the result.
 ///
-/// This is the number the user is actually reasoning about: not how many
-/// panic sites a category has, but how many functions it moves. For a
-/// category that is not suppressed, that is how many functions would stop
-/// being interesting if it were. For one that is already suppressed, it is
-/// how many functions the assumption is currently clearing, which is the same
-/// quantity measured from the other side.
+/// Two different questions, and a category can answer them differently.
+/// `functions_reaching` is whether the category occurs here at all.
+/// `functions_cleared` is how many functions it alone is keeping
+/// interesting: for a category that is not suppressed, how many would stop
+/// being reported if it were, and for one already suppressed, how many the
+/// assumption is currently clearing, which is the same quantity measured
+/// from the other side. A category every one of whose functions also reaches
+/// something else clears nobody while still reaching plenty, so a reader
+/// told only the second number would conclude it is not here.
+///
+/// `sites` counts the panics the driver wrote down, which is zero for the
+/// categories the solver synthesizes for a body it cannot read.
 fn counterfactual(
     g: &Graph,
-    suppressed: CategorySet,
-    follow_inexact: bool,
+    solution: &Solution,
     baseline: usize,
 ) -> Result<Vec<Value>> {
+    let policy = solution.policy();
     let mut out = Vec::with_capacity(ALL.len());
     for category in ALL {
         let sites = g
@@ -170,23 +184,33 @@ fn counterfactual(
             .flat_map(|(_, b)| b.sites.iter())
             .filter(|s| s.category == category)
             .count();
-        let alternative = if suppressed.contains(category) {
-            suppressed.difference(CategorySet::single(category))
+        let assumed = policy.suppressed.contains(category);
+        let alternative = if assumed {
+            policy.suppressed.difference(CategorySet::single(category))
         } else {
-            suppressed.union(CategorySet::single(category))
+            policy.suppressed.union(CategorySet::single(category))
         };
-        let solution = solved(g, alternative, follow_inexact)?;
-        let other = local_dirty(g, &solution);
-        let cleared = if suppressed.contains(category) {
+        let other_solution = solved(g, alternative, policy.follow_inexact)?;
+        let other = local_dirty(g, &other_solution);
+        let cleared = if assumed {
             other.saturating_sub(baseline)
         } else {
             baseline.saturating_sub(other)
         };
+        // A category the policy assumes impossible reaches nothing by
+        // construction, so what it would reach is read from the solution
+        // that puts it back.
+        let reaching = if assumed {
+            local_reaching(g, &other_solution, category)
+        } else {
+            local_reaching(g, solution, category)
+        };
         out.push(json!({
             "category": category.name(),
             "sites": sites,
+            "functions_reaching": reaching,
             "functions_cleared": cleared,
-            "suppressed": suppressed.contains(category),
+            "suppressed": assumed,
         }));
     }
     Ok(out)
