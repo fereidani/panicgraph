@@ -239,7 +239,8 @@ away, and a check written against `size_of::<T>()` is still a branch there
 even though it settles to a constant for every real `T`. Each body is folded
 against the arguments it was reached with and the settings of the build in
 front of it, the way codegen resolves them, so a branch neither can take is
-not walked.
+not walked. A test carries into the arm it guards, so a division below
+`if divisor != 0` raises nothing.
 
 The driver injects `-Zalways-encode-mir`. Without it, a dependency keeps MIR
 only for generic and small items, so its concrete functions are opaque and
@@ -260,8 +261,9 @@ Read these before trusting a clean result.
   candidates. `--static-only` drops those edges instead.
 - **This is a may-panic analysis.** A panic that is unreachable for reasons
   the compiler cannot see is still reported. It answers "could this panic",
-  not "will it". Folding settles a check against constants, and nothing more:
-  a bound that holds because of what the caller passes is still reported.
+  not "will it". Folding settles a check against constants and against what a
+  branch above it proves, and nothing more: an invariant that holds for
+  reasons spread across several functions is still reported.
 - **The toolchain is pinned.** The driver links against compiler internals,
   which have no stable interface, so it is built for one nightly at a time.
   Updating the toolchain means reinstalling; the tool says so rather than

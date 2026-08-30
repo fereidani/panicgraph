@@ -91,3 +91,52 @@ pub fn clean_assert_true() -> usize {
     assert!(size_of::<u32>() == 4);
     size_of::<u32>()
 }
+
+/// Clean. The guard settles the divisor before the division reads it.
+pub fn clean_guarded_divide(a: u32, b: u32) -> u32 {
+    if b == 0 { 0 } else { a / b }
+}
+
+/// Clean. The same guard, written the other way round.
+pub fn clean_guarded_divide_ne(a: u32, b: u32) -> Option<u32> {
+    if b != 0 { Some(a / b) } else { None }
+}
+
+/// Clean. An early return settles the divisor for the rest of the body.
+pub fn clean_guarded_remainder(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    a % b
+}
+
+/// Reaches `divide-by-zero`. The guard is on a different value, so it says
+/// nothing about the divisor.
+pub fn must_divide_misguarded(a: u32, b: u32, c: u32) -> u32 {
+    if c != 0 { a / b } else { 0 }
+}
+
+/// Reaches `divide-by-zero`. The guard admits only the arm that divides by
+/// zero, so the check fails every time rather than never.
+pub fn must_divide_inverted_guard(a: u32, b: u32) -> u32 {
+    if b == 0 { a / b } else { 0 }
+}
+
+/// Reaches `divide-by-zero` but not `remainder-by-zero`: the remainder is
+/// free once the division above it has passed the same check.
+pub fn must_divide_once_of_two(a: u32, b: u32) -> u32 {
+    let quotient = a / b;
+    let remainder = a % b;
+    quotient.wrapping_add(remainder)
+}
+
+/// Clean. The guard survives a cast that cannot lose information.
+pub fn clean_guarded_widening(a: u64, b: u32) -> u64 {
+    if b == 0 { 0 } else { a / u64::from(b) }
+}
+
+/// Reaches `divide-by-zero`. A narrowing cast can turn a value the guard
+/// admitted into zero.
+pub fn must_divide_narrowed(a: u8, b: u32) -> u8 {
+    if b == 0 { 0 } else { a / (b as u8) }
+}

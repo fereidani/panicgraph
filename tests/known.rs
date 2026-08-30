@@ -22,7 +22,18 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_copy", "explicit"),
     ("must_assert_generic", "explicit"),
     ("must_assert_false", "explicit"),
+    ("must_divide_misguarded", "divide-by-zero"),
+    ("must_divide_inverted_guard", "divide-by-zero"),
+    ("must_divide_once_of_two", "divide-by-zero"),
+    ("must_divide_narrowed", "divide-by-zero"),
 ];
+
+/// The panics each function must *not* be reported with.
+///
+/// A check the analysis can settle has to go even where the same function
+/// keeps another that it cannot.
+const MUST_NOT_PANIC: &[(&str, &str)] =
+    &[("must_divide_once_of_two", "remainder-by-zero")];
 
 /// The functions that must be reported with nothing at all.
 const MUST_BE_CLEAN: &[&str] = &[
@@ -31,6 +42,10 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_count_zeros",
     "clean_sum_by_get",
     "clean_assert_true",
+    "clean_guarded_divide",
+    "clean_guarded_divide_ne",
+    "clean_guarded_remainder",
+    "clean_guarded_widening",
 ];
 
 /// Analyses the fixture crate and returns the categories reported per
@@ -96,6 +111,15 @@ fn a_known_crate_reports_exactly_its_panics() {
         assert!(
             categories.iter().any(|c| c == category),
             "{function} can panic with {category}, but was reported with \
+             {categories:?}"
+        );
+    }
+
+    for (function, category) in MUST_NOT_PANIC {
+        let categories = found(function).unwrap_or_default();
+        assert!(
+            !categories.iter().any(|c| c == category),
+            "{function} cannot panic with {category}, but was reported with \
              {categories:?}"
         );
     }
