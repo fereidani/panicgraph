@@ -126,9 +126,13 @@ pub fn run(
             |known| is_new(known, finding).then_some(Reason::New),
         );
         let reason = reason.or_else(|| {
+            let assumed = |name: &String| {
+                name.parse::<Category>()
+                    .is_ok_and(|c| CategorySet::assumed().contains(c))
+            };
             (check.fail_on_unknown
                 && covered
-                && finding.categories.iter().any(|c| c == "unknown"))
+                && finding.categories.iter().any(assumed))
             .then_some(Reason::Unclassified)
         });
         if let Some(reason) = reason {

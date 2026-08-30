@@ -219,8 +219,9 @@ impl Eval<'_> {
     /// The current state of a call's target.
     fn callee_state(&self, call: &CallSite) -> NodeState {
         let Some(key) = &call.callee else {
-            // An unresolved target is unknown, and unknown code may unwind.
-            return self.unreadable(Category::Unknown);
+            // An unresolved target is assumed panicking, under the name of
+            // whatever stopped the resolution, and it may unwind.
+            return self.unreadable(call.kind.assumed_category());
         };
         self.graph
             .id_of(key)

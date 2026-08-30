@@ -102,19 +102,18 @@ pub fn find(
             }
         }
 
-        if category == Category::Unknown {
-            let unresolved = body.calls.iter().enumerate().find(|(i, call)| {
-                call.callee.is_none()
-                    && activity.call(*i)
-                    && solution.follows(call)
+        let unresolved = body.calls.iter().enumerate().find(|(i, call)| {
+            call.callee.is_none()
+                && call.kind.assumed_category() == category
+                && activity.call(*i)
+                && solution.follows(call)
+        });
+        if let Some((i, _)) = unresolved {
+            return Some(Witness {
+                hops: rebuild(&came_from, root, id),
+                func: id,
+                terminal: Terminal::Unresolved(i),
             });
-            if let Some((i, _)) = unresolved {
-                return Some(Witness {
-                    hops: rebuild(&came_from, root, id),
-                    func: id,
-                    terminal: Terminal::Unresolved(i),
-                });
-            }
         }
 
         for (i, call) in body.calls.iter().enumerate() {

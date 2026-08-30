@@ -309,13 +309,21 @@ impl<'tcx> Extractor<'tcx> {
             return;
         };
         let Some(args) = args.no_bound_vars() else {
-            self.unresolved(raw, at, self.tcx.def_path_str(did));
+            self.generic(raw, at, self.tcx.def_path_str(did));
             return;
         };
-        let resolved = Instance::try_resolve(self.tcx, cx.env, did, args);
-        let Ok(Some(callee)) = resolved else {
-            self.unresolved(raw, at, self.tcx.def_path_str(did));
-            return;
+        let callee = match Instance::try_resolve(self.tcx, cx.env, did, args) {
+            // Not enough is known yet: the target exists only once a caller
+            // supplies concrete arguments, which is that caller's choice.
+            Ok(None) => {
+                self.generic(raw, at, self.tcx.def_path_str(did));
+                return;
+            }
+            Err(_) => {
+                self.unresolved(raw, at, self.tcx.def_path_str(did));
+                return;
+            }
+            Ok(Some(callee)) => callee,
         };
 
         if let Some(sink) = self.sinks.get(self.tcx, callee.def_id()) {
@@ -402,7 +410,7 @@ impl<'tcx> Extractor<'tcx> {
         if ty.has_param() {
             // Something has to run, but which glue is only known once the
             // dropped type is concrete.
-            self.unresolved(raw, at, format!("drop glue for {ty}"));
+            self.generic(raw, at, format!("drop glue for {ty}"));
             return;
         }
         let glue = Instance::resolve_drop_glue(self.tcx, ty);
@@ -613,6 +621,11 @@ impl<'tcx> Extractor<'tcx> {
     /// Appends an edge to a target the analysis could not pin down.
     fn unresolved(&self, raw: &mut Raw<'tcx>, at: At, display: String) {
         self.push_edge(raw, at, None, display, EdgeKind::Unresolved, false);
+    }
+
+    /// Appends an edge that resolves only once a caller chooses arguments.
+    fn generic(&self, raw: &mut Raw<'tcx>, at: At, display: String) {
+        self.push_edge(raw, at, None, display, EdgeKind::Generic, false);
     }
 
     /// Appends a call edge and its unwind channel.

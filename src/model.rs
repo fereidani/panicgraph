@@ -52,6 +52,9 @@ pub enum EdgeKind {
     Vtable,
     /// A call through a function pointer, resolved by signature.
     FnPtr,
+    /// A call that resolves only once a caller supplies concrete generic
+    /// arguments.
+    Generic,
     /// A call whose target the analysis could not determine.
     Unresolved,
 }
@@ -71,7 +74,22 @@ impl EdgeKind {
             Self::Drop => "drop",
             Self::Vtable => "vtable",
             Self::FnPtr => "fn-ptr",
+            Self::Generic => "generic",
             Self::Unresolved => "unresolved",
+        }
+    }
+
+    /// The category an edge with no resolved target stands for.
+    ///
+    /// Naming the cause is the point: a caller can assume dynamic dispatch
+    /// clean without also assuming away genuinely unreadable code.
+    #[must_use]
+    pub const fn assumed_category(self) -> Category {
+        match self {
+            Self::Vtable => Category::DynCall,
+            Self::FnPtr => Category::FnPointer,
+            Self::Generic => Category::GenericBound,
+            Self::Static | Self::Drop | Self::Unresolved => Category::Unknown,
         }
     }
 }

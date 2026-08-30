@@ -18,7 +18,8 @@ const FAMILY = {
   logic: ['index', 'overflow', 'divide-by-zero', 'remainder-by-zero', 'unwrap',
           'explicit', 'str-boundary', 'borrow', 'poison'],
   alloc: ['capacity-overflow', 'alloc-failure', 'refcount-overflow'],
-  unsure: ['unknown', 'ub-check', 'fmt', 'null-deref', 'misaligned-ref'],
+  unsure: ['unknown', 'ub-check', 'fmt', 'null-deref', 'misaligned-ref',
+           'foreign', 'dyn-call', 'fn-pointer', 'generic-bound'],
 };
 const FAMILY_OF = {};
 for (const [family, names] of Object.entries(FAMILY)) {

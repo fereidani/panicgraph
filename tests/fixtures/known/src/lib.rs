@@ -189,7 +189,7 @@ pub fn must_borrow(c: &std::cell::RefCell<u32>) -> u32 {
     *c.borrow()
 }
 
-/// Reaches `unknown`: the target of the call cannot be pinned down.
+/// Reaches `dyn-call`: the target set of a dynamic call is not resolved.
 pub fn must_dyn(f: &dyn Fn() -> u8) -> u8 {
     f()
 }
@@ -269,4 +269,16 @@ pub fn must_modulo_signed(v: &[u8; 8], i: isize) -> u8 {
 /// check cannot fail.
 pub fn clean_nonzero_divide(a: u32, b: std::num::NonZeroU32) -> u32 {
     a / b.get()
+}
+
+/// Reaches `fn-pointer`: the target of the call is whatever the pointer
+/// holds.
+pub fn must_fn_ptr(f: fn() -> u8) -> u8 {
+    f()
+}
+
+/// Reaches `generic-bound`: which implementation runs is decided by the
+/// caller that picks the type.
+pub fn must_generic<T: std::fmt::Display>(x: T) -> String {
+    x.to_string()
 }

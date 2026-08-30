@@ -261,11 +261,14 @@ Read these before trusting a clean result.
   reported with sharper reasons.
 - **`unknown` is not `clean`.** It means the analysis could not see inside
   something. `check --fail-on-unknown` refuses to treat the two alike.
-- **Dynamic dispatch is not resolved.** A `dyn Trait` or function pointer
-  call is recorded as an unknown target rather than expanded to its
-  candidates. `--static-only` drops those edges instead. Once the standard
-  library is fully visible this is what `unknown` mostly means, alongside
-  `foreign`, which names a call into C that has no Rust body to read.
+- **Dynamic dispatch is not resolved.** A `dyn Trait` call reports
+  `dyn-call` and a function pointer call reports `fn-pointer` rather than
+  being expanded to candidates. `--static-only` drops those edges instead.
+  A call a generic function makes through one of its bounds reports
+  `generic-bound`, since which implementation runs is the caller's choice.
+  Each of these names where visibility ended, so one can be assumed clean
+  without assuming away the others; `--suppress assumed` assumes them all,
+  and `check --fail-on-unknown` refuses them all.
 - **This is a may-panic analysis.** A panic that is unreachable for reasons
   the compiler cannot see is still reported. It answers "could this panic",
   not "will it". Folding settles a check against constants and against what a

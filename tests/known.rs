@@ -34,12 +34,14 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_rc_clone", "refcount-overflow"),
     ("must_slice_str", "str-boundary"),
     ("must_borrow", "borrow"),
-    ("must_dyn", "unknown"),
+    ("must_dyn", "dyn-call"),
     ("must_foreign", "foreign"),
     ("must_catch_abort", "alloc-failure"),
     ("must_index_off_by_one", "index"),
     ("must_index_wrong_slice", "index"),
     ("must_modulo_signed", "index"),
+    ("must_fn_ptr", "fn-pointer"),
+    ("must_generic", "generic-bound"),
 ];
 
 /// The panics each function must *not* be reported with.

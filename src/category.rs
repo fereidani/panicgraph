@@ -76,10 +76,17 @@ pub enum Category {
     UbCheck = 16,
     /// A call into foreign code, which has no Rust body to read.
     Foreign = 17,
+    /// A dynamic call, whose target set the analysis does not resolve.
+    DynCall = 18,
+    /// A call through a function pointer, whose target is unknown.
+    FnPointer = 19,
+    /// A call that resolves only once a caller supplies concrete generic
+    /// arguments, so what it reaches is the caller's choice.
+    GenericBound = 20,
 }
 
 /// Every category, in discriminant order.
-pub const ALL: [Category; 18] = [
+pub const ALL: [Category; 21] = [
     Category::Index,
     Category::Overflow,
     Category::DivideByZero,
@@ -98,6 +105,9 @@ pub const ALL: [Category; 18] = [
     Category::Unknown,
     Category::UbCheck,
     Category::Foreign,
+    Category::DynCall,
+    Category::FnPointer,
+    Category::GenericBound,
 ];
 
 impl Category {
@@ -123,6 +133,9 @@ impl Category {
             Self::Unknown => "unknown",
             Self::UbCheck => "ub-check",
             Self::Foreign => "foreign",
+            Self::DynCall => "dyn-call",
+            Self::FnPointer => "fn-pointer",
+            Self::GenericBound => "generic-bound",
         }
     }
 
@@ -148,6 +161,11 @@ impl Category {
             Self::Unknown => "unclassified panic",
             Self::UbCheck => "standard library precondition check",
             Self::Foreign => "call into foreign code, which has no Rust body",
+            Self::DynCall => "dyn trait call with an unresolved target set",
+            Self::FnPointer => "call through a function pointer",
+            Self::GenericBound => {
+                "call decided by a caller's choice of generic arguments"
+            }
         }
     }
 
@@ -207,6 +225,22 @@ impl CategorySet {
     #[must_use]
     pub const fn default_suppressed() -> Self {
         Self(Self::oom().0 | Category::UbCheck.bit())
+    }
+
+    /// The categories that stand for code the analysis could not read.
+    ///
+    /// None of them names a panic. Each says where visibility ended: an
+    /// unreadable body, foreign code, a dynamic or pointer call, or a
+    /// generic argument a caller has yet to choose.
+    #[must_use]
+    pub const fn assumed() -> Self {
+        Self(
+            Category::Unknown.bit()
+                | Category::Foreign.bit()
+                | Category::DynCall.bit()
+                | Category::FnPointer.bit()
+                | Category::GenericBound.bit(),
+        )
     }
 
     /// A set holding exactly one category.
@@ -302,6 +336,7 @@ pub fn parse_selector(s: &str) -> Result<CategorySet, String> {
     for tok in s.split(',').map(str::trim).filter(|t| !t.is_empty()) {
         match tok {
             "oom" => set = set.union(CategorySet::oom()),
+            "assumed" => set = set.union(CategorySet::assumed()),
             "default" => {
                 set = set.union(CategorySet::default_suppressed());
             }

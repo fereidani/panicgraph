@@ -156,10 +156,12 @@ pub struct Check {
     #[arg(long, value_name = "FILE")]
     pub baseline: Option<PathBuf>,
 
-    /// Treat a function whose panics could not be classified as a failure.
+    /// Treat a function that reaches code the analysis could not read as a
+    /// failure.
     ///
-    /// An unclassified panic means the analysis could not see inside
-    /// something, not that the function is clean.
+    /// This covers every assumed category: unknown, foreign, dyn-call,
+    /// fn-pointer, and generic-bound. None of them means clean; each names
+    /// where visibility ended.
     #[arg(long)]
     pub fail_on_unknown: bool,
 }
