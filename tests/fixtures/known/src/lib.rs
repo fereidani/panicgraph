@@ -350,3 +350,22 @@ pub fn must_panic_literal(x: u32) -> u32 {
     }
     x
 }
+
+/// The frames below carry a caller's third parameter into a two parameter
+/// frame. The validity check on the zeroed instantiation must read the
+/// resolved argument as it is: instantiating it again against the inner
+/// frame asks for a parameter that frame does not have.
+pub struct Wrap<'w, T>(&'w (), std::marker::PhantomData<T>);
+
+impl<T> Wrap<'_, T> {
+    #[inline(never)]
+    fn make(&self) -> T {
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+/// Reaches `generic-bound`: whether the zeroed instantiation is valid is
+/// decided by the caller's choice of type.
+pub fn must_zeroed_chain<P, Q, T>(_p: &P, _q: &Q, w: &Wrap<'_, T>) -> T {
+    w.make()
+}

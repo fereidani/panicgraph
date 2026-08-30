@@ -663,12 +663,11 @@ impl<'tcx> Extractor<'tcx> {
         callee: Instance<'tcx>,
         requirement: ty::layout::ValidityRequirement,
     ) {
-        let Some(ty) = callee
-            .args
-            .first()
-            .and_then(|arg| arg.as_type())
-            .and_then(|ty| self.normalize(cx, ty))
-        else {
+        // The argument is read off the resolved instance, so it is already
+        // in its final form; running it through the enclosing frame again
+        // would instantiate a type that belongs to whichever caller the
+        // chain started from, whose parameters this frame does not have.
+        let Some(ty) = callee.args.first().and_then(|arg| arg.as_type()) else {
             self.unresolved(raw, at, "<validity of an unknown type>".into());
             return;
         };

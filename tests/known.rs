@@ -45,6 +45,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_dyn_speak", "dyn-call"),
     ("must_zeroed_ref", "explicit"),
     ("must_panic_literal", "explicit"),
+    ("must_zeroed_chain", "generic-bound"),
 ];
 
 /// The panics each function must *not* be reported with.
