@@ -6,7 +6,7 @@ use anyhow::Result;
 
 use crate::{
     Body, Category, CategorySet, FuncId, Graph, Solution, Terminal,
-    args::{Args, Format},
+    args::{Args, Closures, Format},
     util::Map,
     verify::{Verdict, Verdicts},
     witness,
@@ -45,8 +45,8 @@ pub fn analysis(
         Format::Human => {
             human(graph, solution, args, &findings, verdicts, out);
         }
-        Format::Json => json(graph, &findings, verdicts, out)?,
-        Format::Github => github(graph, &findings, out),
+        Format::Json => json(graph, &findings, args, verdicts, out)?,
+        Format::Github => github(graph, &findings, args, out),
         // Handled before the report is built, because it draws the tree
         // rather than the list of findings.
         #[cfg(feature = "svg")]
@@ -101,6 +101,23 @@ pub(crate) fn reportable<'a>(
     })
 }
 
+/// The name a body reports under.
+///
+/// A closure is not an addressable function of the crate's own interface,
+/// so the parent view folds it into the function it is written in. The
+/// separate view stays the default because it is the precise one: a panic
+/// contained by a catch belongs to the closure, not to its caller.
+pub(crate) fn reported_name<'a>(body: &'a Body, args: &Args) -> &'a str {
+    match args.closures {
+        Closures::Separate => &body.display,
+        Closures::Parent => body
+            .display
+            .split("::{closure")
+            .next()
+            .unwrap_or(&body.display),
+    }
+}
+
 /// Whether anything at all would be reported under these settings.
 ///
 /// The exit code is what a continuous integration run reads, so it has to
@@ -116,7 +133,8 @@ fn collect(graph: &Graph, solution: &Solution, args: &Args) -> Vec<Finding> {
     let mut by_name: Vec<(&str, Finding)> = Vec::new();
     let mut index: Map<(&str, &str), usize> = Map::default();
     for (id, body, categories) in reportable(graph, solution, args) {
-        let name = (body.krate.as_str(), body.display.as_str());
+        let display = reported_name(body, args);
+        let name = (body.krate.as_str(), display);
         if let Some(&at) = index.get(&name) {
             let finding = &mut by_name[at].1;
             finding.ids.push(id);
@@ -124,7 +142,7 @@ fn collect(graph: &Graph, solution: &Solution, args: &Args) -> Vec<Finding> {
         } else {
             index.insert(name, by_name.len());
             by_name.push((
-                body.display.as_str(),
+                display,
                 Finding {
                     ids: vec![id],
                     categories,
@@ -155,7 +173,7 @@ fn human(
     out.push('\n');
     for finding in findings {
         let body = graph.body(finding.id());
-        let _ = writeln!(out, "{}", body.display);
+        let _ = writeln!(out, "{}", reported_name(body, args));
         if let Some(loc) = &body.loc {
             let _ = writeln!(out, "    defined at {loc}");
         }
@@ -251,6 +269,7 @@ fn header(graph: &Graph, args: &Args, found: usize, out: &mut String) {
 fn json(
     graph: &Graph,
     findings: &[Finding],
+    args: &Args,
     verdicts: Option<&Verdicts>,
     out: &mut String,
 ) -> Result<()> {
@@ -259,7 +278,7 @@ fn json(
         .map(|f| {
             let body = graph.body(f.id());
             let mut item = serde_json::json!({
-                "function": body.display,
+                "function": reported_name(body, args),
                 "crate": body.krate,
                 "location": body.loc.as_ref().map(ToString::to_string),
                 "categories": f
@@ -310,7 +329,7 @@ pub(crate) fn workflow_location(loc: Option<&str>) -> String {
 
 /// Writes one workflow command per finding, which a continuous integration
 /// log turns into an annotation against the source.
-fn github(graph: &Graph, findings: &[Finding], out: &mut String) {
+fn github(graph: &Graph, findings: &[Finding], args: &Args, out: &mut String) {
     for finding in findings {
         let body = graph.body(finding.id());
         let loc = body.loc.as_ref().map(ToString::to_string);
@@ -319,7 +338,7 @@ fn github(graph: &Graph, findings: &[Finding], out: &mut String) {
             out,
             "::warning {where_at}title=Function can panic::{} can panic \
              with {}",
-            body.display,
+            reported_name(body, args),
             finding
                 .categories
                 .iter()

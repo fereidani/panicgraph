@@ -120,6 +120,15 @@ pub struct Policy {
     #[arg(long, global = true)]
     pub verify: bool,
 
+    /// How closures report: as their own functions, or folded into the
+    /// function each is written in.
+    ///
+    /// Separate is the precise view: a panic contained by a catch belongs
+    /// to the closure, and folding it upward would pin it on a caller that
+    /// cannot raise it. Parent is the compact view for triage.
+    #[arg(long, value_enum, default_value = "separate", global = true)]
+    pub closures: Closures,
+
     /// Include dependencies, not just the local crate.
     #[arg(long, global = true)]
     pub all_crates: bool,
@@ -187,6 +196,15 @@ pub struct Check {
     /// where visibility ended.
     #[arg(long)]
     pub fail_on_unknown: bool,
+}
+
+/// How closures report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Closures {
+    /// Each closure reports as its own function.
+    Separate,
+    /// A closure reports under the function it is written in.
+    Parent,
 }
 
 /// Output rendering.
@@ -261,6 +279,8 @@ pub struct Args {
     pub candidates: bool,
     /// Annotate findings with what the compiled artifact still contains.
     pub verify: bool,
+    /// How closures report.
+    pub closures: Closures,
     /// Report functions from dependencies as well as the local crate.
     pub all_crates: bool,
     /// Directory holding the crate to analyse.
@@ -304,6 +324,7 @@ impl Cli {
             static_only: self.policy.static_only,
             candidates: self.policy.candidates,
             verify: self.policy.verify,
+            closures: self.policy.closures,
             all_crates: self.policy.all_crates,
             manifest_dir: self.scope.manifest_dir,
             package: self.scope.package,

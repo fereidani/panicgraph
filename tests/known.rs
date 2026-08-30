@@ -222,3 +222,22 @@ fn a_static_panic_message_is_quoted_in_the_reason() {
         "the report should quote the message a panic carries:\n{text}"
     );
 }
+
+#[test]
+fn closures_fold_into_their_parent_on_request() {
+    let reported = analyse_fixture("release", &["--closures", "parent"]);
+    assert!(
+        reported.iter().all(|(f, _)| !f.contains("{closure")),
+        "the parent view must not name closures on their own"
+    );
+    let folded = reported
+        .iter()
+        .find(|(f, _)| f == "must_not_catch_explicit")
+        .map(|(_, c)| c.clone())
+        .unwrap_or_default();
+    assert!(
+        folded.iter().any(|c| c == "explicit"),
+        "the compact view attributes a closure's panics to the function it \
+         is written in, even the contained ones; got {folded:?}"
+    );
+}

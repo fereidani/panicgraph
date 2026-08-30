@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::{
     Category, CategorySet, Graph, Solution,
     args::{Args, Check, Format},
-    report::{reportable, workflow_location},
+    report::{reportable, reported_name, workflow_location},
     util::{Map, Set},
 };
 
@@ -203,7 +203,7 @@ fn collect(graph: &Graph, solution: &Solution, args: &Args) -> Vec<Finding> {
     let mut index: Map<(String, String), usize> = Map::default();
     for (_, body, categories) in reportable(graph, solution, args) {
         let finding = Finding {
-            function: body.display.clone(),
+            function: reported_name(body, args).to_owned(),
             krate: body.krate.clone(),
             loc: body.loc.as_ref().map(ToString::to_string),
             categories: categories
