@@ -11,9 +11,22 @@ use rustc_middle::{
 };
 
 use crate::{
+    fold,
     sinks::SinkTable,
     util::{Map, Set},
 };
+
+/// One function to analyse, together with the environment its generic
+/// arguments belong to.
+///
+/// A callee resolved from a generic caller carries that caller's parameters,
+/// so the two travel together: normalizing the callee's types demands the
+/// environment those parameters were declared in.
+#[derive(Clone, Copy)]
+struct Work<'tcx> {
+    inst: Instance<'tcx>,
+    env: TypingEnv<'tcx>,
+}
 
 /// Entries collected from one body before reachability guards are attached.
 struct Raw<'tcx> {
@@ -22,7 +35,7 @@ struct Raw<'tcx> {
     calls: Vec<CallSite>,
     call_blocks: Vec<BasicBlock>,
     unwind_edges: Vec<(UnwindOrigin, BasicBlock)>,
-    successors: Vec<Instance<'tcx>>,
+    successors: Vec<Work<'tcx>>,
 }
 
 impl Raw<'_> {
@@ -59,24 +72,24 @@ impl<'tcx> Extractor<'tcx> {
 
     /// Walks the whole reachable call graph and returns the bodies found.
     pub fn run(mut self) -> Vec<Body> {
-        let mut queue: Vec<Instance<'tcx>> = self.roots();
+        let mut queue: Vec<Work<'tcx>> = self.roots();
         // Every instance is recorded in `seen` before its callees are
         // queued, so each function is expanded at most once and the walk
         // terminates once the reachable set is exhausted.
-        while let Some(inst) = queue.pop() {
-            let Some(key) = self.symbol_of(inst) else {
+        while let Some(work) = queue.pop() {
+            let Some(key) = self.symbol_of(work.inst) else {
                 continue;
             };
             if !self.seen.insert(key.clone()) {
                 continue;
             }
-            queue.extend(self.build(inst, FuncKey(key)));
+            queue.extend(self.build(work, FuncKey(key)));
         }
         self.bodies
     }
 
     /// Every function defined in the crate under compilation.
-    fn roots(&self) -> Vec<Instance<'tcx>> {
+    fn roots(&self) -> Vec<Work<'tcx>> {
         let mut out = Vec::new();
         for local in self.tcx.mir_keys(()) {
             let did = local.to_def_id();
@@ -96,17 +109,17 @@ impl<'tcx> Extractor<'tcx> {
             // recorded honestly as an unresolved edge rather than silently
             // dropping the function from the report.
             let args = ty::GenericArgs::identity_for_item(self.tcx, did);
-            out.push(Instance::new_raw(did, args));
+            out.push(Work {
+                inst: Instance::new_raw(did, args),
+                env: TypingEnv::post_analysis(self.tcx, did),
+            });
         }
         out
     }
 
     /// Records one function and returns the callees worth expanding.
-    fn build(
-        &mut self,
-        inst: Instance<'tcx>,
-        key: FuncKey,
-    ) -> Vec<Instance<'tcx>> {
+    fn build(&mut self, work: Work<'tcx>, key: FuncKey) -> Vec<Work<'tcx>> {
+        let inst = work.inst;
         if !Self::has_mir_body(self.tcx, inst) {
             let did = inst.def_id();
             let display = self.tcx.def_path_str(did);
@@ -123,7 +136,7 @@ impl<'tcx> Extractor<'tcx> {
         }
 
         let mir = self.tcx.instance_mir(inst.def);
-        let raw = self.scan(inst, mir);
+        let raw = self.scan(work, mir);
         let origins = Self::propagate_origins(mir, &raw.unwind_edges);
 
         let mut sites = raw.sites;
@@ -151,31 +164,39 @@ impl<'tcx> Extractor<'tcx> {
 
     /// The environment types in this body must be normalized against.
     ///
-    /// A body still carrying generic parameters cannot be normalized as
-    /// though it were monomorphic; doing so asks the compiler to resolve
-    /// parameters that have no value yet.
-    fn env_for(&self, inst: Instance<'tcx>) -> TypingEnv<'tcx> {
-        if inst.args.has_param() {
-            TypingEnv::post_analysis(self.tcx, inst.def_id())
+    /// A body still carrying generic parameters has to be read in the
+    /// environment those parameters were declared in, which is the caller's,
+    /// not the callee's: a trait method resolved from a generic caller knows
+    /// only its own `Self`, so normalizing the caller's parameters there asks
+    /// the compiler about parameters it has never heard of.
+    fn env_for(work: Work<'tcx>) -> TypingEnv<'tcx> {
+        if work.inst.args.has_param() {
+            work.env
         } else {
             TypingEnv::fully_monomorphized()
         }
     }
 
     /// Reads every terminator of a body into raw entries.
-    fn scan(
-        &mut self,
-        inst: Instance<'tcx>,
-        mir: &mir::Body<'tcx>,
-    ) -> Raw<'tcx> {
-        let env = self.env_for(inst);
+    fn scan(&mut self, work: Work<'tcx>, mir: &mir::Body<'tcx>) -> Raw<'tcx> {
+        let inst = work.inst;
+        let env = Self::env_for(work);
+        let reach = fold::reachable(self.tcx, inst, env, mir);
         let mut raw = Raw::new();
         for (bb, data) in mir.basic_blocks.iter_enumerated() {
             let Some(term) = &data.terminator else {
                 continue;
             };
+            if !reach.is_live(bb) {
+                continue;
+            }
             match &term.kind {
                 TerminatorKind::Assert { msg, unwind, .. } => {
+                    if reach.is_settled(bb) {
+                        // The condition holds for these generic arguments,
+                        // so the compiler emits no check at all.
+                        continue;
+                    }
                     self.push_assert(
                         &mut raw,
                         bb,
@@ -222,6 +243,14 @@ impl<'tcx> Extractor<'tcx> {
         unwind: UnwindAction,
         span: rustc_span::Span,
     ) {
+        if !self.tcx.sess.overflow_checks() && msg.is_optional_overflow_check()
+        {
+            // Codegen drops these outright in a build without overflow
+            // checks: the arithmetic wraps instead. They survive in the MIR
+            // only because a function marked to inherit the setting is built
+            // once and used by crates that disagree about it.
+            return;
+        }
         let (category, termination, reason) = classify_assert(msg);
         let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
         raw.sites.push(PanicSite {
@@ -340,7 +369,7 @@ impl<'tcx> Extractor<'tcx> {
         let key = self.symbol_of(callee).map(FuncKey);
         self.push_edge(raw, bb, key, display, kind, unwind, span);
         if kind == EdgeKind::Static {
-            raw.successors.push(callee);
+            raw.successors.push(Work { inst: callee, env });
         }
     }
 
@@ -374,8 +403,16 @@ impl<'tcx> Extractor<'tcx> {
             );
             return;
         };
+        if !ty.needs_drop(self.tcx, env) {
+            // Nothing runs here. A reference or a struct of raw pointers has
+            // no glue whatever its parameters turn out to be, so treating
+            // the terminator as an unknown target would invent a panic that
+            // no instantiation can reach.
+            return;
+        }
         if ty.has_param() {
-            // Drop glue is only known once the dropped type is concrete.
+            // Something has to run, but which glue is only known once the
+            // dropped type is concrete.
             self.push_edge(
                 raw,
                 bb,
@@ -391,7 +428,7 @@ impl<'tcx> Extractor<'tcx> {
         let display = format!("drop glue for {ty}");
         let key = self.symbol_of(glue).map(FuncKey);
         self.push_edge(raw, bb, key, display, EdgeKind::Drop, unwind, span);
-        raw.successors.push(glue);
+        raw.successors.push(Work { inst: glue, env });
     }
 
     /// Appends a call edge and its unwind channel.

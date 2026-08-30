@@ -214,3 +214,19 @@ fn witness_is_absent_when_suppressed() {
         "a suppressed category has no witness"
     );
 }
+
+#[test]
+fn an_exact_name_wins_over_a_longer_one_that_contains_it() {
+    // `why` explains the first match, so a search for a function must not
+    // land on the closure defined inside it.
+    let graph = Graph::from_artifacts(vec![artifact(vec![
+        BodyBuilder::new("fold::{closure#0}").build(),
+        BodyBuilder::new("outer::fold::inner").build(),
+        BodyBuilder::new("fold").build(),
+    ])]);
+
+    let matches = graph.find_by_display("fold");
+
+    assert_eq!(matches.len(), 3);
+    assert_eq!(graph.body(matches[0]).display, "fold");
+}

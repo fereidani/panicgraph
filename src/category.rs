@@ -71,8 +71,8 @@ pub enum Category {
     MisalignedRef = 14,
     /// A panic whose origin the analysis could not classify.
     Unknown = 15,
-    /// A standard library precondition check, present only when the library
-    /// itself was built with undefined behaviour checks enabled.
+    /// A standard library precondition check, present only in a build that
+    /// has undefined behaviour checks turned on.
     UbCheck = 16,
 }
 
@@ -196,9 +196,9 @@ impl CategorySet {
     /// The categories suppressed unless the user asks otherwise.
     ///
     /// Allocation failures are hidden because every growable collection
-    /// reaches them, and precondition checks because they only exist in a
-    /// standard library built with undefined behaviour checks enabled, so
-    /// reporting them describes a build the user is not shipping.
+    /// reaches them. Precondition checks are hidden because a build that
+    /// leaves them on is a debug build, and a report about one describes
+    /// something the user is not shipping.
     #[must_use]
     pub const fn default_suppressed() -> Self {
         Self(Self::oom().0 | Category::UbCheck.bit())

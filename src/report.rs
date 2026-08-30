@@ -7,13 +7,24 @@ use anyhow::Result;
 use crate::{
     Category, CategorySet, FuncId, Graph, Solution, Terminal,
     args::{Args, Format},
+    util::Map,
     witness,
 };
 
 /// One reported function.
 struct Finding {
-    id: FuncId,
+    /// Every node that renders under this name. A generic function has one
+    /// per instantiation, and they share a source location, so reporting
+    /// them separately would print the same line several times.
+    ids: Vec<FuncId>,
     categories: CategorySet,
+}
+
+impl Finding {
+    /// The node the report describes the function through.
+    fn id(&self) -> FuncId {
+        self.ids.first().copied().unwrap_or(FuncId(0))
+    }
 }
 
 /// Renders the result of an analysis.
@@ -40,24 +51,39 @@ pub fn analysis(
     Ok(())
 }
 
-/// Selects the functions worth reporting.
+/// Selects the functions worth reporting, one entry per name.
 fn collect(graph: &Graph, solution: &Solution, args: &Args) -> Vec<Finding> {
-    let mut findings: Vec<Finding> = graph
-        .iter()
-        .filter(|(_, body)| args.all_crates || body.local)
-        .filter(|(_, body)| !body.opaque)
-        .filter_map(|(id, _)| {
-            let mut categories = solution.enabled(id);
-            if let Some(only) = args.only {
-                categories = categories.intersection(only);
-            }
-            (!categories.is_empty()).then_some(Finding { id, categories })
-        })
-        .collect();
-    findings.sort_by(|a, b| {
-        graph.body(a.id).display.cmp(&graph.body(b.id).display)
-    });
-    findings
+    let mut by_name: Vec<(&str, Finding)> = Vec::new();
+    let mut index: Map<(&str, &str), usize> = Map::default();
+    for (id, body) in graph.iter() {
+        if body.opaque || !(args.all_crates || body.local) {
+            continue;
+        }
+        let mut categories = solution.enabled(id);
+        if let Some(only) = args.only {
+            categories = categories.intersection(only);
+        }
+        if categories.is_empty() {
+            continue;
+        }
+        let name = (body.krate.as_str(), body.display.as_str());
+        if let Some(&at) = index.get(&name) {
+            let finding = &mut by_name[at].1;
+            finding.ids.push(id);
+            finding.categories = finding.categories.union(categories);
+        } else {
+            index.insert(name, by_name.len());
+            by_name.push((
+                body.display.as_str(),
+                Finding {
+                    ids: vec![id],
+                    categories,
+                },
+            ));
+        }
+    }
+    by_name.sort_by(|a, b| a.0.cmp(b.0));
+    by_name.into_iter().map(|(_, f)| f).collect()
 }
 
 /// Writes the human readable report.
@@ -77,25 +103,16 @@ fn human(
 
     out.push('\n');
     for finding in findings {
-        let body = graph.body(finding.id);
+        let body = graph.body(finding.id());
         let _ = writeln!(out, "{}", body.display);
         if let Some(loc) = &body.loc {
             let _ = writeln!(out, "    defined at {loc}");
         }
-        let activity = solution.activity(graph, finding.id);
         for category in finding.categories.iter() {
-            let direct = body
-                .sites
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| {
-                    activity.sites.get(*i).copied().unwrap_or(false)
-                })
-                .find(|(_, s)| s.category == category);
-            match direct {
-                Some((_, site)) => {
-                    let _ = write!(out, "    {category:<18} {}", site.reason);
-                    if let Some(loc) = &site.loc {
+            match direct_site(graph, solution, finding, category) {
+                Some(site) => {
+                    let _ = write!(out, "    {category:<18} {}", site.0);
+                    if let Some(loc) = site.1 {
                         let _ = write!(out, " at {loc}");
                     }
                     out.push('\n');
@@ -113,6 +130,32 @@ fn human(
 
     let _ =
         writeln!(out, "Run `panicgraph why <function>` to see a call path.");
+}
+
+/// The reason and place of a panic this function raises itself.
+///
+/// Returns nothing when the category is only reached through a call.
+fn direct_site<'a>(
+    graph: &'a Graph,
+    solution: &Solution,
+    finding: &Finding,
+    category: Category,
+) -> Option<(&'a str, Option<String>)> {
+    for &id in &finding.ids {
+        let body = graph.body(id);
+        let activity = solution.activity(graph, id);
+        let hit = body.sites.iter().enumerate().find(|(i, site)| {
+            site.category == category
+                && activity.sites.get(*i).copied().unwrap_or(false)
+        });
+        if let Some((_, site)) = hit {
+            return Some((
+                site.reason.as_str(),
+                site.loc.as_ref().map(ToString::to_string),
+            ));
+        }
+    }
+    None
 }
 
 /// Writes the analysis preamble.
@@ -149,7 +192,7 @@ fn json(graph: &Graph, findings: &[Finding], out: &mut String) -> Result<()> {
     let items: Vec<serde_json::Value> = findings
         .iter()
         .map(|f| {
-            let body = graph.body(f.id);
+            let body = graph.body(f.id());
             serde_json::json!({
                 "function": body.display,
                 "crate": body.krate,
@@ -175,7 +218,7 @@ fn json(graph: &Graph, findings: &[Finding], out: &mut String) -> Result<()> {
 /// log turns into an annotation against the source.
 fn github(graph: &Graph, findings: &[Finding], out: &mut String) {
     for finding in findings {
-        let body = graph.body(finding.id);
+        let body = graph.body(finding.id());
         let where_at = body
             .loc
             .as_ref()
@@ -210,15 +253,28 @@ pub fn why(graph: &Graph, solution: &Solution, name: &str, out: &mut String) {
         let _ = writeln!(out, "No function matching `{name}` was analysed.");
         return;
     };
+    let body = graph.body(id);
     if matches.len() > 1 {
-        let _ = writeln!(
-            out,
-            "`{name}` matched {} functions; explaining the first.\n",
-            matches.len()
-        );
+        let same = matches
+            .iter()
+            .filter(|&&other| graph.body(other).display == body.display)
+            .count();
+        if same == matches.len() {
+            let _ = writeln!(
+                out,
+                "`{name}` names {same} instantiations of the same function; \
+                 explaining one.\n"
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "`{name}` matched {} functions; explaining `{}`.\n",
+                matches.len(),
+                body.display
+            );
+        }
     }
 
-    let body = graph.body(id);
     let categories = solution.enabled(id);
     if categories.is_empty() {
         let _ =

@@ -39,7 +39,7 @@ pub fn collect(args: &Args) -> Result<Vec<Artifact>> {
         None => env::current_dir()
             .context("could not determine the current directory")?,
     };
-    let layout = prepare(&root, args)?;
+    let layout = prepare(&root, &driver, args)?;
 
     build(args, &driver, &root, &layout)?;
     let mut artifacts = load(&layout.out)?;
@@ -120,7 +120,7 @@ const SLOT_MARKER: &str = ".panicgraph-slot";
 /// Artifacts are deliberately kept between runs. Each is named after the
 /// crate that produced it, so cargo rewrites exactly the ones it recompiles
 /// and the rest stay valid.
-fn prepare(root: &Path, args: &Args) -> Result<Layout> {
+fn prepare(root: &Path, driver: &Path, args: &Args) -> Result<Layout> {
     // Artifacts are kept between runs, so the directory has to separate
     // every input that changes what they describe. The standard library mode
     // changes how crates are compiled and so changes their symbol names, and
@@ -137,14 +137,57 @@ fn prepare(root: &Path, args: &Args) -> Result<Layout> {
         out: base.join(&slot),
         target: base.join("build"),
     };
+    let marker = format!("{slot}\n{}\n", driver_stamp(driver));
+    discard_if_stale(&layout, &marker)?;
     fs::create_dir_all(&layout.out).with_context(|| {
         format!("could not create {}", layout.out.display())
     })?;
-    fs::write(layout.out.join(SLOT_MARKER), slot.as_bytes()).with_context(
+    fs::write(layout.out.join(SLOT_MARKER), marker.as_bytes()).with_context(
         || format!("could not write the marker in {}", layout.out.display()),
     )?;
     prune_stale(&base, &layout);
     Ok(layout)
+}
+
+/// Identifies the build of the driver that produced a set of artifacts.
+///
+/// Cargo does not rebuild a crate because the wrapper changed, so results
+/// written by an earlier driver would be read back as though the current one
+/// had produced them. Size and modification time distinguish the two without
+/// reading the whole binary.
+fn driver_stamp(driver: &Path) -> String {
+    let Ok(meta) = fs::metadata(driver) else {
+        return "unknown".to_owned();
+    };
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    format!("{}-{modified}", meta.len())
+}
+
+/// Throws away results a different driver wrote.
+///
+/// Both directories go: the artifacts because they describe an analysis this
+/// driver did not perform, and the build tree because cargo would otherwise
+/// consider every crate current and never run the wrapper again.
+fn discard_if_stale(layout: &Layout, marker: &str) -> Result<()> {
+    let path = layout.out.join(SLOT_MARKER);
+    if !layout.out.exists() {
+        return Ok(());
+    }
+    if fs::read_to_string(&path).is_ok_and(|found| found == marker) {
+        return Ok(());
+    }
+    for dir in [&layout.out, &layout.target] {
+        if dir.exists() {
+            fs::remove_dir_all(dir).with_context(|| {
+                format!("could not clear {}", dir.display())
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// Removes result directories that no version in use writes to any more.

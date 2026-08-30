@@ -14,6 +14,7 @@ extern crate rustc_session;
 extern crate rustc_span;
 
 mod extract;
+mod fold;
 mod sinks;
 mod util;
 

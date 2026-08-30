@@ -238,3 +238,22 @@ fn a_missing_baseline_says_how_to_make_one() {
         "the message should name the command that writes one, got: {text}"
     );
 }
+
+#[test]
+fn instantiations_of_one_function_report_once() {
+    // A generic function has a node per instantiation, and they all render
+    // under the same name. Reporting each would print the same line several
+    // times and count one function repeatedly against a ceiling.
+    let mut first = body("shared", Some(Category::Index));
+    first.key = FuncKey("shared::<0>".to_owned());
+    let mut second = body("shared", Some(Category::Unwrap));
+    second.key = FuncKey("shared::<1>".to_owned());
+
+    let result = outcome(vec![first, second], &[]);
+
+    assert_eq!(result.findings.len(), 1);
+    let finding = &result.findings[0];
+    assert_eq!(finding.function, "shared");
+    // Both instantiations contribute, in the order the taxonomy declares.
+    assert_eq!(finding.categories, vec!["index", "unwrap"]);
+}

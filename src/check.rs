@@ -11,7 +11,7 @@ use regex::RegexSet;
 use serde_json::{Value, json};
 
 use crate::{
-    Category, FuncId, Graph, Solution,
+    Category, CategorySet, FuncId, Graph, Solution,
     args::{Args, Check, Format},
     util::Map,
 };
@@ -172,15 +172,47 @@ fn is_new(known: &Map<String, Vec<String>>, finding: &Finding) -> bool {
 }
 
 /// Every local function that can panic under the solved policy.
+///
+/// A generic function has one node per instantiation and they all report
+/// under the same name, so they are merged: the gate asks whether a function
+/// can panic, and it can if any of its instantiations can.
 fn collect(graph: &Graph, solution: &Solution, args: &Args) -> Vec<Finding> {
-    let mut findings: Vec<Finding> = graph
-        .iter()
-        .filter(|(_, body)| args.all_crates || body.local)
-        .filter(|(_, body)| !body.opaque)
-        .filter_map(|(id, _)| build(graph, solution, args, id))
-        .collect();
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut index: Map<(String, String), usize> = Map::default();
+    for (id, body) in graph.iter() {
+        if body.opaque || !(args.all_crates || body.local) {
+            continue;
+        }
+        let Some(finding) = build(graph, solution, args, id) else {
+            continue;
+        };
+        let name = (finding.krate.clone(), finding.function.clone());
+        if let Some(&at) = index.get(&name) {
+            merge(&mut findings[at], finding);
+        } else {
+            index.insert(name, findings.len());
+            findings.push(finding);
+        }
+    }
     findings.sort_by(|a, b| a.function.cmp(&b.function));
     findings
+}
+
+/// Folds a second instantiation of the same function into the first.
+///
+/// Categories stay in the order the taxonomy declares them, which is the
+/// order every other report uses.
+fn merge(into: &mut Finding, other: Finding) {
+    let mut set = CategorySet::EMPTY;
+    for name in into.categories.iter().chain(&other.categories) {
+        if let Ok(category) = name.parse::<Category>() {
+            set.insert(category);
+        }
+    }
+    into.categories = set.iter().map(|c| c.name().to_owned()).collect();
+    if into.loc.is_none() {
+        into.loc = other.loc;
+    }
 }
 
 /// Turns one function into a finding, when it has anything to report.

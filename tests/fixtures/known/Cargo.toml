@@ -1,0 +1,8 @@
+# Declared so the enclosing workspace does not absorb the fixture.
+[workspace]
+
+[package]
+name = "known"
+version = "0.0.0"
+edition = "2024"
+publish = false

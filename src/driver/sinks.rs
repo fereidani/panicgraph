@@ -6,8 +6,8 @@
 //! unwrap_failed` once `std` is in the crate graph.
 
 use panicgraph::{Category, Termination};
-use rustc_hir::def_id::DefId;
-use rustc_middle::ty::TyCtxt;
+use rustc_hir::{def::DefKind, def_id::DefId};
+use rustc_middle::{middle::codegen_fn_attrs::CodegenFnAttrFlags, ty::TyCtxt};
 
 use crate::util::Map;
 
@@ -184,7 +184,57 @@ impl SinkTable {
             return Some(unwind(Category::Explicit));
         }
 
-        Self::by_leaf_name(path.rsplit("::").next().unwrap_or(&path))
+        if let Some(sink) =
+            Self::by_leaf_name(path.rsplit("::").next().unwrap_or(&path))
+        {
+            return Some(sink);
+        }
+
+        Self::opaque_divergence(tcx, did, krate)
+    }
+
+    /// Classifies a core library function that cannot return and cannot be
+    /// read.
+    ///
+    /// The cold helper a container calls to report a failed check is neither
+    /// generic nor inlinable, so the shipped library keeps no body for it and
+    /// the analysis would otherwise call the panic inside `copy_from_slice`
+    /// unclassified. Nothing in `core` or `alloc` diverges except by
+    /// panicking, so the signature alone settles it. The rule is confined to
+    /// those two crates because `std` also owns `exit` and `abort`, which
+    /// diverge without raising anything.
+    fn opaque_divergence(
+        tcx: TyCtxt<'_>,
+        did: DefId,
+        krate: &str,
+    ) -> Option<Sink> {
+        if !matches!(krate, "core" | "alloc") {
+            return None;
+        }
+        if !matches!(tcx.def_kind(did), DefKind::Fn | DefKind::AssocFn) {
+            return None;
+        }
+        if tcx.is_mir_available(did) {
+            return None;
+        }
+        if !tcx
+            .fn_sig(did)
+            .skip_binder()
+            .skip_binder()
+            .output()
+            .is_never()
+        {
+            return None;
+        }
+        let aborts = tcx
+            .codegen_fn_attrs(did)
+            .flags
+            .contains(CodegenFnAttrFlags::NEVER_UNWIND);
+        Some(if aborts {
+            abort(Category::Explicit)
+        } else {
+            unwind(Category::Explicit)
+        })
     }
 
     /// Matches conventional names used by allocation aware containers.

@@ -163,12 +163,25 @@ impl Graph {
     /// Finds functions whose display path contains `needle`.
     ///
     /// Used to turn a user supplied name into an index without requiring the
-    /// full mangled symbol.
+    /// full mangled symbol. The closest match comes first: a path equal to
+    /// the needle beats one that merely contains it, and a shorter path beats
+    /// a longer one, so asking about `parse` explains `parse` rather than the
+    /// closure inside it.
     #[must_use]
     pub fn find_by_display(&self, needle: &str) -> Vec<FuncId> {
-        self.iter()
+        let mut out: Vec<FuncId> = self
+            .iter()
             .filter(|(_, b)| b.display.contains(needle))
             .map(|(id, _)| id)
-            .collect()
+            .collect();
+        out.sort_by(|a, b| {
+            let (a, b) = (&self.bodies[a.index()], &self.bodies[b.index()]);
+            (a.display != needle, a.display.len(), &a.display).cmp(&(
+                b.display != needle,
+                b.display.len(),
+                &b.display,
+            ))
+        });
+        out
     }
 }

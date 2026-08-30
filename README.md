@@ -232,6 +232,15 @@ panic categories it can raise, unioned from everything it calls. Drop glue is
 followed. Suppression removes categories before that propagation runs, and
 cleanup paths are gated on the panic that unwinds into them.
 
+Checks that are not in the build are not reported. The standard library ships
+one copy of its MIR for every crate that uses it, so a body can carry an
+overflow check or a precondition check that the crate being analysed compiles
+away, and a check written against `size_of::<T>()` is still a branch there
+even though it settles to a constant for every real `T`. Each body is folded
+against the arguments it was reached with and the settings of the build in
+front of it, the way codegen resolves them, so a branch neither can take is
+not walked.
+
 The driver injects `-Zalways-encode-mir`. Without it, a dependency keeps MIR
 only for generic and small items, so its concrete functions are opaque and
 the panics inside them cannot be seen.
@@ -251,7 +260,8 @@ Read these before trusting a clean result.
   candidates. `--static-only` drops those edges instead.
 - **This is a may-panic analysis.** A panic that is unreachable for reasons
   the compiler cannot see is still reported. It answers "could this panic",
-  not "will it".
+  not "will it". Folding settles a check against constants, and nothing more:
+  a bound that holds because of what the caller passes is still reported.
 - **The toolchain is pinned.** The driver links against compiler internals,
   which have no stable interface, so it is built for one nightly at a time.
 
