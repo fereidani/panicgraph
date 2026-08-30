@@ -75,9 +75,11 @@ pub struct Scope {
     pub profile: String,
 
     /// How the standard library is supplied.
-    #[arg(long = "std", value_enum, default_value_t = Std::Shipped,
-        global = true)]
-    pub std_mode: Std,
+    ///
+    /// Defaults to the shipped library, and to `full` for `check` and
+    /// `baseline`, which read the categories rather than the count.
+    #[arg(long = "std", value_enum, global = true)]
+    pub std_mode: Option<Std>,
 }
 
 /// What the analysis is allowed to assume.
@@ -173,6 +175,21 @@ pub enum Format {
     Svg,
 }
 
+/// The standard library a command reads when the user does not name one.
+///
+/// A gate is read by its category names, not its count, and the shipped
+/// library hides them: a reachable `unwrap` inside it reports as `unknown`.
+/// Rebuilding costs one sub-minute build that later runs reuse, so `check`
+/// and `baseline` pay it. They also have to agree with each other, since a
+/// baseline written against one library disagrees with a check run against
+/// the other about every function.
+const fn default_std(command: &Command) -> StdMode {
+    match command {
+        Command::Check(_) | Command::Baseline { .. } => StdMode::Full,
+        _ => StdMode::Shipped,
+    }
+}
+
 /// How the standard library is supplied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Std {
@@ -236,12 +253,17 @@ impl Cli {
             Some(text) => Some(selector(&text)?),
             None => None,
         };
+        let command = self.command.unwrap_or(Command::Analyze);
+        let std_mode = self
+            .scope
+            .std_mode
+            .map_or_else(|| default_std(&command), StdMode::from);
         Ok(Args {
-            command: self.command.unwrap_or(Command::Analyze),
+            command,
             suppress: selector(&self.policy.suppress)?,
             only,
             profile: self.scope.profile,
-            std_mode: self.scope.std_mode.into(),
+            std_mode,
             format: self.format,
             static_only: self.policy.static_only,
             all_crates: self.policy.all_crates,

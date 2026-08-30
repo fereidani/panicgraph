@@ -76,6 +76,19 @@ fn flags_needing_values_are_checked() {
 }
 
 #[test]
+fn a_gate_reads_the_full_standard_library_by_default() {
+    // A gate is read by its category names, and the shipped library hides
+    // them. The baseline has to agree with the check that compares to it.
+    for argv in [vec!["check"], vec!["baseline", "out.json"]] {
+        let args = parse(&argv).expect("the command should parse");
+        assert_eq!(args.std_mode, StdMode::Full, "for {argv:?}");
+    }
+    let args = parse(&["check", "--std", "shipped"])
+        .expect("the default should be overridable");
+    assert_eq!(args.std_mode, StdMode::Shipped);
+}
+
+#[test]
 fn std_mode_is_selectable() {
     let args = parse(&["--std", "full"]).expect("full is a valid mode");
     assert_eq!(args.std_mode, StdMode::Full);

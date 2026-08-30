@@ -253,7 +253,11 @@ Read these before trusting a clean result.
 - **The default standard library is partly opaque.** Concrete functions in
   `std` ship without MIR, so panics inside them are reported as `unknown`
   rather than proven absent. `--std full` rebuilds it from source with its
-  bodies kept, which costs a one time rebuild and removes the blind spot.
+  bodies kept, which costs one build that later runs reuse. `check` and
+  `baseline` do this by default, because a gate is read by its category
+  names: with the shipped library a reachable `unwrap` reports as `unknown`.
+  It does not remove `unknown`, it names it, so expect the same functions
+  reported with sharper reasons.
 - **`unknown` is not `clean`.** It means the analysis could not see inside
   something. `check --fail-on-unknown` refuses to treat the two alike.
 - **Dynamic dispatch is not resolved.** A `dyn Trait` or function pointer
