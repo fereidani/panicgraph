@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use anyhow::Result;
 
 use crate::{
-    Category, CategorySet, FuncId, Graph, Solution, Terminal,
+    Body, Category, CategorySet, FuncId, Graph, Solution, Terminal,
     args::{Args, Format},
     util::Map,
     witness,
@@ -51,21 +51,32 @@ pub fn analysis(
     Ok(())
 }
 
+/// Every function worth reporting, with the categories it reports under.
+///
+/// The report and the gate have to agree about this, since a baseline one
+/// writes is what the other measures against, so both read it from here.
+pub(crate) fn reportable<'a>(
+    graph: &'a Graph,
+    solution: &'a Solution,
+    args: &'a Args,
+) -> impl Iterator<Item = (FuncId, &'a Body, CategorySet)> {
+    graph.iter().filter_map(move |(id, body)| {
+        if body.opaque || !(args.all_crates || body.local) {
+            return None;
+        }
+        let categories = args.only.map_or_else(
+            || solution.enabled(id),
+            |only| solution.enabled(id).intersection(only),
+        );
+        (!categories.is_empty()).then_some((id, body, categories))
+    })
+}
+
 /// Selects the functions worth reporting, one entry per name.
 fn collect(graph: &Graph, solution: &Solution, args: &Args) -> Vec<Finding> {
     let mut by_name: Vec<(&str, Finding)> = Vec::new();
     let mut index: Map<(&str, &str), usize> = Map::default();
-    for (id, body) in graph.iter() {
-        if body.opaque || !(args.all_crates || body.local) {
-            continue;
-        }
-        let mut categories = solution.enabled(id);
-        if let Some(only) = args.only {
-            categories = categories.intersection(only);
-        }
-        if categories.is_empty() {
-            continue;
-        }
+    for (id, body, categories) in reportable(graph, solution, args) {
         let name = (body.krate.as_str(), body.display.as_str());
         if let Some(&at) = index.get(&name) {
             let finding = &mut by_name[at].1;
@@ -144,10 +155,10 @@ fn direct_site<'a>(
     for &id in &finding.ids {
         let body = graph.body(id);
         let activity = solution.activity(graph, id);
-        let hit = body.sites.iter().enumerate().find(|(i, site)| {
-            site.category == category
-                && activity.sites.get(*i).copied().unwrap_or(false)
-        });
+        let hit =
+            body.sites.iter().enumerate().find(|(i, site)| {
+                site.category == category && activity.site(*i)
+            });
         if let Some((_, site)) = hit {
             return Some((
                 site.reason.as_str(),
@@ -214,23 +225,26 @@ fn json(graph: &Graph, findings: &[Finding], out: &mut String) -> Result<()> {
     Ok(())
 }
 
+/// Splits a `file:line:col` location into the fields a workflow command
+/// wants, or nothing at all when there is no location to name.
+pub(crate) fn workflow_location(loc: Option<&str>) -> String {
+    fn split(loc: &str) -> Option<String> {
+        let mut parts = loc.rsplitn(3, ':');
+        let col = parts.next()?;
+        let line = parts.next()?;
+        let file = parts.next()?;
+        Some(format!("file={file},line={line},col={col},"))
+    }
+    loc.and_then(split).unwrap_or_default()
+}
+
 /// Writes one workflow command per finding, which a continuous integration
 /// log turns into an annotation against the source.
 fn github(graph: &Graph, findings: &[Finding], out: &mut String) {
     for finding in findings {
         let body = graph.body(finding.id());
-        let where_at = body
-            .loc
-            .as_ref()
-            .map(ToString::to_string)
-            .and_then(|loc| {
-                let mut parts = loc.rsplitn(3, ':');
-                let col = parts.next()?;
-                let line = parts.next()?;
-                let file = parts.next()?;
-                Some(format!("file={file},line={line},col={col},"))
-            })
-            .unwrap_or_default();
+        let loc = body.loc.as_ref().map(ToString::to_string);
+        let where_at = workflow_location(loc.as_deref());
         let _ = writeln!(
             out,
             "::warning {where_at}title=Function can panic::{} can panic \

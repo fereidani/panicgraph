@@ -1,53 +1,20 @@
 //! The gate a continuous integration run applies.
 
+mod support;
+
 use std::path::PathBuf;
 
 use panicgraph::{
-    Artifact, Body, BuildConfig, Category, FuncKey, Graph, PanicSite, Policy,
-    Solver, StdMode, Termination,
+    Body, Category, FuncKey, Policy, Solver,
     args::{self, Args, Check, Command},
     check,
-    model::Guard,
 };
+
+use crate::support::{BodyBuilder, graph};
 
 /// A function that panics with one category, or one that does not.
 fn body(name: &str, category: Option<Category>) -> Body {
-    Body {
-        key: FuncKey(name.to_owned()),
-        display: name.to_owned(),
-        krate: "test".to_owned(),
-        loc: None,
-        sites: category
-            .map(|category| PanicSite {
-                category,
-                termination: Termination::Unwind,
-                reason: format!("{category} panic"),
-                sink: None,
-                loc: None,
-                guard: Guard::always(),
-            })
-            .into_iter()
-            .collect(),
-        calls: Vec::new(),
-        opaque: false,
-        foreign: false,
-        local: true,
-    }
-}
-
-/// Builds a graph from the given functions.
-fn graph(bodies: Vec<Body>) -> Graph {
-    Graph::from_artifacts(vec![Artifact {
-        krate: "test".to_owned(),
-        config: BuildConfig {
-            rustc: "test".to_owned(),
-            profile: "release".to_owned(),
-            debug_assertions: false,
-            overflow_checks: false,
-            std_mode: StdMode::Shipped,
-        },
-        bodies,
-    }])
+    BodyBuilder::new(name).maybe_panics(category).build()
 }
 
 /// Parses a check invocation into the settings and its gate.

@@ -11,9 +11,10 @@ use regex::RegexSet;
 use serde_json::{Value, json};
 
 use crate::{
-    Category, CategorySet, FuncId, Graph, Solution,
+    Category, CategorySet, Graph, Solution,
     args::{Args, Check, Format},
-    util::Map,
+    report::{reportable, workflow_location},
+    util::{Map, Set},
 };
 
 /// The format version written into a baseline.
@@ -139,14 +140,14 @@ pub fn run(
     }
 
     if let Some(known) = &baseline {
-        let live: Vec<&str> = outcome
+        let live: Set<&str> = outcome
             .findings
             .iter()
             .map(|f| f.function.as_str())
             .collect();
         outcome.fixed = known
             .keys()
-            .filter(|name| !live.contains(&name.as_str()))
+            .filter(|name| !live.contains(name.as_str()))
             .cloned()
             .collect();
         outcome.fixed.sort();
@@ -179,12 +180,15 @@ fn is_new(known: &Map<String, Vec<String>>, finding: &Finding) -> bool {
 fn collect(graph: &Graph, solution: &Solution, args: &Args) -> Vec<Finding> {
     let mut findings: Vec<Finding> = Vec::new();
     let mut index: Map<(String, String), usize> = Map::default();
-    for (id, body) in graph.iter() {
-        if body.opaque || !(args.all_crates || body.local) {
-            continue;
-        }
-        let Some(finding) = build(graph, solution, args, id) else {
-            continue;
+    for (_, body, categories) in reportable(graph, solution, args) {
+        let finding = Finding {
+            function: body.display.clone(),
+            krate: body.krate.clone(),
+            loc: body.loc.as_ref().map(ToString::to_string),
+            categories: categories
+                .iter()
+                .map(|c| c.name().to_owned())
+                .collect(),
         };
         let name = (finding.krate.clone(), finding.function.clone());
         if let Some(&at) = index.get(&name) {
@@ -213,29 +217,6 @@ fn merge(into: &mut Finding, other: Finding) {
     if into.loc.is_none() {
         into.loc = other.loc;
     }
-}
-
-/// Turns one function into a finding, when it has anything to report.
-fn build(
-    graph: &Graph,
-    solution: &Solution,
-    args: &Args,
-    id: FuncId,
-) -> Option<Finding> {
-    let mut categories = solution.enabled(id);
-    if let Some(only) = args.only {
-        categories = categories.intersection(only);
-    }
-    if categories.is_empty() {
-        return None;
-    }
-    let body = graph.body(id);
-    Some(Finding {
-        function: body.display.clone(),
-        krate: body.krate.clone(),
-        loc: body.loc.as_ref().map(ToString::to_string),
-        categories: categories.iter().map(|c| c.name().to_owned()).collect(),
-    })
 }
 
 /// Compiles a set of patterns, naming the flag when one is unusable.
@@ -350,6 +331,11 @@ pub fn render(
     Ok(())
 }
 
+/// The suffix that makes a count read as English.
+const fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
 /// Writes the human readable verdict.
 fn human(outcome: &Outcome, check: &Check, out: &mut String) {
     if !outcome.violations.is_empty() {
@@ -357,11 +343,7 @@ fn human(outcome: &Outcome, check: &Check, out: &mut String) {
             out,
             "{} function{} must not panic and can:\n",
             outcome.violations.len(),
-            if outcome.violations.len() == 1 {
-                ""
-            } else {
-                "s"
-            }
+            plural(outcome.violations.len())
         );
         for violation in &outcome.violations {
             let _ = writeln!(out, "{}", violation.finding.function);
@@ -420,13 +402,13 @@ fn human(outcome: &Outcome, check: &Check, out: &mut String) {
             out,
             "No panic that the baseline does not already record. {total} \
              function{} can panic.",
-            if total == 1 { "" } else { "s" }
+            plural(total)
         );
     } else if let Some(max) = check.max {
         let _ = writeln!(
             out,
             "{total} function{} can panic, within the {max} allowed.",
-            if total == 1 { "" } else { "s" }
+            plural(total)
         );
     } else if check.forbid.is_empty() {
         let _ = writeln!(out, "No function can panic under this policy.");
@@ -442,12 +424,7 @@ fn human(outcome: &Outcome, check: &Check, out: &mut String) {
 /// Writes workflow commands a continuous integration log will annotate.
 fn github(outcome: &Outcome, out: &mut String) {
     for violation in &outcome.violations {
-        let where_at = violation
-            .finding
-            .loc
-            .as_deref()
-            .and_then(location)
-            .unwrap_or_default();
+        let where_at = workflow_location(violation.finding.loc.as_deref());
         let _ = writeln!(
             out,
             "::error {where_at}title=Function can panic::{} can panic with \
@@ -470,13 +447,4 @@ fn github(outcome: &Outcome, out: &mut String) {
             "::notice title=Baseline is stale::{name} no longer panics"
         );
     }
-}
-
-/// Splits `file:line:col` into the fields a workflow command wants.
-fn location(loc: &str) -> Option<String> {
-    let mut parts = loc.rsplitn(3, ':');
-    let col = parts.next()?;
-    let line = parts.next()?;
-    let file = parts.next()?;
-    Some(format!("file={file},line={line},col={col},"))
 }

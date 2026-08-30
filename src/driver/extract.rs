@@ -3,6 +3,7 @@
 use panicgraph::{
     Body, CallSite, Category, EdgeKind, FuncKey, Guard, Loc, PanicSite,
     Termination, UnwindOrigin,
+    util::{Map, Set},
 };
 use rustc_middle::{
     middle::codegen_fn_attrs::CodegenFnAttrFlags,
@@ -10,11 +11,7 @@ use rustc_middle::{
     ty::{self, Instance, TyCtxt, TypeVisitableExt, TypingEnv},
 };
 
-use crate::{
-    fold,
-    sinks::SinkTable,
-    util::{Map, Set},
-};
+use crate::{fold, sinks::SinkTable};
 
 /// One function to analyse, together with the environment its generic
 /// arguments belong to.
@@ -26,6 +23,27 @@ use crate::{
 struct Work<'tcx> {
     inst: Instance<'tcx>,
     env: TypingEnv<'tcx>,
+}
+
+/// Where a terminator sits, and where unwinding out of it lands.
+///
+/// The three travel together from the moment a terminator is read until the
+/// entry it produces is recorded, so they are carried as one value.
+#[derive(Clone, Copy)]
+struct At {
+    bb: BasicBlock,
+    unwind: UnwindAction,
+    span: rustc_span::Span,
+}
+
+impl At {
+    const fn new(
+        bb: BasicBlock,
+        unwind: UnwindAction,
+        span: rustc_span::Span,
+    ) -> Self {
+        Self { bb, unwind, span }
+    }
 }
 
 /// Entries collected from one body before reachability guards are attached.
@@ -184,9 +202,11 @@ impl<'tcx> Extractor<'tcx> {
 
     /// Reads every terminator of a body into raw entries.
     fn scan(&mut self, work: Work<'tcx>, mir: &mir::Body<'tcx>) -> Raw<'tcx> {
-        let inst = work.inst;
-        let env = Self::env_for(work);
-        let reach = fold::reachable(self.tcx, inst, env, mir);
+        let cx = Work {
+            inst: work.inst,
+            env: Self::env_for(work),
+        };
+        let reach = fold::reachable(self.tcx, cx.inst, cx.env, mir);
         let mut raw = Raw::new();
         for (bb, data) in mir.basic_blocks.iter_enumerated() {
             let Some(term) = &data.terminator else {
@@ -195,6 +215,7 @@ impl<'tcx> Extractor<'tcx> {
             if !reach.is_live(bb) {
                 continue;
             }
+            let span = term.source_info.span;
             match &term.kind {
                 TerminatorKind::Assert { msg, unwind, .. } => {
                     if reach.is_settled(bb) {
@@ -202,13 +223,8 @@ impl<'tcx> Extractor<'tcx> {
                         // so the compiler emits no check at all.
                         continue;
                     }
-                    self.push_assert(
-                        &mut raw,
-                        bb,
-                        msg,
-                        *unwind,
-                        term.source_info.span,
-                    );
+                    let at = At::new(bb, *unwind, span);
+                    self.push_assert(&mut raw, at, msg);
                 }
                 TerminatorKind::Call {
                     func,
@@ -216,22 +232,14 @@ impl<'tcx> Extractor<'tcx> {
                     fn_span,
                     ..
                 } => {
+                    let at = At::new(bb, *unwind, *fn_span);
                     let ty = func.ty(&mir.local_decls, self.tcx);
-                    self.push_call(
-                        &mut raw, inst, env, bb, ty, *unwind, *fn_span,
-                    );
+                    self.push_call(&mut raw, cx, at, ty);
                 }
                 TerminatorKind::Drop { place, unwind, .. } => {
+                    let at = At::new(bb, *unwind, span);
                     let ty = place.ty(&mir.local_decls, self.tcx).ty;
-                    self.push_drop(
-                        &mut raw,
-                        inst,
-                        env,
-                        bb,
-                        ty,
-                        *unwind,
-                        term.source_info.span,
-                    );
+                    self.push_drop(&mut raw, cx, at, ty);
                 }
                 _ => {}
             }
@@ -240,14 +248,7 @@ impl<'tcx> Extractor<'tcx> {
     }
 
     /// Records a compiler inserted check as a panic site.
-    fn push_assert<O>(
-        &self,
-        raw: &mut Raw<'tcx>,
-        bb: BasicBlock,
-        msg: &AssertKind<O>,
-        unwind: UnwindAction,
-        span: rustc_span::Span,
-    ) {
+    fn push_assert<O>(&self, raw: &mut Raw<'tcx>, at: At, msg: &AssertKind<O>) {
         if !self.tcx.sess.overflow_checks() && msg.is_optional_overflow_check()
         {
             // Codegen drops these outright in a build without overflow
@@ -263,77 +264,38 @@ impl<'tcx> Extractor<'tcx> {
             termination,
             reason: reason.to_owned(),
             sink: None,
-            loc: self.loc_of(span),
+            loc: self.loc_of(at.span),
             guard: Guard::default(),
         });
-        raw.site_blocks.push(bb);
-        Self::record_unwind(raw, UnwindOrigin::Site(index), unwind);
+        raw.site_blocks.push(at.bb);
+        Self::record_unwind(raw, UnwindOrigin::Site(index), at.unwind);
     }
 
     /// Records a call, either as a panic site or as a graph edge.
-    #[allow(clippy::too_many_arguments)]
     fn push_call(
         &mut self,
         raw: &mut Raw<'tcx>,
-        inst: Instance<'tcx>,
-        env: TypingEnv<'tcx>,
-        bb: BasicBlock,
+        cx: Work<'tcx>,
+        at: At,
         ty: ty::Ty<'tcx>,
-        unwind: UnwindAction,
-        span: rustc_span::Span,
     ) {
-        let Ok(ty) = inst.try_instantiate_mir_and_normalize_erasing_regions(
-            self.tcx,
-            env,
-            ty::EarlyBinder::bind(self.tcx, ty),
-        ) else {
-            self.push_edge(
-                raw,
-                bb,
-                None,
-                "<unresolved>".to_owned(),
-                EdgeKind::Unresolved,
-                unwind,
-                span,
-            );
+        let Some(ty) = self.normalize(cx, ty) else {
+            self.unresolved(raw, at, "<unresolved>".to_owned());
             return;
         };
         let ty::FnDef(did, args) = *ty.kind() else {
             // A call through a function pointer. The target set is unknown.
-            self.push_edge(
-                raw,
-                bb,
-                None,
-                "<fn pointer>".to_owned(),
-                EdgeKind::FnPtr,
-                unwind,
-                span,
-            );
+            let name = "<fn pointer>".to_owned();
+            self.push_edge(raw, at, None, name, EdgeKind::FnPtr);
             return;
         };
         let Some(args) = args.no_bound_vars() else {
-            self.push_edge(
-                raw,
-                bb,
-                None,
-                self.tcx.def_path_str(did),
-                EdgeKind::Unresolved,
-                unwind,
-                span,
-            );
+            self.unresolved(raw, at, self.tcx.def_path_str(did));
             return;
         };
-        let resolved = Instance::try_resolve(self.tcx, env, did, args);
+        let resolved = Instance::try_resolve(self.tcx, cx.env, did, args);
         let Ok(Some(callee)) = resolved else {
-            self.push_edge(
-                raw,
-                bb,
-                None,
-                self.tcx.def_path_str(did),
-                EdgeKind::Unresolved,
-                unwind,
-                span,
-            );
+            self.unresolved(raw, at, self.tcx.def_path_str(did));
             return;
         };
 
@@ -347,11 +309,11 @@ impl<'tcx> Extractor<'tcx> {
                     self.tcx.def_path_str(callee.def_id())
                 ),
                 sink: Some(self.tcx.def_path_str(callee.def_id())),
-                loc: self.loc_of(span),
+                loc: self.loc_of(at.span),
                 guard: Guard::default(),
             });
-            raw.site_blocks.push(bb);
-            Self::record_unwind(raw, UnwindOrigin::Site(index), unwind);
+            raw.site_blocks.push(at.bb);
+            Self::record_unwind(raw, UnwindOrigin::Site(index), at.unwind);
             return;
         }
 
@@ -372,43 +334,28 @@ impl<'tcx> Extractor<'tcx> {
         };
         let display = self.tcx.def_path_str(callee.def_id());
         let key = self.symbol_of(callee).map(FuncKey);
-        self.push_edge(raw, bb, key, display, kind, unwind, span);
+        self.push_edge(raw, at, key, display, kind);
         if kind == EdgeKind::Static {
-            raw.successors.push(Work { inst: callee, env });
+            raw.successors.push(Work {
+                inst: callee,
+                env: cx.env,
+            });
         }
     }
 
     /// Records the drop glue reached by a `Drop` terminator.
-    #[allow(clippy::too_many_arguments)]
     fn push_drop(
         &self,
         raw: &mut Raw<'tcx>,
-        inst: Instance<'tcx>,
-        env: TypingEnv<'tcx>,
-        bb: BasicBlock,
+        cx: Work<'tcx>,
+        at: At,
         ty: ty::Ty<'tcx>,
-        unwind: UnwindAction,
-        span: rustc_span::Span,
     ) {
-        let normalized = inst
-            .try_instantiate_mir_and_normalize_erasing_regions(
-                self.tcx,
-                env,
-                ty::EarlyBinder::bind(self.tcx, ty),
-            );
-        let Ok(ty) = normalized else {
-            self.push_edge(
-                raw,
-                bb,
-                None,
-                "<unresolved drop>".to_owned(),
-                EdgeKind::Unresolved,
-                unwind,
-                span,
-            );
+        let Some(ty) = self.normalize(cx, ty) else {
+            self.unresolved(raw, at, "<unresolved drop>".to_owned());
             return;
         };
-        if !ty.needs_drop(self.tcx, env) {
+        if !ty.needs_drop(self.tcx, cx.env) {
             // Nothing runs here. A reference or a struct of raw pointers has
             // no glue whatever its parameters turn out to be, so treating
             // the terminator as an unknown target would invent a panic that
@@ -418,46 +365,59 @@ impl<'tcx> Extractor<'tcx> {
         if ty.has_param() {
             // Something has to run, but which glue is only known once the
             // dropped type is concrete.
-            self.push_edge(
-                raw,
-                bb,
-                None,
-                format!("drop glue for {ty}"),
-                EdgeKind::Unresolved,
-                unwind,
-                span,
-            );
+            self.unresolved(raw, at, format!("drop glue for {ty}"));
             return;
         }
         let glue = Instance::resolve_drop_glue(self.tcx, ty);
         let display = format!("drop glue for {ty}");
         let key = self.symbol_of(glue).map(FuncKey);
-        self.push_edge(raw, bb, key, display, EdgeKind::Drop, unwind, span);
-        raw.successors.push(Work { inst: glue, env });
+        self.push_edge(raw, at, key, display, EdgeKind::Drop);
+        raw.successors.push(Work {
+            inst: glue,
+            env: cx.env,
+        });
+    }
+
+    /// Resolves a type written in a body against the arguments it was
+    /// reached with.
+    fn normalize(
+        &self,
+        cx: Work<'tcx>,
+        ty: ty::Ty<'tcx>,
+    ) -> Option<ty::Ty<'tcx>> {
+        cx.inst
+            .try_instantiate_mir_and_normalize_erasing_regions(
+                self.tcx,
+                cx.env,
+                ty::EarlyBinder::bind(self.tcx, ty),
+            )
+            .ok()
+    }
+
+    /// Appends an edge to a target the analysis could not pin down.
+    fn unresolved(&self, raw: &mut Raw<'tcx>, at: At, display: String) {
+        self.push_edge(raw, at, None, display, EdgeKind::Unresolved);
     }
 
     /// Appends a call edge and its unwind channel.
-    #[allow(clippy::too_many_arguments)]
     fn push_edge(
         &self,
         raw: &mut Raw<'tcx>,
-        bb: BasicBlock,
+        at: At,
         callee: Option<FuncKey>,
         callee_display: String,
         kind: EdgeKind,
-        unwind: UnwindAction,
-        span: rustc_span::Span,
     ) {
         let index = u32::try_from(raw.calls.len()).unwrap_or(u32::MAX);
         raw.calls.push(CallSite {
             callee,
             callee_display,
             kind,
-            loc: self.loc_of(span),
+            loc: self.loc_of(at.span),
             guard: Guard::default(),
         });
-        raw.call_blocks.push(bb);
-        Self::record_unwind(raw, UnwindOrigin::Call(index), unwind);
+        raw.call_blocks.push(at.bb);
+        Self::record_unwind(raw, UnwindOrigin::Call(index), at.unwind);
     }
 
     /// Notes that unwinding from `origin` transfers control to a cleanup
@@ -566,49 +526,42 @@ impl<'tcx> Extractor<'tcx> {
 const fn classify_assert<O>(
     msg: &AssertKind<O>,
 ) -> (Category, Termination, &'static str) {
+    use Termination::{Abort, Unwind};
     match msg {
         AssertKind::BoundsCheck { .. } => {
-            (Category::Index, Termination::Unwind, "index out of bounds")
+            (Category::Index, Unwind, "index out of bounds")
         }
-        AssertKind::Overflow(..) => (
-            Category::Overflow,
-            Termination::Unwind,
-            "arithmetic overflow",
-        ),
+        AssertKind::Overflow(..) => {
+            (Category::Overflow, Unwind, "arithmetic overflow")
+        }
         AssertKind::OverflowNeg(_) => {
-            (Category::Overflow, Termination::Unwind, "negation overflow")
+            (Category::Overflow, Unwind, "negation overflow")
         }
-        AssertKind::DivisionByZero(_) => (
-            Category::DivideByZero,
-            Termination::Unwind,
-            "attempt to divide by zero",
-        ),
+        AssertKind::DivisionByZero(_) => {
+            (Category::DivideByZero, Unwind, "attempt to divide by zero")
+        }
         AssertKind::RemainderByZero(_) => (
             Category::RemainderByZero,
-            Termination::Unwind,
+            Unwind,
             "attempt to take remainder by zero",
         ),
         AssertKind::MisalignedPointerDereference { .. } => (
             Category::MisalignedRef,
-            Termination::Abort,
+            Abort,
             "misaligned pointer dereference",
         ),
         AssertKind::NullPointerDereference
-        | AssertKind::NullReferenceConstructed => (
-            Category::NullDeref,
-            Termination::Abort,
-            "null pointer dereference",
-        ),
-        AssertKind::InvalidEnumConstruction(_) => (
-            Category::Explicit,
-            Termination::Abort,
-            "invalid enum construction",
-        ),
+        | AssertKind::NullReferenceConstructed => {
+            (Category::NullDeref, Abort, "null pointer dereference")
+        }
+        AssertKind::InvalidEnumConstruction(_) => {
+            (Category::Explicit, Abort, "invalid enum construction")
+        }
         AssertKind::ResumedAfterReturn(_)
         | AssertKind::ResumedAfterPanic(_)
         | AssertKind::ResumedAfterDrop(_) => (
             Category::Explicit,
-            Termination::Unwind,
+            Unwind,
             "coroutine resumed after completion",
         ),
     }

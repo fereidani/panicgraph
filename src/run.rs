@@ -55,11 +55,7 @@ pub fn collect(args: &Args) -> Result<Vec<Artifact>> {
         // Cargo recompiles nothing when the build is already current, so the
         // wrapper never runs and records nothing. Discarding the analysis
         // build is the only way to observe a crate that is already cached.
-        if layout.target.exists() {
-            fs::remove_dir_all(&layout.target).with_context(|| {
-                format!("could not clear {}", layout.target.display())
-            })?;
-        }
+        clear(&layout.target)?;
         build(args, &driver, &root, &layout)?;
         artifacts = load(&layout.out)?;
     }
@@ -92,12 +88,7 @@ fn check_toolchain() -> Result<()> {
 
 /// The compiler's version, as `rustc --version` prints it.
 fn rustc_version() -> Result<Option<String>> {
-    let out = rustc()
-        .arg("--version")
-        .output()
-        .context("could not run rustc")?;
-    let text =
-        String::from_utf8(out.stdout).context("rustc printed invalid utf-8")?;
+    let text = rustc_output(&["--version"])?;
     let line = text.lines().next().unwrap_or_default().trim().to_owned();
     Ok((!line.is_empty()).then_some(line))
 }
@@ -219,14 +210,17 @@ fn discard_if_stale(layout: &Layout, marker: &str) -> Result<()> {
     if fs::read_to_string(&path).is_ok_and(|found| found == marker) {
         return Ok(());
     }
-    for dir in [&layout.out, &layout.target] {
-        if dir.exists() {
-            fs::remove_dir_all(dir).with_context(|| {
-                format!("could not clear {}", dir.display())
-            })?;
-        }
+    clear(&layout.out)?;
+    clear(&layout.target)
+}
+
+/// Removes a directory and everything under it, if it is there at all.
+fn clear(dir: &Path) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
     }
-    Ok(())
+    fs::remove_dir_all(dir)
+        .with_context(|| format!("could not clear {}", dir.display()))
 }
 
 /// Removes result directories that no version in use writes to any more.
@@ -308,13 +302,7 @@ fn library_path() -> Result<Option<OsString>> {
 
 /// The compiler's sysroot.
 fn sysroot() -> Result<Option<String>> {
-    let out = rustc()
-        .arg("--print")
-        .arg("sysroot")
-        .output()
-        .context("could not run rustc")?;
-    let text =
-        String::from_utf8(out.stdout).context("rustc printed invalid utf-8")?;
+    let text = rustc_output(&["--print", "sysroot"])?;
     let text = text.trim();
     Ok((!text.is_empty()).then(|| text.to_owned()))
 }
@@ -326,27 +314,21 @@ fn host_triple() -> Result<String> {
 
 /// Reads one labelled field from `rustc --version --verbose`.
 fn rustc_field(label: &str) -> Result<Option<String>> {
-    let out = rustc()
-        .arg("--version")
-        .arg("--verbose")
-        .output()
-        .context("could not run rustc")?;
-    let text =
-        String::from_utf8(out.stdout).context("rustc printed invalid utf-8")?;
-    Ok(text
+    Ok(rustc_output(&["--version", "--verbose"])?
         .lines()
         .find_map(|l| l.strip_prefix(label))
         .map(str::trim)
         .map(str::to_owned))
 }
 
-/// A compiler invocation pinned to this tool's toolchain.
-fn rustc() -> Command {
+/// Runs the compiler pinned to this tool's toolchain and returns its output.
+fn rustc_output(args: &[&str]) -> Result<String> {
     let mut cmd = Command::new("rustc");
     if let Some(toolchain) = TOOLCHAIN {
         cmd.env("RUSTUP_TOOLCHAIN", toolchain);
     }
-    cmd
+    let out = cmd.args(args).output().context("could not run rustc")?;
+    String::from_utf8(out.stdout).context("rustc printed invalid utf-8")
 }
 
 /// Maps a profile name onto the one cargo expects.

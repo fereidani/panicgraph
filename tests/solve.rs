@@ -6,14 +6,14 @@ use panicgraph::{
     Category, CategorySet, FuncKey, Graph, Policy, Solver, witness,
 };
 
-use crate::support::{BodyBuilder, artifact};
+use crate::support::{BodyBuilder, graph as build};
 
 /// Solves a set of bodies under one suppression policy.
 fn solve(
     bodies: Vec<panicgraph::Body>,
     suppressed: CategorySet,
 ) -> (Graph, panicgraph::Solution) {
-    let graph = Graph::from_artifacts(vec![artifact(bodies)]);
+    let graph = build(bodies);
     let policy = Policy {
         suppressed,
         follow_inexact: true,
@@ -219,11 +219,11 @@ fn witness_is_absent_when_suppressed() {
 fn an_exact_name_wins_over_a_longer_one_that_contains_it() {
     // `why` explains the first match, so a search for a function must not
     // land on the closure defined inside it.
-    let graph = Graph::from_artifacts(vec![artifact(vec![
+    let graph = build(vec![
         BodyBuilder::new("fold::{closure#0}").build(),
         BodyBuilder::new("outer::fold::inner").build(),
         BodyBuilder::new("fold").build(),
-    ])]);
+    ]);
 
     let matches = graph.find_by_display("fold");
 

@@ -3,6 +3,8 @@
 //! One [`Artifact`] is produced per compiled crate. The command line tool
 //! merges every artifact of a build into a single [`Graph`](crate::Graph).
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::category::{Category, Termination};
@@ -18,8 +20,8 @@ pub struct Loc {
     pub col: u32,
 }
 
-impl std::fmt::Display for Loc {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Loc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}:{}", self.file, self.line, self.col)
     }
 }
@@ -33,8 +35,8 @@ impl std::fmt::Display for Loc {
 )]
 pub struct FuncKey(pub String);
 
-impl std::fmt::Display for FuncKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for FuncKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
@@ -180,6 +182,19 @@ pub struct Body {
 }
 
 impl Body {
+    /// The category a body the analysis could not read raises.
+    ///
+    /// Foreign code is named apart from an opaque Rust function: it has no
+    /// Rust body to read and no fuller standard library would produce one.
+    #[must_use]
+    pub const fn unreadable(&self) -> Category {
+        if self.foreign {
+            Category::Foreign
+        } else {
+            Category::Unknown
+        }
+    }
+
     /// Creates an opaque record for a function whose MIR was unavailable.
     #[must_use]
     pub const fn opaque(key: FuncKey, display: String, krate: String) -> Self {

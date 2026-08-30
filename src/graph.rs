@@ -19,6 +19,15 @@ impl FuncId {
     pub const fn index(self) -> usize {
         self.0 as usize
     }
+
+    /// A dense index turned into an identifier.
+    ///
+    /// A graph that large cannot be built in the first place, so clamping is
+    /// only here to keep the conversion total.
+    #[must_use]
+    pub fn from_index(index: usize) -> Self {
+        Self(u32::try_from(index).unwrap_or(u32::MAX))
+    }
 }
 
 /// A merged, indexed call graph.
@@ -70,7 +79,7 @@ impl Graph {
             }
             return;
         }
-        let id = FuncId(u32::try_from(self.bodies.len()).unwrap_or(u32::MAX));
+        let id = FuncId::from_index(self.bodies.len());
         self.by_key.insert(body.key.clone(), id);
         self.bodies.push(body);
     }
@@ -102,7 +111,7 @@ impl Graph {
     fn build_reverse_edges(&mut self) {
         self.callers = vec![Vec::new(); self.bodies.len()];
         for (i, body) in self.bodies.iter().enumerate() {
-            let caller = FuncId(u32::try_from(i).unwrap_or(u32::MAX));
+            let caller = FuncId::from_index(i);
             for call in &body.calls {
                 let Some(key) = &call.callee else { continue };
                 let Some(&target) = self.by_key.get(key) else {
@@ -139,7 +148,7 @@ impl Graph {
         self.bodies
             .iter()
             .enumerate()
-            .map(|(i, b)| (FuncId(u32::try_from(i).unwrap_or(u32::MAX)), b))
+            .map(|(i, b)| (FuncId::from_index(i), b))
     }
 
     /// Looks a function up by key.

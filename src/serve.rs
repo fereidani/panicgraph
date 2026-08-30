@@ -26,6 +26,8 @@ const MAX_HEADER_LINES: usize = 100;
 /// deflate block cost more than the saving.
 const COMPRESS_ABOVE: usize = 900;
 
+/// Content type used for the page shell.
+const HTML: &str = "text/html; charset=utf-8";
 /// Content type used for every script this server returns.
 const JS: &str = "application/javascript; charset=utf-8";
 /// Content type used for every JSON response.
@@ -65,20 +67,10 @@ impl Responder<'_> {
     fn send(&self, status: u16, content_type: &str, body: &[u8]) -> Result<()> {
         let compressed = self.maybe_compress(body)?;
         let payload = compressed.as_deref().unwrap_or(body);
-        self.write_head(
-            status,
-            content_type,
-            payload.len(),
-            compressed.is_some(),
-        )?;
-        let mut stream = self.stream;
-        stream.write_all(payload)?;
-        stream.flush()?;
-        Ok(())
+        self.write(status, content_type, payload, compressed.is_some())
     }
 
-    /// Writes a response whose compressed form is already known, so a static
-    /// asset is not deflated again on every page load.
+    /// Writes a response whose compressed form is already known.
     fn send_cached(
         &self,
         content_type: &str,
@@ -87,11 +79,7 @@ impl Responder<'_> {
     ) -> Result<()> {
         let use_packed = self.gzip && packed.len() < plain.len();
         let payload = if use_packed { packed } else { plain };
-        self.write_head(200, content_type, payload.len(), use_packed)?;
-        let mut stream = self.stream;
-        stream.write_all(payload)?;
-        stream.flush()?;
-        Ok(())
+        self.write(200, content_type, payload, use_packed)
     }
 
     /// Compresses a body, or returns `None` when it is not worth it.
@@ -103,12 +91,12 @@ impl Responder<'_> {
         Ok((packed.len() < body.len()).then_some(packed))
     }
 
-    /// Writes the status line and headers.
-    fn write_head(
+    /// Writes the status line, the headers, and the body as it stands.
+    fn write(
         &self,
         status: u16,
         content_type: &str,
-        length: usize,
+        payload: &[u8],
         compressed: bool,
     ) -> Result<()> {
         let reason = if status == 200 { "OK" } else { "Error" };
@@ -120,15 +108,31 @@ impl Responder<'_> {
         let head = format!(
             "HTTP/1.1 {status} {reason}\r\n\
              Content-Type: {content_type}\r\n\
-             Content-Length: {length}\r\n\
+             Content-Length: {}\r\n\
              {encoding}\
              Vary: Accept-Encoding\r\n\
              Cache-Control: no-store\r\n\
-             Connection: close\r\n\r\n"
+             Connection: close\r\n\r\n",
+            payload.len()
         );
         let mut stream = self.stream;
         stream.write_all(head.as_bytes())?;
+        stream.write_all(payload)?;
+        stream.flush()?;
         Ok(())
+    }
+
+    /// Writes one embedded asset, deflating it at most once per process so
+    /// a static file is not compressed again on every page load.
+    fn asset(
+        &self,
+        content_type: &str,
+        cell: &'static OnceLock<Vec<u8>>,
+        text: &str,
+    ) -> Result<()> {
+        let packed =
+            cell.get_or_init(|| gzip(text.as_bytes()).unwrap_or_default());
+        self.send_cached(content_type, text.as_bytes(), packed)
     }
 
     /// Writes a JSON response.
@@ -161,11 +165,6 @@ fn gzip(body: &[u8]) -> Result<Vec<u8>> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(body)?;
     Ok(encoder.finish()?)
-}
-
-/// The compressed form of one embedded asset, deflated at most once.
-fn packed(cell: &'static OnceLock<Vec<u8>>, plain: &str) -> &'static [u8] {
-    cell.get_or_init(|| gzip(plain.as_bytes()).unwrap_or_default())
 }
 
 /// Serves the interactive view until the process is stopped.
@@ -246,20 +245,10 @@ fn route(
     static INDEX: OnceLock<Vec<u8>> = OnceLock::new();
 
     match path {
-        "/" | "/index.html" => out.send_cached(
-            "text/html; charset=utf-8",
-            INDEX_HTML.as_bytes(),
-            packed(&INDEX, INDEX_HTML),
-        ),
-        "/app.js" => {
-            out.send_cached(JS, APP_JS.as_bytes(), packed(&APP, APP_JS))
-        }
-        "/d3.min.js" => {
-            out.send_cached(JS, D3_JS.as_bytes(), packed(&D3, D3_JS))
-        }
-        "/vue.global.prod.js" => {
-            out.send_cached(JS, VUE_JS.as_bytes(), packed(&VUE, VUE_JS))
-        }
+        "/" | "/index.html" => out.asset(HTML, &INDEX, INDEX_HTML),
+        "/app.js" => out.asset(JS, &APP, APP_JS),
+        "/d3.min.js" => out.asset(JS, &D3, D3_JS),
+        "/vue.global.prod.js" => out.asset(JS, &VUE, VUE_JS),
         "/api/graph" => out.json(&api::graph(&state.graph)),
         "/api/solve" => out.result(api::solve(
             &state.graph,

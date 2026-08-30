@@ -1,8 +1,12 @@
-//! Builders for the small graphs the solver tests run on.
+//! Builders for the small graphs these tests run on.
+//!
+//! Every test binary compiles this module on its own, so a builder only some
+//! of them reach for is not dead code in the usual sense.
+#![allow(dead_code)]
 
 use panicgraph::{
-    Artifact, Body, BuildConfig, CallSite, Category, EdgeKind, FuncKey, Guard,
-    PanicSite, StdMode, Termination, UnwindOrigin,
+    Artifact, Body, BuildConfig, CallSite, Category, EdgeKind, FuncKey, Graph,
+    Guard, PanicSite, StdMode, Termination, UnwindOrigin,
 };
 
 /// Builds a function body one piece at a time.
@@ -33,23 +37,23 @@ impl BodyBuilder {
         self.body.sites.push(site(
             category,
             Termination::Unwind,
-            Guard {
-                normal: true,
-                origins: Vec::new(),
-            },
+            Guard::always(),
         ));
         self
     }
 
+    /// Adds a panic only when one is named, which is how a test asks for a
+    /// function that cannot panic.
+    pub fn maybe_panics(self, category: Option<Category>) -> Self {
+        match category {
+            Some(category) => self.panics(category),
+            None => self,
+        }
+    }
+
     /// Adds a call on the ordinary control flow path.
     pub fn calls(mut self, callee: &str) -> Self {
-        self.body.calls.push(call(
-            callee,
-            Guard {
-                normal: true,
-                origins: Vec::new(),
-            },
-        ));
+        self.body.calls.push(call(callee, Guard::always()));
         self
     }
 
@@ -98,9 +102,9 @@ fn call(callee: &str, guard: Guard) -> CallSite {
     }
 }
 
-/// Wraps bodies into the single artifact a graph is built from.
-pub fn artifact(bodies: Vec<Body>) -> Artifact {
-    Artifact {
+/// Builds the graph a set of bodies makes, as one crate's artifact.
+pub fn graph(bodies: Vec<Body>) -> Graph {
+    Graph::from_artifacts(vec![Artifact {
         krate: "test".to_owned(),
         config: BuildConfig {
             rustc: "test".to_owned(),
@@ -110,5 +114,5 @@ pub fn artifact(bodies: Vec<Body>) -> Artifact {
             std_mode: StdMode::Shipped,
         },
         bodies,
-    }
+    }])
 }

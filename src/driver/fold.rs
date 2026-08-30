@@ -270,6 +270,12 @@ struct Folder<'a, 'tcx> {
 }
 
 impl<'tcx> Folder<'_, 'tcx> {
+    /// Whether a pointer could be aimed at a local, so its value is never
+    /// assumed. A local the walk has never heard of is treated as escaping.
+    fn escapes(&self, local: mir::Local) -> bool {
+        self.escaped.get(local.as_usize()).copied().unwrap_or(true)
+    }
+
     /// Runs the walk to a fixpoint.
     fn run(&self) -> Reach {
         let blocks = self.mir.basic_blocks.len();
@@ -345,13 +351,7 @@ impl<'tcx> Folder<'_, 'tcx> {
             mir::StatementKind::Assign(pair) => {
                 let (place, rvalue) = &**pair;
                 match place.as_local() {
-                    Some(local)
-                        if !self
-                            .escaped
-                            .get(local.as_usize())
-                            .copied()
-                            .unwrap_or(true) =>
-                    {
+                    Some(local) if !self.escapes(local) => {
                         let value = self.rvalue(state, rvalue);
                         if let Some(slot) = state.get_mut(local.as_usize()) {
                             *slot = value;
@@ -526,7 +526,7 @@ impl<'tcx> Folder<'_, 'tcx> {
             return None;
         };
         let read = place.as_local()?;
-        if self.escaped.get(read.as_usize()).copied().unwrap_or(true) {
+        if self.escapes(read) {
             return None;
         }
         let ty =
@@ -566,7 +566,7 @@ impl<'tcx> Folder<'_, 'tcx> {
             _ => return None,
         };
         let (local, against) = self.compared(&operands.0, &operands.1)?;
-        if self.escaped.get(local.as_usize()).copied().unwrap_or(true) {
+        if self.escapes(local) {
             return None;
         }
         let after = &block.statements[at.saturating_add(1)..];

@@ -5,11 +5,9 @@
 //! reliable: `core::option::unwrap_failed` prints as `std::option::
 //! unwrap_failed` once `std` is in the crate graph.
 
-use panicgraph::{Category, Termination};
+use panicgraph::{Category, Termination, util::Map};
 use rustc_hir::{def::DefKind, def_id::DefId};
 use rustc_middle::{middle::codegen_fn_attrs::CodegenFnAttrFlags, ty::TyCtxt};
-
-use crate::util::Map;
 
 /// A panic entry point and how it terminates.
 #[derive(Debug, Clone, Copy)]
@@ -34,114 +32,76 @@ const fn abort(category: Category) -> Sink {
     }
 }
 
-/// Entry points identified by crate name and def path.
+/// Entry points identified by crate name and def path, grouped by the sink
+/// each one stands for.
 ///
 /// Names drift between compiler releases, so several historical spellings are
 /// listed. An entry that no longer exists simply never matches.
-const EXACT: &[(&str, &str, Sink)] = &[
-    ("core", "panicking::panic", unwind(Category::Explicit)),
-    ("core", "panicking::panic_fmt", unwind(Category::Explicit)),
-    ("core", "panicking::panic_str", unwind(Category::Explicit)),
+const EXACT: &[(Sink, &[(&str, &str)])] = &[
     (
-        "core",
-        "panicking::panic_explicit",
         unwind(Category::Explicit),
+        &[
+            ("core", "panicking::panic"),
+            ("core", "panicking::panic_fmt"),
+            ("core", "panicking::panic_str"),
+            ("core", "panicking::panic_explicit"),
+            ("core", "panicking::panic_display"),
+            ("core", "panicking::assert_failed_inner"),
+        ],
     ),
     (
-        "core",
-        "panicking::panic_display",
-        unwind(Category::Explicit),
-    ),
-    (
-        "core",
-        "panicking::assert_failed_inner",
-        unwind(Category::Explicit),
-    ),
-    (
-        "core",
-        "panicking::panic_nounwind",
         abort(Category::Explicit),
+        &[
+            ("core", "panicking::panic_nounwind"),
+            ("core", "panicking::panic_nounwind_fmt"),
+            ("core", "panicking::panic_cannot_unwind"),
+        ],
     ),
     (
-        "core",
-        "panicking::panic_nounwind_fmt",
-        abort(Category::Explicit),
-    ),
-    (
-        "core",
-        "panicking::panic_cannot_unwind",
-        abort(Category::Explicit),
-    ),
-    (
-        "core",
-        "panicking::panic_bounds_check",
         unwind(Category::Index),
-    ),
-    ("core", "option::unwrap_failed", unwind(Category::Unwrap)),
-    ("core", "option::expect_failed", unwind(Category::Unwrap)),
-    ("core", "result::unwrap_failed", unwind(Category::Unwrap)),
-    (
-        "core",
-        "slice::index::slice_index_fail",
-        unwind(Category::Index),
-    ),
-    (
-        "core",
-        "slice::index::slice_start_index_len_fail",
-        unwind(Category::Index),
+        &[
+            ("core", "panicking::panic_bounds_check"),
+            ("core", "slice::index::slice_index_fail"),
+            ("core", "slice::index::slice_start_index_len_fail"),
+            ("core", "slice::index::slice_end_index_len_fail"),
+            ("core", "slice::index::slice_index_order_fail"),
+        ],
     ),
     (
-        "core",
-        "slice::index::slice_end_index_len_fail",
-        unwind(Category::Index),
+        unwind(Category::Unwrap),
+        &[
+            ("core", "option::unwrap_failed"),
+            ("core", "option::expect_failed"),
+            ("core", "result::unwrap_failed"),
+        ],
     ),
     (
-        "core",
-        "slice::index::slice_index_order_fail",
-        unwind(Category::Index),
-    ),
-    (
-        "core",
-        "str::slice_error_fail",
         unwind(Category::StrBoundary),
+        &[("core", "str::slice_error_fail")],
     ),
     (
-        "core",
-        "cell::panic_already_borrowed",
         unwind(Category::Borrow),
+        &[
+            ("core", "cell::panic_already_borrowed"),
+            ("core", "cell::panic_already_mutably_borrowed"),
+        ],
     ),
     (
-        "core",
-        "cell::panic_already_mutably_borrowed",
-        unwind(Category::Borrow),
-    ),
-    (
-        "alloc",
-        "raw_vec::capacity_overflow",
         unwind(Category::CapacityOverflow),
+        &[
+            ("alloc", "raw_vec::capacity_overflow"),
+            ("alloc", "raw_vec::handle_error"),
+            ("alloc", "raw_vec::handle_reserve"),
+        ],
     ),
     (
-        "alloc",
-        "raw_vec::handle_error",
-        unwind(Category::CapacityOverflow),
-    ),
-    (
-        "alloc",
-        "raw_vec::handle_reserve",
-        unwind(Category::CapacityOverflow),
-    ),
-    (
-        "alloc",
-        "alloc::handle_alloc_error",
         abort(Category::AllocFailure),
-    ),
-    (
-        "std",
-        "alloc::handle_alloc_error",
-        abort(Category::AllocFailure),
+        &[
+            ("alloc", "alloc::handle_alloc_error"),
+            ("std", "alloc::handle_alloc_error"),
+        ],
     ),
 ];
-
 /// Resolves panic entry points and caches the answer per `DefId`.
 pub struct SinkTable {
     cache: Map<DefId, Option<Sink>>,
@@ -173,8 +133,8 @@ impl SinkTable {
         let krate = krate.as_str();
         let path = Self::def_path(tcx, did);
 
-        for (k, p, sink) in EXACT {
-            if *k == krate && *p == path {
+        for (sink, entries) in EXACT {
+            if entries.iter().any(|(k, p)| *k == krate && *p == path) {
                 return Some(*sink);
             }
         }

@@ -132,7 +132,10 @@ pub enum Command {
 }
 
 /// The gates a check applies.
-#[derive(Debug, Clone, Group)]
+///
+/// The default gates nothing, which is what `baseline` wants: it records the
+/// findings rather than judging them.
+#[derive(Debug, Clone, Default, Group)]
 pub struct Check {
     /// Functions matching this pattern must not panic. May be repeated.
     #[arg(long, value_name = "REGEX")]
@@ -291,12 +294,12 @@ where
 }
 
 /// Resolves a `PORT` or `HOST:PORT` listen argument.
-#[cfg(feature = "serve")]
 ///
 /// # Errors
 ///
 /// Returns an error if the argument is neither a port number nor an address
 /// that resolves.
+#[cfg(feature = "serve")]
 fn listen_addr(text: &str) -> Result<SocketAddr> {
     if let Ok(port) = text.parse::<u16>() {
         return Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));

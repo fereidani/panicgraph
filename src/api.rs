@@ -7,10 +7,11 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
-    Category, CategorySet, FuncId, Graph, Solution, Solver, Terminal,
+    Body, Category, CategorySet, FuncId, Graph, Solution, Solver, Terminal,
     category::ALL,
     solve::Policy,
     util::{Map, Set},
@@ -34,8 +35,8 @@ pub fn graph(graph: &Graph) -> Value {
                 "loc": body.loc.as_ref().map(ToString::to_string),
                 "local": body.local,
                 "opaque": body.opaque,
-                "sites": sites(graph, id),
-                "calls": calls(graph, id),
+                "sites": sites(body),
+                "calls": calls(graph, body),
             })
         })
         .collect();
@@ -51,10 +52,8 @@ pub fn graph(graph: &Graph) -> Value {
 }
 
 /// The panic sites of one function.
-fn sites(graph: &Graph, id: FuncId) -> Vec<Value> {
-    graph
-        .body(id)
-        .sites
+fn sites(body: &Body) -> Vec<Value> {
+    body.sites
         .iter()
         .map(|s| {
             json!({
@@ -70,10 +69,8 @@ fn sites(graph: &Graph, id: FuncId) -> Vec<Value> {
 }
 
 /// The outgoing edges of one function.
-fn calls(graph: &Graph, id: FuncId) -> Vec<Value> {
-    graph
-        .body(id)
-        .calls
+fn calls(graph: &Graph, body: &Body) -> Vec<Value> {
+    body.calls
         .iter()
         .map(|c| {
             let to = c.callee.as_ref().and_then(|k| graph.id_of(k));
@@ -88,6 +85,22 @@ fn calls(graph: &Graph, id: FuncId) -> Vec<Value> {
         .collect()
 }
 
+/// Solves the graph under the policy a request describes.
+fn solved(
+    g: &Graph,
+    suppressed: CategorySet,
+    follow_inexact: bool,
+) -> Result<Solution> {
+    Solver::new(
+        g,
+        Policy {
+            suppressed,
+            follow_inexact,
+        },
+    )
+    .solve()
+}
+
 /// Runs the solver under one policy and reports the result.
 ///
 /// # Errors
@@ -98,11 +111,7 @@ pub fn solve(
     suppressed: CategorySet,
     follow_inexact: bool,
 ) -> Result<Value> {
-    let policy = Policy {
-        suppressed,
-        follow_inexact,
-    };
-    let solution = Solver::new(g, policy).solve()?;
+    let solution = solved(g, suppressed, follow_inexact)?;
 
     let nodes: Vec<Value> = g
         .iter()
@@ -142,14 +151,7 @@ fn local_dirty(g: &Graph, solution: &Solution) -> usize {
 
 /// How many local functions are clean only because of the current policy.
 fn clean_by_suppression(g: &Graph, solution: &Solution) -> Result<usize> {
-    let bare = Solver::new(
-        g,
-        Policy {
-            suppressed: CategorySet::EMPTY,
-            follow_inexact: solution.policy().follow_inexact,
-        },
-    )
-    .solve()?;
+    let bare = solved(g, CategorySet::EMPTY, solution.policy().follow_inexact)?;
     Ok(g.iter()
         .filter(|(_, b)| b.local && !b.opaque)
         .filter(|(id, _)| solution.is_clean(*id) && !bare.is_clean(*id))
@@ -182,11 +184,7 @@ fn counterfactual(
         } else {
             suppressed.union(CategorySet::single(category))
         };
-        let policy = Policy {
-            suppressed: alternative,
-            follow_inexact,
-        };
-        let solution = Solver::new(g, policy).solve()?;
+        let solution = solved(g, alternative, follow_inexact)?;
         let other = local_dirty(g, &solution);
         let cleared = if suppressed.contains(category) {
             other.saturating_sub(baseline)
@@ -222,12 +220,8 @@ pub fn why(
     if node >= g.len() {
         bail!("no function with index {node}");
     }
-    let root = FuncId(u32::try_from(node).unwrap_or(u32::MAX));
-    let policy = Policy {
-        suppressed,
-        follow_inexact,
-    };
-    let solution = Solver::new(g, policy).solve()?;
+    let root = FuncId::from_index(node);
+    let solution = solved(g, suppressed, follow_inexact)?;
 
     let Some(path) = witness::find(g, &solution, root, category) else {
         return Ok(json!({ "found": false }));
@@ -310,26 +304,14 @@ pub fn flame(
     fold: bool,
 ) -> Result<Value> {
     let rows = flame_rows(g, suppressed, follow_inexact, fold)?;
-    let nodes: Vec<Value> = rows
-        .iter()
-        .map(|row| {
-            json!({
-                "id": row.id,
-                "parent": row.parent,
-                "name": row.name,
-                "category": row.category,
-                "kind": row.kind,
-                "cleanup": row.cleanup,
-                "elided": row.elided,
-                "value": row.value,
-            })
-        })
-        .collect();
-    Ok(json!({ "nodes": nodes }))
+    Ok(json!({ "nodes": rows }))
 }
 
 /// One frame of the tree.
-#[derive(Debug, Clone)]
+///
+/// The field names are the keys the view reads, so the frame serializes as
+/// itself.
+#[derive(Debug, Clone, Serialize)]
 pub struct FlameRow {
     /// Position in the returned list.
     pub id: usize,
@@ -360,12 +342,7 @@ pub fn flame_rows(
     follow_inexact: bool,
     fold: bool,
 ) -> Result<Vec<FlameRow>> {
-    let policy = Policy {
-        suppressed,
-        follow_inexact,
-    };
-    let solution = Solver::new(g, policy).solve()?;
-
+    let solution = solved(g, suppressed, follow_inexact)?;
     let mut tree = Tree::new();
     for (id, body) in g.iter() {
         if !body.local || body.opaque {
@@ -382,6 +359,18 @@ pub fn flame_rows(
     Ok(if fold { fold_chains(&rows) } else { rows })
 }
 
+/// The frames sitting directly under each frame, by identifier.
+#[must_use]
+pub fn children_of(rows: &[FlameRow]) -> Map<usize, Vec<usize>> {
+    let mut children: Map<usize, Vec<usize>> = Map::default();
+    for row in rows {
+        if let Some(parent) = row.parent {
+            children.entry(parent).or_default().push(row.id);
+        }
+    }
+    children
+}
+
 /// Frames that stand for a call rather than a module or a panic.
 const EDGE_KINDS: [&str; 5] =
     ["static", "drop", "vtable", "fn-ptr", "unresolved"];
@@ -393,13 +382,7 @@ const EDGE_KINDS: [&str; 5] =
 /// them keeps every ending, so nothing the graph claims is lost.
 #[must_use]
 pub fn fold_chains(rows: &[FlameRow]) -> Vec<FlameRow> {
-    let mut children: Map<usize, Vec<usize>> = Map::default();
-    for row in rows {
-        if let Some(parent) = row.parent {
-            children.entry(parent).or_default().push(row.id);
-        }
-    }
-
+    let children = children_of(rows);
     let mut kept: Vec<FlameRow> = Vec::new();
     let mut remap: Map<usize, usize> = Map::default();
     let mut stack = vec![(0usize, None::<usize>, Vec::<String>::new())];
@@ -438,24 +421,14 @@ pub fn fold_chains(rows: &[FlameRow]) -> Vec<FlameRow> {
 
 /// Accumulates witness paths into a prefix tree held in a flat vector.
 struct Tree {
-    names: Vec<String>,
-    parents: Vec<Option<usize>>,
-    categories: Vec<Option<&'static str>>,
-    kinds: Vec<&'static str>,
-    values: Vec<usize>,
-    cleanup: Vec<bool>,
+    rows: Vec<FlameRow>,
     index: Map<(Option<usize>, String), usize>,
 }
 
 impl Tree {
     fn new() -> Self {
         let mut tree = Self {
-            names: Vec::new(),
-            parents: Vec::new(),
-            categories: Vec::new(),
-            kinds: Vec::new(),
-            values: Vec::new(),
-            cleanup: Vec::new(),
+            rows: Vec::new(),
             index: Map::default(),
         };
         tree.node(None, "crate".to_owned(), None, "root");
@@ -474,13 +447,17 @@ impl Tree {
         if let Some(&existing) = self.index.get(&key) {
             return existing;
         }
-        let id = self.names.len();
-        self.names.push(name);
-        self.parents.push(parent);
-        self.categories.push(category);
-        self.kinds.push(kind);
-        self.values.push(0);
-        self.cleanup.push(false);
+        let id = self.rows.len();
+        self.rows.push(FlameRow {
+            id,
+            parent,
+            name,
+            category,
+            kind,
+            cleanup: false,
+            elided: Vec::new(),
+            value: 0,
+        });
         self.index.insert(key, id);
         id
     }
@@ -503,15 +480,13 @@ impl Tree {
         for (i, segment) in segments.iter().enumerate() {
             let kind = if i == last { "function" } else { "module" };
             at = self.node(Some(at), segment.clone(), None, kind);
-            self.values[at] += 1;
+            self.rows[at].value += 1;
         }
         for hop in &path.hops {
             let name = g.body(hop.callee).display.clone();
             at = self.node(Some(at), name, None, hop.kind.name());
-            self.values[at] += 1;
-            if hop.cleanup {
-                self.cleanup[at] = true;
-            }
+            self.rows[at].value += 1;
+            self.rows[at].cleanup |= hop.cleanup;
         }
         let leaf = match path.terminal {
             Terminal::Site(_) => "site",
@@ -524,23 +499,12 @@ impl Tree {
             Some(category.name()),
             leaf,
         );
-        self.values[at] += 1;
+        self.rows[at].value += 1;
     }
 
     /// Emits the tree as flat records with parent links.
     fn finish(self) -> Vec<FlameRow> {
-        (0..self.names.len())
-            .map(|i| FlameRow {
-                id: i,
-                parent: self.parents[i],
-                name: self.names[i].clone(),
-                category: self.categories[i],
-                kind: self.kinds[i],
-                cleanup: self.cleanup[i],
-                elided: Vec::new(),
-                value: self.values[i],
-            })
-            .collect()
+        self.rows
     }
 }
 

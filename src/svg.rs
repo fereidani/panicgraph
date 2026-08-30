@@ -21,7 +21,10 @@ use std::fmt::Write as _;
 
 use anyhow::Result;
 
-use crate::{CategorySet, Graph, api::FlameRow, util::Map};
+use crate::{
+    CategorySet, Graph,
+    api::{FlameRow, children_of},
+};
 
 /// Height of one row of frames.
 const ROW: f64 = 17.0;
@@ -119,12 +122,7 @@ pub fn render(
 
 /// Places every frame, widest first so the heavy paths lead.
 fn layout(rows: &[FlameRow]) -> Vec<Frame> {
-    let mut children: Map<usize, Vec<usize>> = Map::default();
-    for row in rows {
-        if let Some(parent) = row.parent {
-            children.entry(parent).or_default().push(row.id);
-        }
-    }
+    let mut children = children_of(rows);
 
     // Values accumulate from the leaves, so a frame is exactly as wide as
     // the panics reachable through it. Computed bottom up without recursion,
@@ -191,21 +189,19 @@ fn draw(frame: &Frame, row: &FlameRow, total: usize, out: &mut String) {
         format!(", through {} more calls", row.elided.len())
     };
 
-    let _ = writeln!(
-        out,
-        "<g class=\"f\" data-name=\"{}\" data-info=\"{}\">",
-        escape(&row.name),
-        escape(&format!(
-            "{} ({kind}, {} reachable, {share:.1}%{folded})",
-            row.name, frame.value
-        ))
-    );
-    let _ = writeln!(
-        out,
-        "<title>{} ({kind}, {} reachable, {share:.1}%{folded})</title>",
-        escape(&row.name),
+    // The same sentence labels the frame for the script and for a reader
+    // hovering it with scripting off, so it is built once. Only the name can
+    // carry markup; the rest is generated from counts and fixed words.
+    let name = escape(&row.name);
+    let info = format!(
+        "{name} ({kind}, {} reachable, {share:.1}%{folded})",
         frame.value
     );
+    let _ = writeln!(
+        out,
+        "<g class=\"f\" data-name=\"{name}\" data-info=\"{info}\">"
+    );
+    let _ = writeln!(out, "<title>{info}</title>");
     let _ = writeln!(
         out,
         "<rect x=\"{:.1}\" y=\"{y:.1}\" width=\"{width:.1}\" \

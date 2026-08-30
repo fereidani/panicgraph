@@ -53,6 +53,22 @@ pub struct Activity {
     pub calls: Vec<bool>,
 }
 
+impl Activity {
+    /// Whether the site at `index` is reachable. An index the body does not
+    /// have is not.
+    #[must_use]
+    pub fn site(&self, index: usize) -> bool {
+        self.sites.get(index).copied().unwrap_or(false)
+    }
+
+    /// Whether the call at `index` is reachable. An index the body does not
+    /// have is not.
+    #[must_use]
+    pub fn call(&self, index: usize) -> bool {
+        self.calls.get(index).copied().unwrap_or(false)
+    }
+}
+
 /// Shared evaluation logic, used both while solving and while explaining.
 struct Eval<'a> {
     graph: &'a Graph,
@@ -75,14 +91,8 @@ impl Eval<'_> {
     fn evaluate(&self, id: FuncId) -> NodeState {
         let body = self.graph.body(id);
         if body.opaque {
-            // An opaque body is unknown, not proven clean. Foreign code is
-            // named apart: it has no Rust body to read and no fuller
-            // standard library would produce one.
-            return self.unreadable(if body.foreign {
-                Category::Foreign
-            } else {
-                Category::Unknown
-            });
+            // An opaque body is unknown, not proven clean.
+            return self.unreadable(body.unreadable());
         }
 
         let activity = self.activity(body);
@@ -267,9 +277,8 @@ impl<'g> Solver<'g> {
     pub fn solve(mut self) -> Result<Solution> {
         let n = self.graph.len();
         let mut queued = vec![true; n];
-        let mut queue: VecDeque<FuncId> = (0..n)
-            .map(|i| FuncId(u32::try_from(i).unwrap_or(u32::MAX)))
-            .collect();
+        let mut queue: VecDeque<FuncId> =
+            (0..n).map(FuncId::from_index).collect();
 
         // Termination: a node's state only ever grows, since categories are
         // added and never removed and `unwinds` only moves from false to

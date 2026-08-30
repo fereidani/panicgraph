@@ -280,13 +280,11 @@ impl FromIterator<Category> for CategorySet {
 
 impl fmt::Display for CategorySet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut first = true;
-        for c in self.iter() {
-            if !first {
+        for (i, c) in self.iter().enumerate() {
+            if i > 0 {
                 f.write_str(", ")?;
             }
             write!(f, "{c}")?;
-            first = false;
         }
         Ok(())
     }

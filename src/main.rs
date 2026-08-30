@@ -62,14 +62,8 @@ fn dispatch() -> Result<u8> {
         Command::Check(gate) => gate_check(&args, gate, &mut out)?,
         Command::Baseline { file } => {
             let (graph, solution) = solve(&args)?;
-            let empty = Check {
-                forbid: Vec::new(),
-                allow: Vec::new(),
-                max: None,
-                baseline: None,
-                fail_on_unknown: false,
-            };
-            let outcome = check::run(&graph, &solution, &args, &empty)?;
+            let outcome =
+                check::run(&graph, &solution, &args, &Check::default())?;
             check::write_baseline(file, &args, &outcome.findings)?;
             println!(
                 "recorded {} findings in {}",

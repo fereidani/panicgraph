@@ -79,12 +79,7 @@ pub fn find(
 
         // A function with no recorded body is the source of whichever
         // category stands for code the analysis could not read.
-        let unreadable = if body.foreign {
-            Category::Foreign
-        } else {
-            Category::Unknown
-        };
-        if body.opaque && category == unreadable {
+        if body.opaque && category == body.unreadable() {
             return Some(Witness {
                 hops: rebuild(&came_from, root, id),
                 func: id,
@@ -95,7 +90,7 @@ pub fn find(
         let activity = solution.activity(graph, id);
 
         for (i, site) in body.sites.iter().enumerate() {
-            if activity.sites.get(i).copied().unwrap_or(false)
+            if activity.site(i)
                 && site.category == category
                 && !solution.policy().suppressed.contains(category)
             {
@@ -110,7 +105,7 @@ pub fn find(
         if category == Category::Unknown {
             let unresolved = body.calls.iter().enumerate().find(|(i, call)| {
                 call.callee.is_none()
-                    && activity.calls.get(*i).copied().unwrap_or(false)
+                    && activity.call(*i)
                     && solution.follows(call)
             });
             if let Some((i, _)) = unresolved {
@@ -123,9 +118,7 @@ pub fn find(
         }
 
         for (i, call) in body.calls.iter().enumerate() {
-            if !activity.calls.get(i).copied().unwrap_or(false)
-                || !solution.follows(call)
-            {
+            if !activity.call(i) || !solution.follows(call) {
                 continue;
             }
             let Some(key) = &call.callee else { continue };

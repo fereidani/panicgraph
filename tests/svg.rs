@@ -2,48 +2,21 @@
 
 #![cfg(feature = "svg")]
 
-use panicgraph::{
-    Artifact, Body, BuildConfig, Category, CategorySet, FuncKey, Graph,
-    PanicSite, StdMode, Termination, model::Guard, svg,
-};
+mod support;
+
+use panicgraph::{Body, Category, CategorySet, svg};
+
+use crate::support::{BodyBuilder, graph};
 
 /// A function that panics once, under the given name.
 fn body(name: &str, category: Category) -> Body {
-    Body {
-        key: FuncKey(name.to_owned()),
-        display: name.to_owned(),
-        krate: "test".to_owned(),
-        loc: None,
-        sites: vec![PanicSite {
-            category,
-            termination: Termination::Unwind,
-            reason: format!("{category} panic"),
-            sink: None,
-            loc: None,
-            guard: Guard::always(),
-        }],
-        calls: Vec::new(),
-        opaque: false,
-        foreign: false,
-        local: true,
-    }
+    BodyBuilder::new(name).panics(category).build()
 }
 
 /// Renders a graph of the given functions.
 fn render(bodies: Vec<Body>) -> String {
-    let graph = Graph::from_artifacts(vec![Artifact {
-        krate: "test".to_owned(),
-        config: BuildConfig {
-            rustc: "test".to_owned(),
-            profile: "release".to_owned(),
-            debug_assertions: false,
-            overflow_checks: false,
-            std_mode: StdMode::Shipped,
-        },
-        bodies,
-    }]);
     let mut out = String::new();
-    svg::render(&graph, CategorySet::EMPTY, true, true, &mut out)
+    svg::render(&graph(bodies), CategorySet::EMPTY, true, true, &mut out)
         .expect("the graph should render");
     out
 }
