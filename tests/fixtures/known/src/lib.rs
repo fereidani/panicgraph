@@ -201,3 +201,19 @@ pub fn must_foreign(x: u32) -> u32 {
     }
     unsafe { known_external(x) }
 }
+
+/// Does not reach `explicit`: the assertion in the closure unwinds only as
+/// far as the catch. What remains reachable is the catch machinery itself.
+pub fn must_not_catch_explicit(x: u32) -> u32 {
+    std::panic::catch_unwind(move || {
+        assert!(x < 10, "x is too big");
+        x
+    })
+    .unwrap_or(0)
+}
+
+/// Reaches `alloc-failure` through the catch: an aborting panic does not
+/// unwind, so no catch can contain it.
+pub fn must_catch_abort(x: u32) -> u32 {
+    std::panic::catch_unwind(move || *Box::new(x)).unwrap_or(0)
+}

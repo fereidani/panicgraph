@@ -7,9 +7,12 @@ use panicgraph::{
 };
 use rustc_middle::{
     middle::codegen_fn_attrs::CodegenFnAttrFlags,
-    mir::{self, AssertKind, BasicBlock, TerminatorKind, UnwindAction},
+    mir::{
+        self, AssertKind, BasicBlock, TerminatorKind, UnwindAction, interpret,
+    },
     ty::{self, Instance, TyCtxt, TypeVisitableExt, TypingEnv},
 };
+use rustc_span::Spanned;
 
 use crate::{fold, sinks::SinkTable};
 
@@ -239,6 +242,7 @@ impl<'tcx> Extractor<'tcx> {
                 }
                 TerminatorKind::Call {
                     func,
+                    args,
                     unwind,
                     fn_span,
                     ..
@@ -247,7 +251,7 @@ impl<'tcx> Extractor<'tcx> {
                     info.span = *fn_span;
                     let at = At::new(bb, *unwind, info);
                     let ty = func.ty(&mir.local_decls, self.tcx);
-                    self.push_call(&mut raw, cx, at, ty, mir);
+                    self.push_call(&mut raw, cx, at, ty, args, mir);
                 }
                 TerminatorKind::Drop { place, unwind, .. } => {
                     let at = At::new(bb, *unwind, info);
@@ -291,6 +295,7 @@ impl<'tcx> Extractor<'tcx> {
         cx: Work<'tcx>,
         at: At,
         ty: ty::Ty<'tcx>,
+        operands: &[Spanned<mir::Operand<'tcx>>],
         mir: &mir::Body<'tcx>,
     ) {
         let Some(ty) = self.normalize(cx, ty) else {
@@ -300,7 +305,7 @@ impl<'tcx> Extractor<'tcx> {
         let ty::FnDef(did, args) = *ty.kind() else {
             // A call through a function pointer. The target set is unknown.
             let name = "<fn pointer>".to_owned();
-            self.push_edge(raw, at, None, name, EdgeKind::FnPtr);
+            self.push_edge(raw, at, None, name, EdgeKind::FnPtr, false);
             return;
         };
         let Some(args) = args.no_bound_vars() else {
@@ -337,6 +342,10 @@ impl<'tcx> Extractor<'tcx> {
             ty::InstanceKind::Intrinsic(..)
                 | ty::InstanceKind::LlvmIntrinsic(..)
         ) {
+            if self.tcx.item_name(callee.def_id()).as_str() == "catch_unwind" {
+                self.push_catch(raw, cx, at, operands, mir);
+                return;
+            }
             if self.refcount_abort(cx, at, callee.def_id(), mir) {
                 let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
                 raw.sites.push(PanicSite {
@@ -362,7 +371,7 @@ impl<'tcx> Extractor<'tcx> {
         };
         let display = self.tcx.def_path_str(callee.def_id());
         let key = self.symbol_of(callee).map(FuncKey);
-        self.push_edge(raw, at, key, display, kind);
+        self.push_edge(raw, at, key, display, kind, false);
         if kind == EdgeKind::Static {
             raw.successors.push(Work {
                 inst: callee,
@@ -399,11 +408,140 @@ impl<'tcx> Extractor<'tcx> {
         let glue = Instance::resolve_drop_glue(self.tcx, ty);
         let display = format!("drop glue for {ty}");
         let key = self.symbol_of(glue).map(FuncKey);
-        self.push_edge(raw, at, key, display, EdgeKind::Drop);
+        self.push_edge(raw, at, key, display, EdgeKind::Drop, false);
         raw.successors.push(Work {
             inst: glue,
             env: cx.env,
         });
+    }
+
+    /// Records the edges of the unwind catching intrinsic.
+    ///
+    /// The intrinsic runs its first operand and, when that unwinds, its
+    /// third. An unwinding panic in the first stops here, which is the whole
+    /// point of the catch; an aborting one cannot be caught by anything. The
+    /// edge is therefore a barrier rather than a severed subtree, so the
+    /// aborts keep flowing to the caller.
+    fn push_catch(
+        &self,
+        raw: &mut Raw<'tcx>,
+        cx: Work<'tcx>,
+        at: At,
+        operands: &[Spanned<mir::Operand<'tcx>>],
+        mir: &mir::Body<'tcx>,
+    ) {
+        for (index, barrier) in [(0usize, true), (2usize, false)] {
+            let resolved = operands
+                .get(index)
+                .and_then(|arg| self.fn_operand(cx, &arg.node, mir));
+            match resolved {
+                Some(inst) => {
+                    let display = self.tcx.def_path_str(inst.def_id());
+                    let key = self.symbol_of(inst).map(FuncKey);
+                    self.push_edge(
+                        raw,
+                        at,
+                        key,
+                        display,
+                        EdgeKind::Static,
+                        barrier,
+                    );
+                    raw.successors.push(Work { inst, env: cx.env });
+                }
+                None => self.push_edge(
+                    raw,
+                    at,
+                    None,
+                    "<caught function>".to_owned(),
+                    EdgeKind::Unresolved,
+                    barrier,
+                ),
+            }
+        }
+    }
+
+    /// Resolves an operand holding a function to the instance it names.
+    ///
+    /// The reified pointer handed to the catch intrinsic is either a
+    /// constant already or a local a single cast wrote, and both name the
+    /// function outright. Anything else is given up on rather than guessed.
+    fn fn_operand(
+        &self,
+        cx: Work<'tcx>,
+        operand: &mir::Operand<'tcx>,
+        mir: &mir::Body<'tcx>,
+    ) -> Option<Instance<'tcx>> {
+        if let mir::Operand::Constant(konst) = operand {
+            return self.fn_constant(cx, konst);
+        }
+        let (mir::Operand::Copy(place) | mir::Operand::Move(place)) = operand
+        else {
+            return None;
+        };
+        let local = place.as_local()?;
+        let mut written: Option<&mir::Rvalue<'tcx>> = None;
+        for block in mir.basic_blocks.iter() {
+            for stmt in &block.statements {
+                let mir::StatementKind::Assign(pair) = &stmt.kind else {
+                    continue;
+                };
+                if pair.0.local != local {
+                    continue;
+                }
+                if written.is_some() {
+                    // Written twice, so which function the pointer names
+                    // depends on the path taken.
+                    return None;
+                }
+                written = Some(&pair.1);
+            }
+        }
+        match written? {
+            mir::Rvalue::Cast(
+                mir::CastKind::PointerCoercion(
+                    ty::adjustment::PointerCoercion::ReifyFnPointer(_),
+                    _,
+                ),
+                mir::Operand::Constant(konst),
+                _,
+            )
+            | mir::Rvalue::Use(mir::Operand::Constant(konst), _) => {
+                self.fn_constant(cx, konst)
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolves a constant naming a function, written either as the zero
+    /// sized function item or as an already reified pointer.
+    fn fn_constant(
+        &self,
+        cx: Work<'tcx>,
+        konst: &mir::ConstOperand<'tcx>,
+    ) -> Option<Instance<'tcx>> {
+        let konst = cx
+            .inst
+            .try_instantiate_mir_and_normalize_erasing_regions(
+                self.tcx,
+                cx.env,
+                ty::EarlyBinder::bind(self.tcx, konst.const_),
+            )
+            .ok()?;
+        if let ty::FnDef(did, args) = *konst.ty().kind() {
+            let args = args.no_bound_vars()?;
+            return Instance::try_resolve(self.tcx, cx.env, did, args)
+                .ok()
+                .flatten();
+        }
+        let scalar = konst.try_eval_scalar(self.tcx, cx.env)?;
+        let interpret::Scalar::Ptr(ptr, _) = scalar else {
+            return None;
+        };
+        let alloc = self.tcx.global_alloc(ptr.provenance.alloc_id());
+        match alloc {
+            interpret::GlobalAlloc::Function { instance } => Some(instance),
+            _ => None,
+        }
     }
 
     /// Whether a call to the abort intrinsic reports a reference count
@@ -474,7 +612,7 @@ impl<'tcx> Extractor<'tcx> {
 
     /// Appends an edge to a target the analysis could not pin down.
     fn unresolved(&self, raw: &mut Raw<'tcx>, at: At, display: String) {
-        self.push_edge(raw, at, None, display, EdgeKind::Unresolved);
+        self.push_edge(raw, at, None, display, EdgeKind::Unresolved, false);
     }
 
     /// Appends a call edge and its unwind channel.
@@ -485,6 +623,7 @@ impl<'tcx> Extractor<'tcx> {
         callee: Option<FuncKey>,
         callee_display: String,
         kind: EdgeKind,
+        barrier: bool,
     ) {
         let index = u32::try_from(raw.calls.len()).unwrap_or(u32::MAX);
         raw.calls.push(CallSite {
@@ -493,6 +632,7 @@ impl<'tcx> Extractor<'tcx> {
             kind,
             loc: self.loc_of(at.span),
             guard: Guard::default(),
+            barrier,
         });
         raw.call_blocks.push(at.bb);
         Self::record_unwind(raw, UnwindOrigin::Call(index), at.unwind);

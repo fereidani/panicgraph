@@ -36,12 +36,30 @@ impl Default for Policy {
 }
 
 /// The solved state of one function.
+///
+/// The two planes exist for the unwind barrier: a catch contains what
+/// unwinds and nothing else, so which way a panic terminates has to travel
+/// with its category.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NodeState {
-    /// Categories this function can raise, after suppression.
-    pub enabled: CategorySet,
-    /// Whether this function can unwind into its caller's cleanup blocks.
-    pub unwinds: bool,
+    /// Categories this function can raise by unwinding, after suppression.
+    pub unwind: CategorySet,
+    /// Categories this function can raise by aborting, after suppression.
+    pub abort: CategorySet,
+}
+
+impl NodeState {
+    /// Every category the function can raise.
+    #[must_use]
+    pub const fn enabled(self) -> CategorySet {
+        self.unwind.union(self.abort)
+    }
+
+    /// Whether the function can unwind into its caller's cleanup blocks.
+    #[must_use]
+    pub const fn unwinds(self) -> bool {
+        !self.unwind.is_empty()
+    }
 }
 
 /// Which sites and calls of one body are reachable under a policy.
@@ -78,12 +96,15 @@ struct Eval<'a> {
 
 impl Eval<'_> {
     /// The state a target the analysis cannot read contributes.
+    ///
+    /// Unknown code may unwind or abort, so the category sits in both
+    /// planes: a barrier contains the first possibility but not the second.
     const fn unreadable(&self, category: Category) -> NodeState {
-        let enabled =
+        let live =
             CategorySet::single(category).difference(self.policy.suppressed);
         NodeState {
-            enabled,
-            unwinds: !enabled.is_empty(),
+            unwind: live,
+            abort: live,
         }
     }
 
@@ -104,8 +125,10 @@ impl Eval<'_> {
             {
                 continue;
             }
-            state.enabled.insert(site.category);
-            state.unwinds |= site.termination == Termination::Unwind;
+            match site.termination {
+                Termination::Unwind => state.unwind.insert(site.category),
+                Termination::Abort => state.abort.insert(site.category),
+            }
         }
 
         for (i, call) in body.calls.iter().enumerate() {
@@ -113,8 +136,12 @@ impl Eval<'_> {
                 continue;
             }
             let callee = self.callee_state(call);
-            state.enabled = state.enabled.union(callee.enabled);
-            state.unwinds |= callee.unwinds;
+            // A barrier contains what unwinds out of the callee. An abort
+            // cannot be caught by anything, so that plane always crosses.
+            if !call.barrier {
+                state.unwind = state.unwind.union(callee.unwind);
+            }
+            state.abort = state.abort.union(callee.abort);
         }
 
         state
@@ -177,7 +204,8 @@ impl Eval<'_> {
                 body.calls.get(i).is_some_and(|call| {
                     act.calls[i]
                         && self.follows(call)
-                        && self.callee_state(call).unwinds
+                        && !call.barrier
+                        && self.callee_state(call).unwinds()
                 })
             }
         })
@@ -211,19 +239,33 @@ impl Solution {
     /// The categories a function can raise under the solved policy.
     #[must_use]
     pub fn enabled(&self, id: FuncId) -> CategorySet {
-        self.states[id.index()].enabled
+        self.states[id.index()].enabled()
     }
 
     /// Whether a function can unwind under the solved policy.
     #[must_use]
     pub fn unwinds(&self, id: FuncId) -> bool {
-        self.states[id.index()].unwinds
+        self.states[id.index()].unwinds()
+    }
+
+    /// The categories of a callee that are visible through a call.
+    ///
+    /// A barrier call contains the callee's unwinding panics, so only the
+    /// aborting ones are seen through it.
+    #[must_use]
+    pub fn through(&self, call: &CallSite, callee: FuncId) -> CategorySet {
+        let state = self.states[callee.index()];
+        if call.barrier {
+            state.abort
+        } else {
+            state.enabled()
+        }
     }
 
     /// Whether a function raises nothing the user asked to see.
     #[must_use]
     pub fn is_clean(&self, id: FuncId) -> bool {
-        self.states[id.index()].enabled.is_empty()
+        self.states[id.index()].enabled().is_empty()
     }
 
     /// The policy this solution was produced under.

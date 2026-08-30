@@ -57,6 +57,24 @@ impl BodyBuilder {
         self
     }
 
+    /// Adds a call whose unwinding panics are contained, as under a catch.
+    pub fn calls_behind_barrier(mut self, callee: &str) -> Self {
+        let mut edge = call(callee, Guard::always());
+        edge.barrier = true;
+        self.body.calls.push(edge);
+        self
+    }
+
+    /// Adds a panic that aborts rather than unwinds.
+    pub fn aborts(mut self, category: Category) -> Self {
+        self.body.sites.push(site(
+            category,
+            Termination::Abort,
+            Guard::always(),
+        ));
+        self
+    }
+
     /// Adds a call reachable only while the given earlier call unwinds.
     pub fn calls_on_unwind_of(mut self, callee: &str, call_index: u32) -> Self {
         self.body.calls.push(call(
@@ -99,6 +117,7 @@ fn call(callee: &str, guard: Guard) -> CallSite {
         kind: EdgeKind::Static,
         loc: None,
         guard,
+        barrier: false,
     }
 }
 

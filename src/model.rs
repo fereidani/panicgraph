@@ -152,6 +152,11 @@ pub struct CallSite {
     pub loc: Option<Loc>,
     /// When this call is reachable.
     pub guard: Guard,
+    /// True when the callee's unwinding panics are contained at this call,
+    /// which is what catching an unwind does. Aborting panics still cross,
+    /// because nothing can catch them.
+    #[serde(default)]
+    pub barrier: bool,
 }
 
 /// Everything the solver needs to know about one function.

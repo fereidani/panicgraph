@@ -230,3 +230,54 @@ fn an_exact_name_wins_over_a_longer_one_that_contains_it() {
     assert_eq!(matches.len(), 3);
     assert_eq!(graph.body(matches[0]).display, "fold");
 }
+
+#[test]
+fn a_barrier_contains_unwinding_panics_but_not_aborts() {
+    let (graph, solution) = solve(
+        vec![
+            BodyBuilder::new("callee")
+                .panics(Category::Explicit)
+                .aborts(Category::AllocFailure)
+                .build(),
+            BodyBuilder::new("caller")
+                .calls_behind_barrier("callee")
+                .build(),
+        ],
+        CategorySet::EMPTY,
+    );
+    let caller = id(&graph, "caller");
+    assert!(
+        !solution.enabled(caller).contains(Category::Explicit),
+        "the unwinding panic must stop at the barrier"
+    );
+    assert!(
+        solution.enabled(caller).contains(Category::AllocFailure),
+        "an abort cannot be caught, so it must cross the barrier"
+    );
+    assert!(
+        !solution.unwinds(caller),
+        "a caller whose only panic aborts cannot unwind"
+    );
+}
+
+#[test]
+fn cleanup_gated_on_a_barrier_call_stays_dead() {
+    let (graph, solution) = solve(
+        vec![
+            BodyBuilder::new("callee")
+                .panics(Category::Explicit)
+                .build(),
+            BodyBuilder::new("dropper").panics(Category::Index).build(),
+            BodyBuilder::new("caller")
+                .calls_behind_barrier("callee")
+                .calls_on_unwind_of("dropper", 0)
+                .build(),
+        ],
+        CategorySet::EMPTY,
+    );
+    let caller = id(&graph, "caller");
+    assert!(
+        !solution.enabled(caller).contains(Category::Index),
+        "nothing unwinds out of a barrier call, so its cleanup cannot run"
+    );
+}

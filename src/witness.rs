@@ -125,7 +125,8 @@ pub fn find(
             let Some(next) = graph.id_of(key) else {
                 continue;
             };
-            if seen[next.index()] || !solution.enabled(next).contains(category)
+            if seen[next.index()]
+                || !solution.through(call, next).contains(category)
             {
                 continue;
             }

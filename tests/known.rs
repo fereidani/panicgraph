@@ -36,6 +36,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_borrow", "borrow"),
     ("must_dyn", "unknown"),
     ("must_foreign", "foreign"),
+    ("must_catch_abort", "alloc-failure"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -46,6 +47,7 @@ const MUST_NOT_PANIC: &[(&str, &str)] = &[
     ("must_divide_once_of_two", "remainder-by-zero"),
     ("must_lock", "unwrap"),
     ("must_write", "unwrap"),
+    ("must_not_catch_explicit", "explicit"),
 ];
 
 /// The functions that must be reported with nothing at all.
