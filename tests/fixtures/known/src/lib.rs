@@ -140,3 +140,10 @@ pub fn clean_guarded_widening(a: u64, b: u32) -> u64 {
 pub fn must_divide_narrowed(a: u8, b: u32) -> u8 {
     if b == 0 { 0 } else { a / (b as u8) }
 }
+
+/// Reaches `capacity-overflow` and `alloc-failure`. Growth funnels through
+/// one entry point that raises either, decided at run time, so a report of
+/// only one would let suppressing it clear the other.
+pub fn must_push(v: &mut Vec<u8>, x: u8) {
+    v.push(x);
+}

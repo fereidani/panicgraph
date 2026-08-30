@@ -305,20 +305,20 @@ impl<'tcx> Extractor<'tcx> {
         };
 
         if let Some(sink) = self.sinks.get(self.tcx, callee.def_id()) {
-            let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
-            raw.sites.push(PanicSite {
-                category: sink.category,
-                termination: sink.termination,
-                reason: format!(
-                    "calls {}",
-                    self.tcx.def_path_str(callee.def_id())
-                ),
-                sink: Some(self.tcx.def_path_str(callee.def_id())),
-                loc: self.loc_of(at.span),
-                guard: Guard::default(),
-            });
-            raw.site_blocks.push(at.bb);
-            Self::record_unwind(raw, UnwindOrigin::Site(index), at.unwind);
+            let path = self.tcx.def_path_str(callee.def_id());
+            for (category, termination) in sink.raises() {
+                let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
+                raw.sites.push(PanicSite {
+                    category,
+                    termination,
+                    reason: format!("calls {path}"),
+                    sink: Some(path.clone()),
+                    loc: self.loc_of(at.span),
+                    guard: Guard::default(),
+                });
+                raw.site_blocks.push(at.bb);
+                Self::record_unwind(raw, UnwindOrigin::Site(index), at.unwind);
+            }
             return;
         }
 

@@ -26,6 +26,8 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_divide_inverted_guard", "divide-by-zero"),
     ("must_divide_once_of_two", "divide-by-zero"),
     ("must_divide_narrowed", "divide-by-zero"),
+    ("must_push", "capacity-overflow"),
+    ("must_push", "alloc-failure"),
 ];
 
 /// The panics each function must *not* be reported with.

@@ -9,26 +9,43 @@ use panicgraph::{Category, Termination, util::Map};
 use rustc_hir::{def::DefKind, def_id::DefId};
 use rustc_middle::{middle::codegen_fn_attrs::CodegenFnAttrFlags, ty::TyCtxt};
 
-/// A panic entry point and how it terminates.
+/// A panic entry point and what reaching it raises.
+///
+/// Most entry points raise exactly one panic. A funnel raises one of two,
+/// decided at run time, and both are recorded so that suppressing one
+/// cannot silently clear the other.
 #[derive(Debug, Clone, Copy)]
 pub struct Sink {
-    /// The category to report.
-    pub category: Category,
-    /// Whether reaching it unwinds or aborts.
-    pub termination: Termination,
+    first: (Category, Termination),
+    second: Option<(Category, Termination)>,
+}
+
+impl Sink {
+    /// Every panic reaching this entry point can raise.
+    pub fn raises(self) -> impl Iterator<Item = (Category, Termination)> {
+        std::iter::once(self.first).chain(self.second)
+    }
 }
 
 const fn unwind(category: Category) -> Sink {
     Sink {
-        category,
-        termination: Termination::Unwind,
+        first: (category, Termination::Unwind),
+        second: None,
     }
 }
 
 const fn abort(category: Category) -> Sink {
     Sink {
-        category,
-        termination: Termination::Abort,
+        first: (category, Termination::Abort),
+        second: None,
+    }
+}
+
+/// A sink that raises either of two panics, decided at run time.
+const fn funnel(first: Sink, second: Sink) -> Sink {
+    Sink {
+        first: first.first,
+        second: Some(second.first),
     }
 }
 
@@ -88,8 +105,17 @@ const EXACT: &[(Sink, &[(&str, &str)])] = &[
     ),
     (
         unwind(Category::CapacityOverflow),
+        &[("alloc", "raw_vec::capacity_overflow")],
+    ),
+    // The single funnel behind every infallible reserve or grow. It raises a
+    // capacity overflow or hands the layout to the allocation error handler,
+    // and which one is decided at run time, so it stands for both.
+    (
+        funnel(
+            unwind(Category::CapacityOverflow),
+            abort(Category::AllocFailure),
+        ),
         &[
-            ("alloc", "raw_vec::capacity_overflow"),
             ("alloc", "raw_vec::handle_error"),
             ("alloc", "raw_vec::handle_reserve"),
         ],
