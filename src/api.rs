@@ -260,6 +260,13 @@ fn terminal(g: &Graph, path: &witness::Witness) -> Value {
                 })
             },
         ),
+        // Foreign code is named apart, as the printed report does: no
+        // fuller standard library will ever produce a body for it, so
+        // sending the reader off to rebuild one would waste their time.
+        Terminal::Opaque if body.foreign => json!({
+            "kind": "opaque",
+            "reason": "foreign code, which has no Rust body to read",
+        }),
         Terminal::Opaque => json!({
             "kind": "opaque",
             "reason": "no MIR available, so panics here are unknown",
