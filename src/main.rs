@@ -108,7 +108,7 @@ fn analyze(args: &Args, out: &mut String) -> Result<u8> {
     // The hint is prose, so it belongs only in the rendering that is prose.
     // Appending it to json left the output unparseable.
     if matches!(args.format, panicgraph::args::Format::Human)
-        && let Some(hint) = report::suppressed_hint(&graph, &solution, args)
+        && let Some(hint) = report::suppressed_hint(&graph, &solution, args)?
     {
         out.push('\n');
         out.push_str(&hint);

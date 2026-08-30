@@ -135,7 +135,7 @@ pub fn solve(
         "summary": {
             "analysed": g.len(),
             "can_panic": dirty,
-            "clean_by_suppression": clean_by_suppression(g, &solution)?,
+            "clean_by_suppression": solution.cleared_by_suppression(g)?,
         },
         "counterfactual": counterfactual(g, suppressed, follow_inexact, dirty)?,
     }))
@@ -147,15 +147,6 @@ fn local_dirty(g: &Graph, solution: &Solution) -> usize {
         .filter(|(_, b)| b.local && !b.opaque)
         .filter(|(id, _)| !solution.is_clean(*id))
         .count()
-}
-
-/// How many local functions are clean only because of the current policy.
-fn clean_by_suppression(g: &Graph, solution: &Solution) -> Result<usize> {
-    let bare = solved(g, CategorySet::EMPTY, solution.policy().follow_inexact)?;
-    Ok(g.iter()
-        .filter(|(_, b)| b.local && !b.opaque)
-        .filter(|(id, _)| solution.is_clean(*id) && !bare.is_clean(*id))
-        .count())
 }
 
 /// The marginal effect of each category on the result.

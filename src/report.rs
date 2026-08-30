@@ -393,25 +393,25 @@ const fn on_off(value: bool) -> &'static str {
 }
 
 /// Suppressed categories that were nonetheless observed, for the hint line.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns an error if the graph cannot be solved without the suppression,
+/// which is what the count is measured against.
 pub fn suppressed_hint(
     graph: &Graph,
     solution: &Solution,
     args: &Args,
-) -> Option<String> {
+) -> Result<Option<String>> {
     if args.suppress.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let hidden = graph
-        .iter()
-        .filter(|(_, body)| body.local && !body.opaque)
-        .filter(|(id, _)| solution.enabled(*id).is_empty())
-        .count();
-    (hidden > 0).then(|| {
+    let hidden = solution.cleared_by_suppression(graph)?;
+    Ok((hidden > 0).then(|| {
         format!(
             "{hidden} local functions panic only through suppressed \
              categories ({}).",
             args.suppress
         )
-    })
+    }))
 }

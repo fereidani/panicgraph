@@ -248,6 +248,33 @@ impl Solution {
     pub const fn follows(&self, call: &CallSite) -> bool {
         self.policy.follow_inexact || call.kind.is_exact()
     }
+
+    /// How many local functions are clean only because of the policy.
+    ///
+    /// A function that raises nothing whatever is assumed is not one the
+    /// suppression cleared, so the answer is the difference between two
+    /// solutions rather than a count of the clean ones. That costs a second
+    /// fixpoint over the graph, which is why callers ask for it only when
+    /// they are about to say something about it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the second fixpoint does not converge.
+    pub fn cleared_by_suppression(&self, graph: &Graph) -> Result<usize> {
+        let bare = Solver::new(
+            graph,
+            Policy {
+                suppressed: CategorySet::EMPTY,
+                follow_inexact: self.policy.follow_inexact,
+            },
+        )
+        .solve()?;
+        Ok(graph
+            .iter()
+            .filter(|(_, body)| body.local && !body.opaque)
+            .filter(|(id, _)| self.is_clean(*id) && !bare.is_clean(*id))
+            .count())
+    }
 }
 
 /// Solves a graph under one suppression policy.
