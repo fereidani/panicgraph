@@ -127,6 +127,19 @@ const EXACT: &[(Sink, &[(&str, &str)])] = &[
             ("std", "alloc::handle_alloc_error"),
         ],
     ),
+    // The rethrow and legacy entry points. Raising a caught payload again is
+    // a panic in its own right; what the payload was is decided at run time,
+    // so the raise is the fact to report, not a body to see through.
+    (
+        unwind(Category::Explicit),
+        &[
+            ("std", "panic::resume_unwind"),
+            ("std", "panicking::resume_unwind"),
+            ("std", "panicking::rust_panic_without_hook"),
+            ("std", "panicking::begin_panic"),
+            ("std", "rt::begin_panic"),
+        ],
+    ),
 ];
 /// Resolves panic entry points and caches the answer per `DefId`.
 pub struct SinkTable {

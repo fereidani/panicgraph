@@ -147,3 +147,12 @@ pub fn must_divide_narrowed(a: u8, b: u32) -> u8 {
 pub fn must_push(v: &mut Vec<u8>, x: u8) {
     v.push(x);
 }
+
+/// Reaches `explicit`. Raising a caught payload again is a panic in its own
+/// right, named rather than reported as a call into unknown code.
+pub fn must_rethrow(r: Result<u8, Box<dyn std::any::Any + Send>>) -> u8 {
+    match r {
+        Ok(v) => v,
+        Err(e) => std::panic::resume_unwind(e),
+    }
+}
