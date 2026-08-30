@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>panicgraph</title>
+<style>
+/* Palette roles live on :root so everything inherits them, including the page
+   background and the tooltip, which d3 attaches outside the app element.
+   Dark is a selected set stepped for the dark surface, not an inverted light
+   palette. Three categorical slots only: an icicle places arbitrary colours
+   side by side, and only the first three clear the all-pairs colour-vision
+   floors. */
+:root {
+  color-scheme: light;
+  --surface-page:  #f4f3f0;
+  --surface-panel: #ffffff;
+  --surface-chart: #ffffff;
+  --surface-sunk:  #eceae5;
+  --border:        #dedbd4;
+  --border-strong: #c9c6bd;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #78766f;
+  --series-logic:  #2a78d6;
+  --series-alloc:  #eb6834;
+  --series-unsure: #1baf7a;
+  --neutral-mark:  #cbc8c1;
+  --neutral-mark-strong: #aeaba3;
+  --gate: #8a5a00;
+  --focus: #2a78d6;
+  --shadow: 0 1px 2px rgba(11,11,11,.06), 0 8px 24px rgba(11,11,11,.10);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { color-scheme: dark;
+    --surface-page:  #0e0e0d;
+    --surface-panel: #191918;
+    --surface-chart: #1a1a19;
+    --surface-sunk:  #242423;
+    --border:        #31312d;
+    --border-strong: #47463f;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #8d8b81;
+    --series-logic:  #3987e5;
+    --series-alloc:  #d95926;
+    --series-unsure: #199e70;
+    --neutral-mark:  #3d3c38;
+    --neutral-mark-strong: #57564f;
+    --gate: #c98500;
+    --focus: #3987e5;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.45);
+  }
+}
+:root[data-theme="dark"] { color-scheme: dark;
+  --surface-page:  #0e0e0d;
+  --surface-panel: #191918;
+  --surface-chart: #1a1a19;
+  --surface-sunk:  #242423;
+  --border:        #31312d;
+  --border-strong: #47463f;
+  --text-primary:   #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted:     #8d8b81;
+  --series-logic:  #3987e5;
+  --series-alloc:  #d95926;
+  --series-unsure: #199e70;
+  --neutral-mark:  #3d3c38;
+  --neutral-mark-strong: #57564f;
+  --gate: #c98500;
+  --focus: #3987e5;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px rgba(0,0,0,.45);
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 13px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--surface-page);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.viz-root { display: flex; flex-direction: column; height: 100vh;
+  background: var(--surface-page); }
+
+header {
+  display: flex; align-items: center; gap: 14px; flex: none;
+  padding: 0 16px; height: 46px;
+  border-bottom: 1px solid var(--border); background: var(--surface-panel);
+}
+header h1 { font-size: 13px; font-weight: 650; margin: 0;
+  letter-spacing: .015em; display: flex; align-items: center; gap: 8px; }
+header h1::before { content: ""; width: 9px; height: 9px; border-radius: 2px;
+  background: var(--series-alloc); }
+.meta { color: var(--text-muted); font-size: 12px; display: flex; gap: 9px;
+  flex-wrap: wrap; align-items: center; min-width: 0; }
+.meta b { color: var(--text-secondary); font-weight: 500; }
+.meta .sep { color: var(--border-strong); }
+.spacer { flex: 1; }
+
+button.ghost {
+  background: var(--surface-panel); border: 1px solid var(--border);
+  color: var(--text-secondary); border-radius: 7px; padding: 5px 11px;
+  font: inherit; font-size: 12px; cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+}
+button.ghost:hover { color: var(--text-primary);
+  border-color: var(--border-strong); background: var(--surface-sunk); }
+button.ghost[aria-pressed="true"] { color: var(--text-primary);
+  background: var(--surface-sunk); border-color: var(--border-strong); }
+
+.policy-caption { flex: none; padding: 9px 16px; font-size: 12px;
+  border-bottom: 1px solid var(--border); background: var(--surface-page);
+  color: var(--text-secondary); display: flex; align-items: center;
+  gap: 8px; flex-wrap: wrap; }
+.policy-caption strong { color: var(--text-primary); font-weight: 600; }
+.policy-caption.locked { background: var(--surface-sunk);
+  border-bottom-color: var(--border-strong); }
+.lock-badge { font-size: 9.5px; font-weight: 700; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--surface-panel);
+  background: var(--text-secondary); border-radius: 4px; padding: 2px 6px;
+  flex: none; }
+button.ghost.small { padding: 2px 9px; font-size: 11.5px; }
+.kbd-hint { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px; color: var(--text-muted); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 5px; }
+
+main { display: flex; flex: 1; min-height: 0; background: var(--surface-page); }
+aside { width: 328px; flex: none; overflow-y: auto; padding: 16px;
+  border-right: 1px solid var(--border); background: var(--surface-panel); }
+section.stage { flex: 1; display: flex; flex-direction: column;
+  min-width: 0; background: var(--surface-page); }
+
+h2 { font-size: 10.5px; text-transform: uppercase; letter-spacing: .09em;
+  color: var(--text-muted); margin: 20px 0 9px; font-weight: 650; }
+h2:first-child { margin-top: 0; }
+.hint { font-size: 11.5px; color: var(--text-muted); margin: 0 0 10px; }
+
+.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.tile { background: var(--surface-sunk); border: 1px solid var(--border);
+  border-radius: 9px; padding: 11px 12px; }
+.tile .n { font-size: 24px; font-weight: 620; line-height: 1.1;
+  font-variant-numeric: tabular-nums; display: flex; align-items: baseline;
+  gap: 7px; color: var(--text-primary); }
+/* Neutral ink: the family hues already carry Allocation and Unverified in
+   the legend, and a number is not one of those things. */
+.tile .delta { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+.tile .of { font-size: 13px; font-weight: 500; color: var(--text-muted); }
+.tile .k { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
+.tile.wide { grid-column: 1 / -1; }
+
+.cat { display: block; border-radius: 7px; cursor: pointer; padding: 2px 0; }
+.cat:hover { background: var(--surface-sunk); }
+.cat-row { display: flex; align-items: center; gap: 9px; padding: 3px 6px; }
+.cat input { margin: 0; accent-color: var(--series-logic); cursor: pointer; }
+.cat .name { flex: 1; font-size: 12px; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cat.off .name { color: var(--text-muted); text-decoration: line-through; }
+.cat.muted { opacity: .45; }
+.cat.solo { background: var(--surface-sunk);
+  box-shadow: inset 2px 0 0 var(--series-logic); }
+.cat.solo .name { color: var(--text-primary); font-weight: 600; }
+
+/* The lock control stays out of the way until the row is under the pointer,
+   so the panel still reads as a list of assumptions rather than a toolbar. */
+/* Transparent rather than hidden: visibility:hidden takes the control out of
+   the tab order, which made the lock reachable by mouse only. */
+.only { border: 1px solid transparent; background: none; border-radius: 5px;
+  font: inherit; font-size: 10px; letter-spacing: .06em; padding: 1px 6px;
+  text-transform: uppercase; color: var(--text-muted); cursor: pointer;
+  opacity: 0; flex: none; transition: opacity .12s; }
+.cat:hover .only, .cat.solo .only, .only:focus-visible { opacity: 1; }
+.only:hover { color: var(--text-primary); border-color: var(--border-strong);
+  background: var(--surface-page); }
+.cat.solo .only { color: var(--text-primary);
+  border-color: var(--border-strong); background: var(--surface-page); }
+.cat input:disabled { opacity: .4; cursor: not-allowed; }
+.cat .n { font-variant-numeric: tabular-nums; font-size: 11px;
+  color: var(--text-secondary); min-width: 22px; text-align: right; }
+.family-dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.bar-track { display: block; margin: 1px 6px 4px 30px; height: 5px;
+  background: var(--surface-page); border-radius: 999px; overflow: hidden;
+  border: 1px solid var(--border); }
+/* While a policy is being resolved the forecast on screen belongs to the
+   previous one, so it recedes rather than flickering to a wrong number. */
+.cat .n.stale, .bar-track.stale { opacity: .35; }
+.bar { display: block; height: 100%; border-radius: 999px;
+  background: var(--series-logic); transition: width .28s ease; }
+.cat.off .bar { background: var(--neutral-mark-strong); }
+
+.legend { flex: none; display: flex; flex-wrap: wrap; gap: 14px;
+  align-items: center; padding: 9px 16px; font-size: 11.5px;
+  color: var(--text-secondary); border-bottom: 1px solid var(--border);
+  background: var(--surface-panel); }
+.legend .item { display: flex; align-items: center; gap: 6px; }
+.legend .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+.legend .gate-key { width: 10px; height: 10px; border-radius: 2px; flex: none;
+  border: 1.5px dashed var(--gate); }
+.legend .note { color: var(--text-muted); }
+.legend .spacer { flex: 1; }
+
+/* Search. The match indicator is a lightness and outline channel rather than
+   a fill colour: a magenta highlight would sit too close to the family hues
+   under deuteranopia, and recolouring a match would also hide which kind of
+   panic it is. */
+.search { display: flex; align-items: center; gap: 7px; }
+.search input {
+  /* A search input carries a user agent appearance that would otherwise win
+     over the surface colour. */
+  appearance: none; -webkit-appearance: none;
+  font: inherit; font-size: 12px; width: 172px; padding: 4px 9px;
+  color: var(--text-primary); background: var(--surface-page);
+  border: 1px solid var(--border); border-radius: 7px;
+  transition: border-color .12s, width .16s;
+}
+.search input::placeholder { color: var(--text-muted); }
+.search input::-webkit-search-cancel-button { appearance: none; }
+.search input:focus { outline: none; border-color: var(--focus); width: 232px; }
+.search.active input { border-color: var(--border-strong); }
+.search .tally { font-size: 11.5px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums; white-space: nowrap; }
+.search .tally b { color: var(--text-primary); font-weight: 600; }
+.search .only { opacity: 1; }
+
+.disclose { display: block; width: 100%; margin-top: 10px; padding: 6px 8px;
+  font: inherit; font-size: 11.5px; text-align: left; cursor: pointer;
+  color: var(--text-muted); background: none; border: 1px dashed var(--border);
+  border-radius: 7px; }
+.disclose:hover { color: var(--text-primary); border-color: var(--border-strong);
+  background: var(--surface-sunk); }
+.cell rect.match { fill: none; stroke: var(--text-primary); stroke-width: 2; }
+.cell rect.match.current { stroke: var(--series-alloc); stroke-width: 2.5; }
+
+/* Ticks above the chart marking where the matches are, so a match a pixel
+   wide can still be found. */
+.match-tick { fill: var(--text-muted); }
+.match-tick.current { fill: var(--series-alloc); }
+.search .tally b { color: var(--text-primary); font-weight: 600; }
+
+.crumbs { flex: none; display: flex; flex-wrap: wrap; align-items: center;
+  gap: 2px; padding: 7px 16px; border-bottom: 1px solid var(--border);
+  background: var(--surface-page); }
+.crumb { background: none; border: none; padding: 3px 7px; border-radius: 6px;
+  font: inherit; font-size: 11.5px; color: var(--text-secondary);
+  cursor: pointer; max-width: 260px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.crumb:hover:not(:disabled) { background: var(--surface-sunk);
+  color: var(--text-primary); }
+.crumb:disabled { color: var(--text-primary); cursor: default;
+  font-weight: 600; }
+.crumb + .crumb::before { content: "/"; color: var(--border-strong);
+  margin-right: 7px; }
+.crumb.rest { color: var(--text-secondary); cursor: default; }
+.crumb-hint { font-size: 11px; color: var(--text-muted); margin-left: 4px; }
+
+/* Progress. A policy change is answered by the server, so the wait is real
+   and has to be visible rather than left to look like a dead interface. */
+.progress { flex: none; height: 2px; background: transparent; overflow: hidden; }
+.progress.on { background: var(--surface-sunk); }
+.progress span { display: block; height: 100%; width: 0; }
+.progress.on span {
+  width: 34%; background: var(--series-logic); border-radius: 2px;
+  animation: slide 1s ease-in-out infinite;
+}
+@keyframes slide {
+  0% { margin-left: -34%; }
+  100% { margin-left: 100%; }
+}
+
+.stage-body { position: relative; flex: 1; min-height: 0; display: flex; }
+.veil {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; gap: 10px; font-size: 12px;
+  color: var(--text-secondary); background: var(--surface-chart);
+  opacity: .82;
+}
+.veil.quiet { flex-direction: column; text-align: center; opacity: 1;
+  background: var(--surface-chart); padding: 0 24px; }
+.veil.quiet .lead { color: var(--text-primary); font-size: 14px;
+  font-weight: 600; margin: 0 0 6px; }
+.veil.quiet p { margin: 0; max-width: 44ch; }
+.linkish { background: none; border: none; padding: 0; font: inherit;
+  color: var(--series-logic); cursor: pointer; text-decoration: underline; }
+
+.spinner {
+  width: 15px; height: 15px; border-radius: 50%;
+  border: 2px solid var(--border-strong); border-top-color: var(--series-logic);
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .progress.on span, .veil.quiet { flex-direction: column; text-align: center; opacity: 1;
+  background: var(--surface-chart); padding: 0 24px; }
+.veil.quiet .lead { color: var(--text-primary); font-size: 14px;
+  font-weight: 600; margin: 0 0 6px; }
+.veil.quiet p { margin: 0; max-width: 44ch; }
+.linkish { background: none; border: none; padding: 0; font: inherit;
+  color: var(--series-logic); cursor: pointer; text-decoration: underline; }
+
+.spinner { animation: none; }
+  .progress.on span { width: 100%; }
+}
+
+.chart-host { flex: 1; min-height: 0; overflow: auto;
+  padding: 12px 16px 20px; background: var(--surface-chart); }
+.chart-host svg { display: block; }
+.frame-label { font-size: 10px; pointer-events: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.cell rect { transition: opacity .12s; }
+.cell:hover rect.frame { opacity: .8; }
+
+.tooltip { position: fixed; pointer-events: none; z-index: 20;
+  max-width: 400px; background: var(--surface-panel);
+  border: 1px solid var(--border-strong); border-radius: 9px;
+  padding: 9px 11px; font-size: 12px; box-shadow: var(--shadow);
+  color: var(--text-secondary); }
+.tooltip .t { color: var(--text-primary); font-weight: 600;
+  margin-bottom: 4px; font-family: ui-monospace, SFMono-Regular, Menlo,
+  monospace; font-size: 11.5px; word-break: break-all; }
+.tooltip .gate { color: var(--gate); }
+.tooltip .k { color: var(--text-muted); }
+
+.detail { flex: none; max-height: 44%; overflow-y: auto; padding: 14px 16px;
+  border-top: 1px solid var(--border); background: var(--surface-panel); }
+.detail .empty { color: var(--text-muted); font-size: 12px; }
+.detail h2 { color: var(--text-secondary); text-transform: none;
+  letter-spacing: 0; font-size: 13px; font-weight: 600; }
+.detail h2 code { color: var(--text-primary); }
+
+.path { list-style: none; margin: 10px 0 0; padding: 0; }
+.path li { padding: 4px 0 4px 15px; margin-left: 3px;
+  border-left: 2px solid var(--border-strong); }
+.path li.cleanup { border-left: 2px dashed var(--gate); }
+.path li.terminal { border-left-color: var(--series-alloc); }
+.path .fn { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; color: var(--text-primary); word-break: break-all; }
+.path .where { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+.path .tag { font-size: 9.5px; text-transform: uppercase;
+  letter-spacing: .07em; color: var(--gate); margin-left: 7px;
+  font-weight: 650; }
+
+table.data { border-collapse: collapse; width: 100%; font-size: 12px;
+  margin-top: 8px; }
+table.data th, table.data td { text-align: left; padding: 5px 9px;
+  border-bottom: 1px solid var(--border); }
+table.data th { color: var(--text-muted); font-weight: 650; font-size: 10.5px;
+  text-transform: uppercase; letter-spacing: .07em; }
+table.data tr:hover td { background: var(--surface-sunk); }
+table.data td.n { text-align: right; font-variant-numeric: tabular-nums; }
+table.data td.dim { color: var(--text-muted); }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; }
+.err { color: var(--series-alloc); font-size: 12px; margin-top: 12px;
+  padding: 8px 10px; border-radius: 7px; background: var(--surface-sunk);
+  border: 1px solid var(--border); }
+</style>
+</head>
+<body data-palette="#3987e5,#d95926,#199e70">
+  <div id="app" class="viz-root"></div>
+  <script src="/vue.global.prod.js"></script>
+  <script src="/d3.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

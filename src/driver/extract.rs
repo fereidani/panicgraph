@@ -1,0 +1,573 @@
+//! Walks MIR and records what each function can panic with, and who it calls.
+
+use panicgraph::{
+    Body, CallSite, Category, EdgeKind, FuncKey, Guard, Loc, PanicSite,
+    Termination, UnwindOrigin,
+};
+use rustc_middle::{
+    middle::codegen_fn_attrs::CodegenFnAttrFlags,
+    mir::{self, AssertKind, BasicBlock, TerminatorKind, UnwindAction},
+    ty::{self, Instance, TyCtxt, TypeVisitableExt, TypingEnv},
+};
+
+use crate::{
+    sinks::SinkTable,
+    util::{Map, Set},
+};
+
+/// Entries collected from one body before reachability guards are attached.
+struct Raw<'tcx> {
+    sites: Vec<PanicSite>,
+    site_blocks: Vec<BasicBlock>,
+    calls: Vec<CallSite>,
+    call_blocks: Vec<BasicBlock>,
+    unwind_edges: Vec<(UnwindOrigin, BasicBlock)>,
+    successors: Vec<Instance<'tcx>>,
+}
+
+impl Raw<'_> {
+    const fn new() -> Self {
+        Self {
+            sites: Vec::new(),
+            site_blocks: Vec::new(),
+            calls: Vec::new(),
+            call_blocks: Vec::new(),
+            unwind_edges: Vec::new(),
+            successors: Vec::new(),
+        }
+    }
+}
+
+/// Collects panic facts for every function reachable from a crate's roots.
+pub struct Extractor<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    sinks: SinkTable,
+    bodies: Vec<Body>,
+    seen: Set<String>,
+}
+
+impl<'tcx> Extractor<'tcx> {
+    /// Prepares an extractor for one compilation.
+    pub fn new(tcx: TyCtxt<'tcx>) -> Self {
+        Self {
+            tcx,
+            sinks: SinkTable::new(),
+            bodies: Vec::new(),
+            seen: Set::default(),
+        }
+    }
+
+    /// Walks the whole reachable call graph and returns the bodies found.
+    pub fn run(mut self) -> Vec<Body> {
+        let mut queue: Vec<Instance<'tcx>> = self.roots();
+        // Every instance is recorded in `seen` before its callees are
+        // queued, so each function is expanded at most once and the walk
+        // terminates once the reachable set is exhausted.
+        while let Some(inst) = queue.pop() {
+            let Some(key) = self.symbol_of(inst) else {
+                continue;
+            };
+            if !self.seen.insert(key.clone()) {
+                continue;
+            }
+            queue.extend(self.build(inst, FuncKey(key)));
+        }
+        self.bodies
+    }
+
+    /// Every function defined in the crate under compilation.
+    fn roots(&self) -> Vec<Instance<'tcx>> {
+        let mut out = Vec::new();
+        for local in self.tcx.mir_keys(()) {
+            let did = local.to_def_id();
+            if !self.tcx.is_mir_available(did) {
+                continue;
+            }
+            if !matches!(
+                self.tcx.def_kind(did),
+                rustc_hir::def::DefKind::Fn
+                    | rustc_hir::def::DefKind::AssocFn
+                    | rustc_hir::def::DefKind::Closure
+            ) {
+                continue;
+            }
+            // Generic items are analysed as written. Their callees often
+            // cannot be resolved without concrete arguments, which is
+            // recorded honestly as an unresolved edge rather than silently
+            // dropping the function from the report.
+            let args = ty::GenericArgs::identity_for_item(self.tcx, did);
+            out.push(Instance::new_raw(did, args));
+        }
+        out
+    }
+
+    /// Records one function and returns the callees worth expanding.
+    fn build(
+        &mut self,
+        inst: Instance<'tcx>,
+        key: FuncKey,
+    ) -> Vec<Instance<'tcx>> {
+        if !Self::has_mir_body(self.tcx, inst) {
+            let did = inst.def_id();
+            let display = self.tcx.def_path_str(did);
+            let krate = self.tcx.crate_name(did.krate).to_string();
+            let mut body = Body::opaque(key, display, krate);
+            if self.never_unwinds(did) {
+                // The compiler guarantees this function does not unwind, so
+                // it raises no panic even though its body is unavailable.
+                // Allocator shims are the common case.
+                body.opaque = false;
+            }
+            self.bodies.push(body);
+            return Vec::new();
+        }
+
+        let mir = self.tcx.instance_mir(inst.def);
+        let raw = self.scan(inst, mir);
+        let origins = Self::propagate_origins(mir, &raw.unwind_edges);
+
+        let mut sites = raw.sites;
+        for (site, bb) in sites.iter_mut().zip(&raw.site_blocks) {
+            site.guard = Self::guard_for(mir, &origins, *bb);
+        }
+        let mut calls = raw.calls;
+        for (call, bb) in calls.iter_mut().zip(&raw.call_blocks) {
+            call.guard = Self::guard_for(mir, &origins, *bb);
+        }
+
+        let did = inst.def_id();
+        self.bodies.push(Body {
+            key,
+            display: self.tcx.def_path_str(did),
+            krate: self.tcx.crate_name(did.krate).to_string(),
+            loc: self.loc_of(self.tcx.def_span(did)),
+            sites,
+            calls,
+            opaque: false,
+            local: did.is_local(),
+        });
+        raw.successors
+    }
+
+    /// The environment types in this body must be normalized against.
+    ///
+    /// A body still carrying generic parameters cannot be normalized as
+    /// though it were monomorphic; doing so asks the compiler to resolve
+    /// parameters that have no value yet.
+    fn env_for(&self, inst: Instance<'tcx>) -> TypingEnv<'tcx> {
+        if inst.args.has_param() {
+            TypingEnv::post_analysis(self.tcx, inst.def_id())
+        } else {
+            TypingEnv::fully_monomorphized()
+        }
+    }
+
+    /// Reads every terminator of a body into raw entries.
+    fn scan(
+        &mut self,
+        inst: Instance<'tcx>,
+        mir: &mir::Body<'tcx>,
+    ) -> Raw<'tcx> {
+        let env = self.env_for(inst);
+        let mut raw = Raw::new();
+        for (bb, data) in mir.basic_blocks.iter_enumerated() {
+            let Some(term) = &data.terminator else {
+                continue;
+            };
+            match &term.kind {
+                TerminatorKind::Assert { msg, unwind, .. } => {
+                    self.push_assert(
+                        &mut raw,
+                        bb,
+                        msg,
+                        *unwind,
+                        term.source_info.span,
+                    );
+                }
+                TerminatorKind::Call {
+                    func,
+                    unwind,
+                    fn_span,
+                    ..
+                } => {
+                    let ty = func.ty(&mir.local_decls, self.tcx);
+                    self.push_call(
+                        &mut raw, inst, env, bb, ty, *unwind, *fn_span,
+                    );
+                }
+                TerminatorKind::Drop { place, unwind, .. } => {
+                    let ty = place.ty(&mir.local_decls, self.tcx).ty;
+                    self.push_drop(
+                        &mut raw,
+                        inst,
+                        env,
+                        bb,
+                        ty,
+                        *unwind,
+                        term.source_info.span,
+                    );
+                }
+                _ => {}
+            }
+        }
+        raw
+    }
+
+    /// Records a compiler inserted check as a panic site.
+    fn push_assert<O>(
+        &self,
+        raw: &mut Raw<'tcx>,
+        bb: BasicBlock,
+        msg: &AssertKind<O>,
+        unwind: UnwindAction,
+        span: rustc_span::Span,
+    ) {
+        let (category, termination, reason) = classify_assert(msg);
+        let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
+        raw.sites.push(PanicSite {
+            category,
+            termination,
+            reason: reason.to_owned(),
+            sink: None,
+            loc: self.loc_of(span),
+            guard: Guard::default(),
+        });
+        raw.site_blocks.push(bb);
+        Self::record_unwind(raw, UnwindOrigin::Site(index), unwind);
+    }
+
+    /// Records a call, either as a panic site or as a graph edge.
+    #[allow(clippy::too_many_arguments)]
+    fn push_call(
+        &mut self,
+        raw: &mut Raw<'tcx>,
+        inst: Instance<'tcx>,
+        env: TypingEnv<'tcx>,
+        bb: BasicBlock,
+        ty: ty::Ty<'tcx>,
+        unwind: UnwindAction,
+        span: rustc_span::Span,
+    ) {
+        let Ok(ty) = inst.try_instantiate_mir_and_normalize_erasing_regions(
+            self.tcx,
+            env,
+            ty::EarlyBinder::bind(self.tcx, ty),
+        ) else {
+            self.push_edge(
+                raw,
+                bb,
+                None,
+                "<unresolved>".to_owned(),
+                EdgeKind::Unresolved,
+                unwind,
+                span,
+            );
+            return;
+        };
+        let ty::FnDef(did, args) = *ty.kind() else {
+            // A call through a function pointer. The target set is unknown.
+            self.push_edge(
+                raw,
+                bb,
+                None,
+                "<fn pointer>".to_owned(),
+                EdgeKind::FnPtr,
+                unwind,
+                span,
+            );
+            return;
+        };
+        let Some(args) = args.no_bound_vars() else {
+            self.push_edge(
+                raw,
+                bb,
+                None,
+                self.tcx.def_path_str(did),
+                EdgeKind::Unresolved,
+                unwind,
+                span,
+            );
+            return;
+        };
+        let resolved = Instance::try_resolve(self.tcx, env, did, args);
+        let Ok(Some(callee)) = resolved else {
+            self.push_edge(
+                raw,
+                bb,
+                None,
+                self.tcx.def_path_str(did),
+                EdgeKind::Unresolved,
+                unwind,
+                span,
+            );
+            return;
+        };
+
+        if let Some(sink) = self.sinks.get(self.tcx, callee.def_id()) {
+            let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
+            raw.sites.push(PanicSite {
+                category: sink.category,
+                termination: sink.termination,
+                reason: format!(
+                    "calls {}",
+                    self.tcx.def_path_str(callee.def_id())
+                ),
+                sink: Some(self.tcx.def_path_str(callee.def_id())),
+                loc: self.loc_of(span),
+                guard: Guard::default(),
+            });
+            raw.site_blocks.push(bb);
+            Self::record_unwind(raw, UnwindOrigin::Site(index), unwind);
+            return;
+        }
+
+        if matches!(
+            callee.def,
+            ty::InstanceKind::Intrinsic(..)
+                | ty::InstanceKind::LlvmIntrinsic(..)
+        ) {
+            // Intrinsics are compiler defined operations. They cannot call
+            // back into the program, so they add nothing to the graph, and
+            // recording them as bodies without MIR would report every use of
+            // a hint like `cold_path` as an unknown panic.
+            return;
+        }
+        let kind = match callee.def {
+            ty::InstanceKind::Virtual(..) => EdgeKind::Vtable,
+            _ => EdgeKind::Static,
+        };
+        let display = self.tcx.def_path_str(callee.def_id());
+        let key = self.symbol_of(callee).map(FuncKey);
+        self.push_edge(raw, bb, key, display, kind, unwind, span);
+        if kind == EdgeKind::Static {
+            raw.successors.push(callee);
+        }
+    }
+
+    /// Records the drop glue reached by a `Drop` terminator.
+    #[allow(clippy::too_many_arguments)]
+    fn push_drop(
+        &self,
+        raw: &mut Raw<'tcx>,
+        inst: Instance<'tcx>,
+        env: TypingEnv<'tcx>,
+        bb: BasicBlock,
+        ty: ty::Ty<'tcx>,
+        unwind: UnwindAction,
+        span: rustc_span::Span,
+    ) {
+        let normalized = inst
+            .try_instantiate_mir_and_normalize_erasing_regions(
+                self.tcx,
+                env,
+                ty::EarlyBinder::bind(self.tcx, ty),
+            );
+        let Ok(ty) = normalized else {
+            self.push_edge(
+                raw,
+                bb,
+                None,
+                "<unresolved drop>".to_owned(),
+                EdgeKind::Unresolved,
+                unwind,
+                span,
+            );
+            return;
+        };
+        if ty.has_param() {
+            // Drop glue is only known once the dropped type is concrete.
+            self.push_edge(
+                raw,
+                bb,
+                None,
+                format!("drop glue for {ty}"),
+                EdgeKind::Unresolved,
+                unwind,
+                span,
+            );
+            return;
+        }
+        let glue = Instance::resolve_drop_glue(self.tcx, ty);
+        let display = format!("drop glue for {ty}");
+        let key = self.symbol_of(glue).map(FuncKey);
+        self.push_edge(raw, bb, key, display, EdgeKind::Drop, unwind, span);
+        raw.successors.push(glue);
+    }
+
+    /// Appends a call edge and its unwind channel.
+    #[allow(clippy::too_many_arguments)]
+    fn push_edge(
+        &self,
+        raw: &mut Raw<'tcx>,
+        bb: BasicBlock,
+        callee: Option<FuncKey>,
+        callee_display: String,
+        kind: EdgeKind,
+        unwind: UnwindAction,
+        span: rustc_span::Span,
+    ) {
+        let index = u32::try_from(raw.calls.len()).unwrap_or(u32::MAX);
+        raw.calls.push(CallSite {
+            callee,
+            callee_display,
+            kind,
+            loc: self.loc_of(span),
+            guard: Guard::default(),
+        });
+        raw.call_blocks.push(bb);
+        Self::record_unwind(raw, UnwindOrigin::Call(index), unwind);
+    }
+
+    /// Notes that unwinding from `origin` transfers control to a cleanup
+    /// block.
+    fn record_unwind(
+        raw: &mut Raw<'tcx>,
+        origin: UnwindOrigin,
+        unwind: UnwindAction,
+    ) {
+        if let UnwindAction::Cleanup(target) = unwind {
+            raw.unwind_edges.push((origin, target));
+        }
+    }
+
+    /// Marks every cleanup block reachable from each unwind edge.
+    fn propagate_origins(
+        mir: &mir::Body<'_>,
+        edges: &[(UnwindOrigin, BasicBlock)],
+    ) -> Map<BasicBlock, Vec<UnwindOrigin>> {
+        let mut out: Map<BasicBlock, Vec<UnwindOrigin>> = Map::default();
+        for (origin, start) in edges {
+            let mut seen: Set<BasicBlock> = Set::default();
+            let mut stack = vec![*start];
+            // `seen` admits each block once, so the walk is bounded by the
+            // number of basic blocks in the body.
+            while let Some(bb) = stack.pop() {
+                if !seen.insert(bb) {
+                    continue;
+                }
+                let list = out.entry(bb).or_default();
+                if !list.contains(origin) {
+                    list.push(*origin);
+                }
+                let Some(term) = &mir.basic_blocks[bb].terminator else {
+                    continue;
+                };
+                stack.extend(term.successors());
+            }
+        }
+        out
+    }
+
+    /// Builds the reachability guard for one basic block.
+    fn guard_for(
+        mir: &mir::Body<'_>,
+        origins: &Map<BasicBlock, Vec<UnwindOrigin>>,
+        bb: BasicBlock,
+    ) -> Guard {
+        Guard {
+            normal: !mir.basic_blocks[bb].is_cleanup,
+            origins: origins.get(&bb).cloned().unwrap_or_default(),
+        }
+    }
+
+    /// Whether the compiler guarantees a function cannot unwind.
+    fn never_unwinds(&self, did: rustc_hir::def_id::DefId) -> bool {
+        self.tcx
+            .codegen_fn_attrs(did)
+            .flags
+            .contains(CodegenFnAttrFlags::NEVER_UNWIND)
+    }
+
+    /// Whether the compiler can produce a body for this instance.
+    fn has_mir_body(tcx: TyCtxt<'tcx>, inst: Instance<'tcx>) -> bool {
+        match inst.def {
+            ty::InstanceKind::Item(def) => tcx.is_mir_available(def),
+            ty::InstanceKind::Intrinsic(..)
+            | ty::InstanceKind::LlvmIntrinsic(..)
+            | ty::InstanceKind::Virtual(..) => false,
+            ty::InstanceKind::Shim(_) => true,
+        }
+    }
+
+    /// The globally unique key for an instance.
+    fn symbol_of(&self, inst: Instance<'tcx>) -> Option<String> {
+        if matches!(inst.def, ty::InstanceKind::Virtual(..)) {
+            return None;
+        }
+        if inst.args.has_param() {
+            // A symbol name only exists once the generic arguments are
+            // concrete, so a generic body is keyed by its path instead.
+            return Some(format!(
+                "generic:{}",
+                self.tcx.def_path_str(inst.def_id())
+            ));
+        }
+        Some(self.tcx.symbol_name(inst).name.to_owned())
+    }
+
+    /// Converts a span into a source location.
+    fn loc_of(&self, span: rustc_span::Span) -> Option<Loc> {
+        if span.is_dummy() {
+            return None;
+        }
+        let map = self.tcx.sess.source_map();
+        let pos = map.lookup_char_pos(span.lo());
+        Some(Loc {
+            file: map.filename_for_diagnostics(&pos.file.name).to_string(),
+            line: u32::try_from(pos.line).unwrap_or(0),
+            col: pos.col.0.saturating_add(1).try_into().unwrap_or(0),
+        })
+    }
+}
+
+/// Maps a compiler inserted check to a reportable category.
+const fn classify_assert<O>(
+    msg: &AssertKind<O>,
+) -> (Category, Termination, &'static str) {
+    match msg {
+        AssertKind::BoundsCheck { .. } => {
+            (Category::Index, Termination::Unwind, "index out of bounds")
+        }
+        AssertKind::Overflow(..) => (
+            Category::Overflow,
+            Termination::Unwind,
+            "arithmetic overflow",
+        ),
+        AssertKind::OverflowNeg(_) => {
+            (Category::Overflow, Termination::Unwind, "negation overflow")
+        }
+        AssertKind::DivisionByZero(_) => (
+            Category::DivideByZero,
+            Termination::Unwind,
+            "attempt to divide by zero",
+        ),
+        AssertKind::RemainderByZero(_) => (
+            Category::RemainderByZero,
+            Termination::Unwind,
+            "attempt to take remainder by zero",
+        ),
+        AssertKind::MisalignedPointerDereference { .. } => (
+            Category::MisalignedRef,
+            Termination::Abort,
+            "misaligned pointer dereference",
+        ),
+        AssertKind::NullPointerDereference
+        | AssertKind::NullReferenceConstructed => (
+            Category::NullDeref,
+            Termination::Abort,
+            "null pointer dereference",
+        ),
+        AssertKind::InvalidEnumConstruction(_) => (
+            Category::Explicit,
+            Termination::Abort,
+            "invalid enum construction",
+        ),
+        AssertKind::ResumedAfterReturn(_)
+        | AssertKind::ResumedAfterPanic(_)
+        | AssertKind::ResumedAfterDrop(_) => (
+            Category::Explicit,
+            Termination::Unwind,
+            "coroutine resumed after completion",
+        ),
+    }
+}

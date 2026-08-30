@@ -1,0 +1,140 @@
+//! Reports which functions can panic, why, and through what call path.
+
+use std::process::ExitCode;
+
+use anyhow::Result;
+use clap::Parser;
+use panicgraph::{
+    Graph, Policy, Solution, Solver,
+    args::{Args, Check, Cli, Command},
+    check, report, run,
+};
+
+/// Nothing to report.
+const EXIT_CLEAN: u8 = 0;
+/// At least one function can panic, or a check failed.
+const EXIT_FINDINGS: u8 = 1;
+/// The tool could not complete.
+const EXIT_ERROR: u8 = 2;
+
+fn main() -> ExitCode {
+    match dispatch() {
+        Ok(code) => ExitCode::from(code),
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            ExitCode::from(EXIT_ERROR)
+        }
+    }
+}
+
+/// Parses arguments and runs the requested command.
+fn dispatch() -> Result<u8> {
+    let args = Cli::parse().resolve()?;
+    let mut out = String::new();
+
+    let code = match &args.command {
+        Command::Kinds => {
+            report::kinds(&mut out);
+            EXIT_CLEAN
+        }
+        #[cfg(feature = "serve")]
+        Command::Analyze if args.listen.is_some() => {
+            return listen(&args).map(|()| EXIT_CLEAN);
+        }
+        #[cfg(feature = "svg")]
+        Command::Analyze if args.format == panicgraph::args::Format::Svg => {
+            let (graph, _) = solve(&args)?;
+            panicgraph::svg::render(
+                &graph,
+                args.suppress,
+                !args.static_only,
+                true,
+                &mut out,
+            )?;
+            EXIT_CLEAN
+        }
+        Command::Analyze => analyze(&args, &mut out)?,
+        Command::Why { function } => {
+            let (graph, solution) = solve(&args)?;
+            report::why(&graph, &solution, function, &mut out);
+            EXIT_CLEAN
+        }
+        Command::Check(gate) => gate_check(&args, gate, &mut out)?,
+        Command::Baseline { file } => {
+            let (graph, solution) = solve(&args)?;
+            let empty = Check {
+                forbid: Vec::new(),
+                allow: Vec::new(),
+                max: None,
+                baseline: None,
+                fail_on_unknown: false,
+            };
+            let outcome = check::run(&graph, &solution, &args, &empty)?;
+            check::write_baseline(file, &args, &outcome.findings)?;
+            println!(
+                "recorded {} findings in {}",
+                outcome.findings.len(),
+                file.display()
+            );
+            EXIT_CLEAN
+        }
+    };
+
+    print!("{out}");
+    Ok(code)
+}
+
+/// Applies the gate and reports what failed.
+fn gate_check(args: &Args, gate: &Check, out: &mut String) -> Result<u8> {
+    let (graph, solution) = solve(args)?;
+    let outcome = check::run(&graph, &solution, args, gate)?;
+    check::render(&outcome, args, gate, out)?;
+    Ok(if outcome.failed() {
+        EXIT_FINDINGS
+    } else {
+        EXIT_CLEAN
+    })
+}
+
+/// Serves the interactive view.
+#[cfg(feature = "serve")]
+fn listen(args: &Args) -> Result<()> {
+    let Some(addr) = args.listen else {
+        return Ok(());
+    };
+    let artifacts = run::collect(args)?;
+    let graph = Graph::from_artifacts(artifacts);
+    panicgraph::serve::run(graph, addr, !args.static_only)
+}
+
+/// Runs the analysis and renders the report.
+fn analyze(args: &Args, out: &mut String) -> Result<u8> {
+    let (graph, solution) = solve(args)?;
+    report::analysis(&graph, &solution, args, out)?;
+    // The hint is prose, so it belongs only in the rendering that is prose.
+    // Appending it to json left the output unparseable.
+    if matches!(args.format, panicgraph::args::Format::Human)
+        && let Some(hint) = report::suppressed_hint(&graph, &solution, args)
+    {
+        out.push('\n');
+        out.push_str(&hint);
+        out.push('\n');
+    }
+    let any = graph
+        .iter()
+        .filter(|(_, body)| args.all_crates || body.local)
+        .any(|(id, _)| !solution.is_clean(id));
+    Ok(if any { EXIT_FINDINGS } else { EXIT_CLEAN })
+}
+
+/// Builds the crate, merges the artifacts, and solves the graph.
+fn solve(args: &Args) -> Result<(Graph, Solution)> {
+    let artifacts = run::collect(args)?;
+    let graph = Graph::from_artifacts(artifacts);
+    let policy = Policy {
+        suppressed: args.suppress,
+        follow_inexact: !args.static_only,
+    };
+    let solution = Solver::new(&graph, policy).solve()?;
+    Ok((graph, solution))
+}

@@ -1,0 +1,5 @@
+# The driver links against rustc internals, so the toolchain is pinned and the
+# driver verifies the compiler version it was built against at startup.
+[toolchain]
+channel = "nightly"
+components = ["rustc-dev", "llvm-tools", "rust-src"]

@@ -1,0 +1,76 @@
+# Declared so a parent directory cannot absorb this into its own workspace.
+[workspace]
+
+[package]
+name = "panicgraph"
+version = "0.1.0"
+edition = "2024"
+authors = ["Khashayar Fereidani <info@fereidani.com>"]
+license = "MIT OR Apache-2.0"
+rust-version = "1.100"
+description = "Reports which functions can panic, why, and through what call path."
+repository = "https://github.com/fereidani/panicgraph"
+readme = "README.md"
+categories = [
+    "development-tools",
+    "development-tools::debugging",
+    "development-tools::testing",
+    "command-line-utilities",
+    "visualization",
+]
+keywords = ["panic", "static-analysis", "mir", "no-panic", "flamegraph"]
+
+[lib]
+name = "panicgraph"
+path = "src/lib.rs"
+
+[[bin]]
+name = "panicgraph"
+path = "src/main.rs"
+
+# The driver ships as a second binary of the same package so that a single
+# `cargo install --path .` puts both on PATH next to each other, which is
+# where the front end looks for it. A separate package would install only
+# when named explicitly.
+[[bin]]
+name = "panicgraph-driver"
+path = "src/driver/main.rs"
+
+[features]
+# The report and the check are the whole tool for a build that only needs a
+# verdict. The interactive view and the drawing are for a person looking at
+# the result, so both can be left out, which drops the compression dependency
+# and the vendored scripts the view is built on.
+default = ["serve", "svg"]
+serve = ["dep:flate2"]
+svg = []
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+# Pure Rust backend, so the tool builds anywhere without a system zlib.
+flate2 = { version = "1", default-features = false, features = [
+    "rust_backend",
+], optional = true }
+hashbrown = { version = "0.16", features = ["serde"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+debug = 0
+lto = "fat"
+codegen-units = 1
+rpath = false
+strip = true
+# `panic = "abort"` is deliberately absent. The driver links the compiler's
+# own libraries, which are built with the unwinding runtime, and mixing the
+# two is rejected outright: "the linked panic runtime `panic_unwind` is not
+# compiled with this crate's panic strategy `abort`". Cargo does not allow
+# the setting per package either, so it would have to apply to the driver as
+# well. Unwinding is also what lets the driver turn a compiler crash into a
+# clean exit code rather than taking the whole build down with it.
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
