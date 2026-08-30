@@ -72,6 +72,16 @@ pub(crate) fn reportable<'a>(
     })
 }
 
+/// Whether anything at all would be reported under these settings.
+///
+/// The exit code is what a continuous integration run reads, so it has to
+/// agree with what the report prints rather than with the unfiltered
+/// solution: a run that names no finding has nothing to report.
+#[must_use]
+pub fn any_finding(graph: &Graph, solution: &Solution, args: &Args) -> bool {
+    reportable(graph, solution, args).next().is_some()
+}
+
 /// Selects the functions worth reporting, one entry per name.
 fn collect(graph: &Graph, solution: &Solution, args: &Args) -> Vec<Finding> {
     let mut by_name: Vec<(&str, Finding)> = Vec::new();

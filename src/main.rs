@@ -114,11 +114,11 @@ fn analyze(args: &Args, out: &mut String) -> Result<u8> {
         out.push_str(&hint);
         out.push('\n');
     }
-    let any = graph
-        .iter()
-        .filter(|(_, body)| args.all_crates || body.local)
-        .any(|(id, _)| !solution.is_clean(id));
-    Ok(if any { EXIT_FINDINGS } else { EXIT_CLEAN })
+    Ok(if report::any_finding(&graph, &solution, args) {
+        EXIT_FINDINGS
+    } else {
+        EXIT_CLEAN
+    })
 }
 
 /// Builds the crate, merges the artifacts, and solves the graph.
