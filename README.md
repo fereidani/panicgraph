@@ -254,7 +254,9 @@ Read these before trusting a clean result.
 - **The default standard library is partly opaque.** Concrete functions in
   `std` ship without MIR, so panics inside them are reported as `unknown`
   rather than proven absent. `--std full` rebuilds it from source with its
-  bodies kept, which costs one build that later runs reuse. `check` and
+  bodies kept, which costs one build per toolchain: the tree is cached
+  under the user's cache directory (`PANICGRAPH_CACHE` overrides where)
+  and shared by every project on the machine. `check` and
   `baseline` do this by default, because a gate is read by its category
   names: with the shipped library a reachable `unwrap` reports as `unknown`.
   It does not remove `unknown`, it names it, so expect the same functions

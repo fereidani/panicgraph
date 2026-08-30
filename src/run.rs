@@ -169,9 +169,19 @@ fn prepare(root: &Path, driver: &Path, args: &Args) -> Result<Layout> {
         args.std_mode.name(),
         args.package.as_deref().unwrap_or("all"),
     );
+    // Rebuilding the standard library costs one full build and depends only
+    // on the toolchain, so that tree is shared across projects rather than
+    // paid for once per target directory. The artifacts stay local: they
+    // describe this crate.
+    let target = match args.std_mode {
+        StdMode::Full => {
+            shared_build_dir()?.unwrap_or_else(|| base.join("build"))
+        }
+        StdMode::Shipped => base.join("build"),
+    };
     let layout = Layout {
         out: base.join(&slot),
-        target: base.join("build"),
+        target,
     };
     let marker = format!("{slot}\n{}\n", driver_stamp(driver));
     discard_if_stale(&layout, &marker)?;
@@ -232,15 +242,19 @@ fn clear(dir: &Path) -> Result<()> {
 /// Removes result directories that no version in use writes to any more.
 ///
 /// A directory is kept when it holds the marker, which every current slot
-/// carries, and when it is the shared build tree. Anything else was written
-/// by an older layout and would otherwise sit on disk forever.
+/// carries, and when it is a build tree, shared or local. Anything else was
+/// written by an older layout and would otherwise sit on disk forever.
 fn prune_stale(base: &Path, layout: &Layout) {
     let Ok(entries) = fs::read_dir(base) else {
         return;
     };
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
-        if !path.is_dir() || path == layout.out || path == layout.target {
+        if !path.is_dir()
+            || path == layout.out
+            || path == layout.target
+            || path.file_name().is_some_and(|name| name == "build")
+        {
             continue;
         }
         if path.join(SLOT_MARKER).exists() {
@@ -252,6 +266,48 @@ fn prune_stale(base: &Path, layout: &Layout) {
             eprintln!("removed stale results in {}", path.display());
         }
     }
+}
+
+/// The shared tree a rebuilt standard library is compiled into.
+///
+/// One tree per compiler build, under the user's cache directory, so the
+/// cost of `--std full` is paid once per toolchain rather than once per
+/// project. `PANICGRAPH_CACHE` overrides the location; a system with no
+/// resolvable cache directory falls back to the project's own target tree.
+///
+/// # Errors
+///
+/// Returns an error when the compiler's version cannot be read at all.
+fn shared_build_dir() -> Result<Option<PathBuf>> {
+    let base =
+        env::var_os("PANICGRAPH_CACHE")
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::var_os("XDG_CACHE_HOME")
+                    .map(|dir| PathBuf::from(dir).join("panicgraph"))
+                    .or_else(|| {
+                        env::var_os("HOME").map(|home| {
+                            PathBuf::from(home)
+                                .join(".cache")
+                                .join("panicgraph")
+                        })
+                    })
+            });
+    let Some(base) = base else {
+        return Ok(None);
+    };
+    let version = match BUILT_AGAINST {
+        Some(version) => version.to_owned(),
+        None => match rustc_version()? {
+            Some(version) => version,
+            None => return Ok(None),
+        },
+    };
+    let fingerprint: String = version
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    Ok(Some(base.join(format!("build-{fingerprint}"))))
 }
 
 /// Reads every artifact in a directory.
