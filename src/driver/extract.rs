@@ -147,6 +147,11 @@ impl<'tcx> Extractor<'tcx> {
             // reported apart from a Rust function a fuller standard library
             // would have shown.
             body.foreign = self.tcx.is_foreign_item(did);
+            // A body the compiler could not produce is still recorded
+            // against the crate that declares it, so the two facts have to
+            // agree: a foreign item declared here reports the local crate
+            // name, and saying it is not local contradicts that.
+            body.local = did.is_local();
             if self.never_unwinds(did) {
                 // The compiler guarantees this function does not unwind, so
                 // it raises no panic even though its body is unavailable.

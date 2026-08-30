@@ -70,10 +70,14 @@ impl Graph {
     fn insert_body(&mut self, body: Body) {
         if let Some(&id) = self.by_key.get(&body.key) {
             let existing = &mut self.bodies[id.index()];
-            // A real body always beats a placeholder, and a local definition
+            // A real body always beats a placeholder, whichever crate each
+            // was seen in, and between two of a kind a local definition
             // beats a copy observed from a downstream crate.
-            let upgrade = (existing.opaque && !body.opaque)
-                || (!existing.local && body.local);
+            let upgrade = match (existing.opaque, body.opaque) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => !existing.local && body.local,
+            };
             if upgrade {
                 *existing = body;
             }
