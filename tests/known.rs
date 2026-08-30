@@ -32,6 +32,10 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_lock", "poison"),
     ("must_write", "fmt"),
     ("must_rc_clone", "refcount-overflow"),
+    ("must_slice_str", "str-boundary"),
+    ("must_borrow", "borrow"),
+    ("must_dyn", "unknown"),
+    ("must_foreign", "foreign"),
 ];
 
 /// The panics each function must *not* be reported with.

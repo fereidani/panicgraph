@@ -177,3 +177,27 @@ pub fn must_write(x: u32) -> String {
 pub fn must_rc_clone(rc: &std::rc::Rc<u32>) -> std::rc::Rc<u32> {
     rc.clone()
 }
+
+/// Reaches `str-boundary`: the end is a runtime value that can split a
+/// character.
+pub fn must_slice_str(s: &str, end: usize) -> &str {
+    &s[..end]
+}
+
+/// Reaches `borrow`.
+pub fn must_borrow(c: &std::cell::RefCell<u32>) -> u32 {
+    *c.borrow()
+}
+
+/// Reaches `unknown`: the target of the call cannot be pinned down.
+pub fn must_dyn(f: &dyn Fn() -> u8) -> u8 {
+    f()
+}
+
+/// Reaches `foreign`: the callee has no Rust body to read.
+pub fn must_foreign(x: u32) -> u32 {
+    unsafe extern "C" {
+        fn known_external(x: u32) -> u32;
+    }
+    unsafe { known_external(x) }
+}
