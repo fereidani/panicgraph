@@ -316,7 +316,7 @@ impl SinkTable {
     }
 
     /// Renders a def path from its segments, without crate qualification.
-    fn def_path(tcx: TyCtxt<'_>, did: DefId) -> String {
+    pub fn def_path(tcx: TyCtxt<'_>, did: DefId) -> String {
         let mut out = String::new();
         for seg in &tcx.def_path(did).data {
             let Some(name) = seg.data.get_opt_name() else {

@@ -34,15 +34,21 @@ struct At {
     bb: BasicBlock,
     unwind: UnwindAction,
     span: rustc_span::Span,
+    scope: mir::SourceScope,
 }
 
 impl At {
     const fn new(
         bb: BasicBlock,
         unwind: UnwindAction,
-        span: rustc_span::Span,
+        info: mir::SourceInfo,
     ) -> Self {
-        Self { bb, unwind, span }
+        Self {
+            bb,
+            unwind,
+            span: info.span,
+            scope: info.scope,
+        }
     }
 }
 
@@ -220,7 +226,7 @@ impl<'tcx> Extractor<'tcx> {
             if !reach.is_live(bb) {
                 continue;
             }
-            let span = term.source_info.span;
+            let info = term.source_info;
             match &term.kind {
                 TerminatorKind::Assert { msg, unwind, .. } => {
                     if reach.is_settled(bb) {
@@ -228,7 +234,7 @@ impl<'tcx> Extractor<'tcx> {
                         // so the compiler emits no check at all.
                         continue;
                     }
-                    let at = At::new(bb, *unwind, span);
+                    let at = At::new(bb, *unwind, info);
                     self.push_assert(&mut raw, at, msg);
                 }
                 TerminatorKind::Call {
@@ -237,12 +243,14 @@ impl<'tcx> Extractor<'tcx> {
                     fn_span,
                     ..
                 } => {
-                    let at = At::new(bb, *unwind, *fn_span);
+                    let mut info = info;
+                    info.span = *fn_span;
+                    let at = At::new(bb, *unwind, info);
                     let ty = func.ty(&mir.local_decls, self.tcx);
-                    self.push_call(&mut raw, cx, at, ty);
+                    self.push_call(&mut raw, cx, at, ty, mir);
                 }
                 TerminatorKind::Drop { place, unwind, .. } => {
-                    let at = At::new(bb, *unwind, span);
+                    let at = At::new(bb, *unwind, info);
                     let ty = place.ty(&mir.local_decls, self.tcx).ty;
                     self.push_drop(&mut raw, cx, at, ty);
                 }
@@ -283,6 +291,7 @@ impl<'tcx> Extractor<'tcx> {
         cx: Work<'tcx>,
         at: At,
         ty: ty::Ty<'tcx>,
+        mir: &mir::Body<'tcx>,
     ) {
         let Some(ty) = self.normalize(cx, ty) else {
             self.unresolved(raw, at, "<unresolved>".to_owned());
@@ -328,10 +337,23 @@ impl<'tcx> Extractor<'tcx> {
             ty::InstanceKind::Intrinsic(..)
                 | ty::InstanceKind::LlvmIntrinsic(..)
         ) {
-            // Intrinsics are compiler defined operations. They cannot call
-            // back into the program, so they add nothing to the graph, and
-            // recording them as bodies without MIR would report every use of
-            // a hint like `cold_path` as an unknown panic.
+            if self.refcount_abort(cx, at, callee.def_id(), mir) {
+                let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
+                raw.sites.push(PanicSite {
+                    category: Category::RefCountOverflow,
+                    termination: Termination::Abort,
+                    reason: "the reference count would overflow".to_owned(),
+                    sink: Some("core::intrinsics::abort".to_owned()),
+                    loc: self.loc_of(at.span),
+                    guard: Guard::default(),
+                });
+                raw.site_blocks.push(at.bb);
+                Self::record_unwind(raw, UnwindOrigin::Site(index), at.unwind);
+            }
+            // Other intrinsics are compiler defined operations. They cannot
+            // call back into the program, so they add nothing to the graph,
+            // and recording them as bodies without MIR would report every
+            // use of a hint like `cold_path` as an unknown panic.
             return;
         }
         let kind = match callee.def {
@@ -382,6 +404,56 @@ impl<'tcx> Extractor<'tcx> {
             inst: glue,
             env: cx.env,
         });
+    }
+
+    /// Whether a call to the abort intrinsic reports a reference count
+    /// overflow.
+    ///
+    /// `Rc` and `Arc` abort when a count would wrap, and the abort intrinsic
+    /// is the whole report: there is no entry point to name. The rule is
+    /// scoped to the reference counting modules so that `process::abort`, a
+    /// deliberate termination rather than a panic, stays unreported. The
+    /// machinery is usually inlined into its caller, so the enclosing
+    /// instance is not enough: the scope chain keeps the compiler's own
+    /// record of where each inlined call was written.
+    fn refcount_abort(
+        &self,
+        cx: Work<'tcx>,
+        at: At,
+        callee: rustc_hir::def_id::DefId,
+        mir: &mir::Body<'tcx>,
+    ) -> bool {
+        if self.tcx.item_name(callee).as_str() != "abort" {
+            return false;
+        }
+        if self.in_refcounting(cx.inst.def_id()) {
+            return true;
+        }
+        let mut scope = at.scope;
+        // Parent links form a tree toward the root scope, so the walk takes
+        // at most one step per scope in the body.
+        for _ in 0..=mir.source_scopes.len() {
+            let data = &mir.source_scopes[scope];
+            if let Some((inst, _)) = data.inlined
+                && self.in_refcounting(inst.def_id())
+            {
+                return true;
+            }
+            let Some(parent) = data.parent_scope else {
+                return false;
+            };
+            scope = parent;
+        }
+        false
+    }
+
+    /// Whether a function belongs to the reference counting modules.
+    fn in_refcounting(&self, did: rustc_hir::def_id::DefId) -> bool {
+        if self.tcx.crate_name(did.krate).as_str() != "alloc" {
+            return false;
+        }
+        let path = SinkTable::def_path(self.tcx, did);
+        path.starts_with("rc::") || path.starts_with("sync::")
     }
 
     /// Resolves a type written in a body against the arguments it was

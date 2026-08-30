@@ -171,3 +171,9 @@ pub fn must_write(x: u32) -> String {
     write!(s, "{x}").unwrap();
     s
 }
+
+/// Reaches `refcount-overflow`: cloning aborts when the strong count would
+/// wrap, and an abort raised by the counting machinery is that category.
+pub fn must_rc_clone(rc: &std::rc::Rc<u32>) -> std::rc::Rc<u32> {
+    rc.clone()
+}
