@@ -7,9 +7,9 @@
 //! make a clean report meaningless, and keeping one that cannot fail is the
 //! noise the tool exists to remove.
 
-use std::{path::PathBuf, process::Command};
+mod support;
 
-use serde_json::Value;
+use crate::support::analyse_fixture;
 
 /// The panic each function must be reported with.
 const MUST_PANIC: &[(&str, &str)] = &[
@@ -98,63 +98,9 @@ const MUST_BE_CLEAN_IN_DEBUG: &[&str] = &[
     "clean_nonzero_divide",
 ];
 
-/// Analyses the fixture crate and returns the categories reported per
-/// function.
-///
-/// Nothing is suppressed, so the answer is everything the analysis can see.
-fn analyse(profile: &str) -> Vec<(String, Vec<String>)> {
-    analyse_with(profile, &[])
-}
-
-/// Analyses the fixture crate with extra arguments.
-fn analyse_with(profile: &str, extra: &[&str]) -> Vec<(String, Vec<String>)> {
-    let exe = PathBuf::from(env!("CARGO_BIN_EXE_panicgraph"));
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("known");
-    let output = Command::new(&exe)
-        .arg("--manifest-dir")
-        .arg(&fixture)
-        .arg("--profile")
-        .arg(profile)
-        .arg("--suppress")
-        .arg("")
-        .arg("--format")
-        .arg("json")
-        .args(extra)
-        .output()
-        .expect("the front end should run");
-    let report: Value =
-        serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
-            panic!(
-                "the report should be json: {err}\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-        });
-    let findings = report["findings"]
-        .as_array()
-        .expect("the report should list findings");
-    findings
-        .iter()
-        .map(|finding| {
-            let name = finding["function"].as_str().unwrap_or_default();
-            let categories = finding["categories"]
-                .as_array()
-                .map(|list| {
-                    list.iter()
-                        .filter_map(|c| c.as_str().map(str::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default();
-            (name.to_owned(), categories)
-        })
-        .collect()
-}
-
 #[test]
 fn a_known_crate_reports_exactly_its_panics() {
-    let reported = analyse("release");
+    let reported = analyse_fixture("release", &[]);
     let found = |name: &str| {
         reported
             .iter()
@@ -193,7 +139,7 @@ fn a_known_crate_reports_exactly_its_panics() {
 
 #[test]
 fn a_debug_build_still_folds_the_guards() {
-    let reported = analyse("debug");
+    let reported = analyse_fixture("debug", &[]);
     let found = |name: &str| {
         reported
             .iter()
@@ -227,7 +173,7 @@ fn a_debug_build_still_folds_the_guards() {
 
 #[test]
 fn candidates_expand_dyn_and_pointer_calls() {
-    let reported = analyse_with("release", &["--candidates"]);
+    let reported = analyse_fixture("release", &["--candidates"]);
     let found = |name: &str| {
         reported
             .iter()

@@ -4,6 +4,8 @@
 //! of them reach for is not dead code in the usual sense.
 #![allow(dead_code)]
 
+use std::{path::PathBuf, process::Command};
+
 use panicgraph::{
     Artifact, Body, BuildConfig, CallSite, Category, EdgeKind, FuncKey, Graph,
     Guard, PanicSite, StdMode, Termination, UnwindOrigin,
@@ -146,4 +148,60 @@ pub fn graph(bodies: Vec<Body>) -> Graph {
         },
         bodies,
     }])
+}
+
+/// Analyses the known fixture crate through the installed front end and
+/// returns the categories reported per function.
+///
+/// Nothing is suppressed, so the answer is everything the analysis can see.
+pub fn analyse_fixture(
+    profile: &str,
+    extra: &[&str],
+) -> Vec<(String, Vec<String>)> {
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_panicgraph"));
+    let output = Command::new(&exe)
+        .arg("--manifest-dir")
+        .arg(fixture_dir())
+        .arg("--profile")
+        .arg(profile)
+        .arg("--suppress")
+        .arg("")
+        .arg("--format")
+        .arg("json")
+        .args(extra)
+        .output()
+        .expect("the front end should run");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|err| {
+            panic!(
+                "the report should be json: {err}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    let findings = report["findings"]
+        .as_array()
+        .expect("the report should list findings");
+    findings
+        .iter()
+        .map(|finding| {
+            let name = finding["function"].as_str().unwrap_or_default();
+            let categories = finding["categories"]
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|c| c.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (name.to_owned(), categories)
+        })
+        .collect()
+}
+
+/// Where the known fixture crate lives.
+pub fn fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("known")
 }
