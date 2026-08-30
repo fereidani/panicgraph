@@ -341,3 +341,12 @@ pub fn verify_absent_loop(v: &[u8]) -> u32 {
     }
     s
 }
+
+/// Reaches `explicit`, and the report quotes the message the panic
+/// carries.
+pub fn must_panic_literal(x: u32) -> u32 {
+    if x > 10 {
+        panic!("x is too big");
+    }
+    x
+}

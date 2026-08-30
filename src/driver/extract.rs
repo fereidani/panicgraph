@@ -359,20 +359,7 @@ impl<'tcx> Extractor<'tcx> {
 
         if let Some(sink) = self.sinks.get(self.tcx, callee.def_id()) {
             let sink = SinkTable::refine_unwrap(self.tcx, cx.inst.args, sink);
-            let path = self.tcx.def_path_str(callee.def_id());
-            for (category, termination) in sink.raises() {
-                let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
-                raw.sites.push(PanicSite {
-                    category,
-                    termination,
-                    reason: format!("calls {path}"),
-                    sink: Some(path.clone()),
-                    loc: self.loc_of(at.span),
-                    guard: Guard::default(),
-                });
-                raw.site_blocks.push(at.bb);
-                Self::record_unwind(raw, UnwindOrigin::Site(index), at.unwind);
-            }
+            self.push_sink(raw, cx, at, callee, operands, sink);
             return;
         }
 
@@ -507,6 +494,73 @@ impl<'tcx> Extractor<'tcx> {
                 ),
             }
         }
+    }
+
+    /// Records the panics a call into an entry point raises.
+    fn push_sink(
+        &self,
+        raw: &mut Raw<'tcx>,
+        cx: Work<'tcx>,
+        at: At,
+        callee: Instance<'tcx>,
+        operands: &[Spanned<mir::Operand<'tcx>>],
+        sink: crate::sinks::Sink,
+    ) {
+        let path = self.tcx.def_path_str(callee.def_id());
+        let reason = self.panic_message(cx, operands).map_or_else(
+            || format!("calls {path}"),
+            |msg| format!("panics with \"{msg}\""),
+        );
+        for (category, termination) in sink.raises() {
+            let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
+            raw.sites.push(PanicSite {
+                category,
+                termination,
+                reason: reason.clone(),
+                sink: Some(path.clone()),
+                loc: self.loc_of(at.span),
+                guard: Guard::default(),
+            });
+            raw.site_blocks.push(at.bb);
+            Self::record_unwind(raw, UnwindOrigin::Site(index), at.unwind);
+        }
+    }
+
+    /// The static message a panic entry point is handed, when it has one.
+    ///
+    /// Formatted panics carry their template inside an arguments value and
+    /// are left alone; a plain string argument is the message itself, which
+    /// is what a bare panic, an unwrap, and an expect pass down.
+    fn panic_message(
+        &self,
+        cx: Work<'tcx>,
+        operands: &[Spanned<mir::Operand<'tcx>>],
+    ) -> Option<String> {
+        let mir::Operand::Constant(konst) = &operands.first()?.node else {
+            return None;
+        };
+        let konst = cx
+            .inst
+            .try_instantiate_mir_and_normalize_erasing_regions(
+                self.tcx,
+                cx.env,
+                ty::EarlyBinder::bind(self.tcx, konst.const_),
+            )
+            .ok()?;
+        let ty::Ref(_, inner, _) = konst.ty().kind() else {
+            return None;
+        };
+        if !matches!(inner.kind(), ty::Str) {
+            return None;
+        }
+        let value = konst.eval(self.tcx, cx.env, rustc_span::DUMMY_SP).ok()?;
+        let bytes = value.try_get_slice_bytes_for_diagnostics(self.tcx)?;
+        let text = std::str::from_utf8(bytes).ok()?;
+        let mut out: String = text.chars().take(72).collect();
+        if out.len() < text.len() {
+            out.push_str("...");
+        }
+        Some(out)
     }
 
     /// Resolves an operand holding a function to the instance it names.

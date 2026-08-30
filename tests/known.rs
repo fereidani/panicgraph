@@ -44,6 +44,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_generic", "generic-bound"),
     ("must_dyn_speak", "dyn-call"),
     ("must_zeroed_ref", "explicit"),
+    ("must_panic_literal", "explicit"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -202,5 +203,22 @@ fn candidates_expand_dyn_and_pointer_calls() {
     assert!(
         pointer.iter().any(|c| c == "fn-pointer"),
         "the pointer could still hold something unseen, got {pointer:?}"
+    );
+}
+
+#[test]
+fn a_static_panic_message_is_quoted_in_the_reason() {
+    let exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_panicgraph"));
+    let output = std::process::Command::new(&exe)
+        .arg("--manifest-dir")
+        .arg(support::fixture_dir())
+        .arg("--suppress")
+        .arg("")
+        .output()
+        .expect("the front end should run");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("panics with \"assertion failed: "),
+        "the report should quote the message a panic carries:\n{text}"
     );
 }
