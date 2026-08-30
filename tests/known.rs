@@ -69,6 +69,7 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_guarded_index",
     "clean_guarded_index_flipped",
     "clean_while_index",
+    "clean_nonzero_divide",
 ];
 
 /// The functions that must stay clean in a debug build as well.
@@ -88,6 +89,7 @@ const MUST_BE_CLEAN_IN_DEBUG: &[&str] = &[
     "clean_guarded_index",
     "clean_guarded_index_flipped",
     "clean_while_index",
+    "clean_nonzero_divide",
 ];
 
 /// Analyses the fixture crate and returns the categories reported per

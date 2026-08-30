@@ -384,7 +384,8 @@ impl<'tcx> Folder<'_, 'tcx> {
             } => {
                 let mut after = state.clone();
                 forget(&mut after, destination.local);
-                if let Some(value) = self.call_summary(&state, func, args)
+                if let Some(value) =
+                    self.call_summary(&state, func, args, *destination)
                     && let Some(local) = destination.as_local()
                     && !self.escapes(local)
                     && let Some(slot) = after.get_mut(local.as_usize())
@@ -457,12 +458,15 @@ impl<'tcx> Folder<'_, 'tcx> {
     ///
     /// Only functions whose result the checks downstream consume are
     /// summarized, and only ones whose contract guarantees the claim for
-    /// every implementation the resolution can reach.
+    /// every implementation the resolution can reach: a slice's length is
+    /// its metadata, and a nonzero wrapper's validity invariant keeps what
+    /// it yields apart from zero.
     fn call_summary(
         &self,
         state: &State<'tcx>,
         func: &mir::Operand<'tcx>,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        destination: mir::Place<'tcx>,
     ) -> Option<Value<'tcx>> {
         let ty = self.monomorphize(func.ty(&self.mir.local_decls, self.tcx))?;
         let ty::FnDef(did, _) = *ty.kind() else {
@@ -471,21 +475,50 @@ impl<'tcx> Folder<'_, 'tcx> {
         if self.tcx.crate_name(did.krate).as_str() != "core" {
             return None;
         }
-        let path = SinkTable::def_path(self.tcx, did);
-        if path != "slice::len" {
-            return None;
+        match SinkTable::def_path(self.tcx, did).as_str() {
+            "slice::len" => {
+                let receiver = args.first()?;
+                let (mir::Operand::Copy(place) | mir::Operand::Move(place)) =
+                    &receiver.node
+                else {
+                    return None;
+                };
+                let local = root_of(state, place.as_local()?);
+                if self.escapes(local) {
+                    return None;
+                }
+                Some(Value::Length(local))
+            }
+            "num::nonzero::get" => {
+                let receiver = args.first()?;
+                let source = self.monomorphize(
+                    receiver.node.ty(&self.mir.local_decls, self.tcx),
+                )?;
+                if !self.is_nonzero(source) {
+                    return None;
+                }
+                self.apart_from_zero(
+                    destination.ty(&self.mir.local_decls, self.tcx).ty,
+                )
+            }
+            _ => None,
         }
-        let receiver = args.first()?;
-        let (mir::Operand::Copy(place) | mir::Operand::Move(place)) =
-            &receiver.node
-        else {
-            return None;
+    }
+
+    /// Whether a type is the standard library's nonzero wrapper.
+    fn is_nonzero(&self, ty: Ty<'tcx>) -> bool {
+        let ty::Adt(def, _) = ty.kind() else {
+            return false;
         };
-        let local = root_of(state, place.as_local()?);
-        if self.escapes(local) {
-            return None;
-        }
-        Some(Value::Length(local))
+        self.tcx.get_diagnostic_item(rustc_span::sym::NonZero)
+            == Some(def.did())
+    }
+
+    /// A value of an integer type that is known not to be zero.
+    fn apart_from_zero(&self, ty: Ty<'tcx>) -> Option<Value<'tcx>> {
+        let ty = self.monomorphize(ty)?;
+        let width = self.width(ty)?;
+        Some(Value::other_than(Known { bits: 0, ty, width }))
     }
 
     /// What a branch reads, when an arm of it proves something.
@@ -649,6 +682,13 @@ impl<'tcx> Folder<'_, 'tcx> {
             mir::Rvalue::Cast(mir::CastKind::IntToInt, operand, ty) => {
                 self.cast(state, operand, *ty)
             }
+            // Reading a nonzero wrapper at its plain type is how its value
+            // gets out, and the validity invariant keeps it apart from
+            // zero.
+            mir::Rvalue::Cast(mir::CastKind::Transmute, operand, ty) => self
+                .monomorphize(operand.ty(&self.mir.local_decls, self.tcx))
+                .filter(|source| self.is_nonzero(*source))
+                .and_then(|_| self.apart_from_zero(*ty)),
             mir::Rvalue::BinaryOp(op, pair) => {
                 let left = self.fact(state, &pair.0);
                 let right = self.fact(state, &pair.1);

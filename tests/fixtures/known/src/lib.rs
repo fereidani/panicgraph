@@ -264,3 +264,9 @@ pub fn must_index_wrong_slice(a: &[u8], b: &[u8], i: usize) -> u8 {
 pub fn must_modulo_signed(v: &[u8; 8], i: isize) -> u8 {
     v[(i % 8) as usize]
 }
+
+/// Clean. The value inside a nonzero is never zero, so the division's own
+/// check cannot fail.
+pub fn clean_nonzero_divide(a: u32, b: std::num::NonZeroU32) -> u32 {
+    a / b.get()
+}
