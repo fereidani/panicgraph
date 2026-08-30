@@ -305,6 +305,7 @@ impl<'tcx> Extractor<'tcx> {
         };
 
         if let Some(sink) = self.sinks.get(self.tcx, callee.def_id()) {
+            let sink = SinkTable::refine_unwrap(self.tcx, cx.inst.args, sink);
             let path = self.tcx.def_path_str(callee.def_id());
             for (category, termination) in sink.raises() {
                 let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);

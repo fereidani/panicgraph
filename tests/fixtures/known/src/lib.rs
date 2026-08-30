@@ -156,3 +156,18 @@ pub fn must_rethrow(r: Result<u8, Box<dyn std::any::Any + Send>>) -> u8 {
         Err(e) => std::panic::resume_unwind(e),
     }
 }
+
+/// Reaches `poison`, not `unwrap`: the error the unwrap discards names the
+/// panic, and a poisoned lock is its own category.
+pub fn must_lock(m: &std::sync::Mutex<u32>) -> u32 {
+    *m.lock().unwrap()
+}
+
+/// Reaches `fmt`, not `unwrap`: what is unwrapped is the error a formatting
+/// trait implementation returned.
+pub fn must_write(x: u32) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    write!(s, "{x}").unwrap();
+    s
+}

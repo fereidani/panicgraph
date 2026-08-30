@@ -7,7 +7,10 @@
 
 use panicgraph::{Category, Termination, util::Map};
 use rustc_hir::{def::DefKind, def_id::DefId};
-use rustc_middle::{middle::codegen_fn_attrs::CodegenFnAttrFlags, ty::TyCtxt};
+use rustc_middle::{
+    middle::codegen_fn_attrs::CodegenFnAttrFlags,
+    ty::{self, TyCtxt},
+};
 
 /// A panic entry point and what reaching it raises.
 ///
@@ -24,6 +27,12 @@ impl Sink {
     /// Every panic reaching this entry point can raise.
     pub fn raises(self) -> impl Iterator<Item = (Category, Termination)> {
         std::iter::once(self.first).chain(self.second)
+    }
+
+    /// Whether the sink raises exactly one panic, of this category.
+    const fn is_only(self, category: Category) -> bool {
+        self.second.is_none()
+            && matches!(self.first, (c, _) if c as u8 == category as u8)
     }
 }
 
@@ -141,6 +150,16 @@ const EXACT: &[(Sink, &[(&str, &str)])] = &[
         ],
     ),
 ];
+/// Error types that sharpen an unwrap into a finer category.
+///
+/// The unwrap funnels take the error as `&dyn Debug`, so the sink itself
+/// says nothing about what was discarded. The instantiation of the caller
+/// does, and matching it is stable where matching a message is not.
+const DISCARDED: &[(Category, &str, &str)] = &[
+    (Category::Poison, "std", "sync::poison::PoisonError"),
+    (Category::Fmt, "core", "fmt::Error"),
+];
+
 /// Resolves panic entry points and caches the answer per `DefId`.
 pub struct SinkTable {
     cache: Map<DefId, Option<Sink>>,
@@ -257,6 +276,43 @@ impl SinkTable {
             }
             _ => None,
         }
+    }
+
+    /// Sharpens an unwrap by the error type the enclosing instance discards.
+    ///
+    /// Unwrapping a poisoned lock result is a poison panic, and unwrapping a
+    /// formatting result is a formatting one. The error type sits in the
+    /// generic arguments of the `unwrap` or `expect` instance the site was
+    /// found in, so the refinement asks the instantiation, not the message.
+    pub fn refine_unwrap<'tcx>(
+        tcx: TyCtxt<'tcx>,
+        args: ty::GenericArgsRef<'tcx>,
+        sink: Sink,
+    ) -> Sink {
+        if !sink.is_only(Category::Unwrap) {
+            return sink;
+        }
+        for arg in args {
+            let Some(ty) = arg.as_type() else { continue };
+            for step in ty.walk() {
+                let Some(inner) = step.as_type() else {
+                    continue;
+                };
+                let ty::Adt(def, _) = inner.kind() else {
+                    continue;
+                };
+                let did = def.did();
+                let krate = tcx.crate_name(did.krate);
+                for (category, wanted_krate, wanted_path) in DISCARDED {
+                    if krate.as_str() == *wanted_krate
+                        && Self::def_path(tcx, did) == *wanted_path
+                    {
+                        return unwind(*category);
+                    }
+                }
+            }
+        }
+        sink
     }
 
     /// Renders a def path from its segments, without crate qualification.

@@ -29,14 +29,19 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_push", "capacity-overflow"),
     ("must_push", "alloc-failure"),
     ("must_rethrow", "explicit"),
+    ("must_lock", "poison"),
+    ("must_write", "fmt"),
 ];
 
 /// The panics each function must *not* be reported with.
 ///
 /// A check the analysis can settle has to go even where the same function
 /// keeps another that it cannot.
-const MUST_NOT_PANIC: &[(&str, &str)] =
-    &[("must_divide_once_of_two", "remainder-by-zero")];
+const MUST_NOT_PANIC: &[(&str, &str)] = &[
+    ("must_divide_once_of_two", "remainder-by-zero"),
+    ("must_lock", "unwrap"),
+    ("must_write", "unwrap"),
+];
 
 /// The functions that must be reported with nothing at all.
 const MUST_BE_CLEAN: &[&str] = &[
