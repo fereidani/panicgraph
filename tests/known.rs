@@ -42,6 +42,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_modulo_signed", "index"),
     ("must_fn_ptr", "fn-pointer"),
     ("must_generic", "generic-bound"),
+    ("must_dyn_speak", "dyn-call"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -53,6 +54,7 @@ const MUST_NOT_PANIC: &[(&str, &str)] = &[
     ("must_lock", "unwrap"),
     ("must_write", "unwrap"),
     ("must_not_catch_explicit", "explicit"),
+    ("must_dyn_speak", "explicit"),
 ];
 
 /// The functions that must be reported with nothing at all.
@@ -99,6 +101,11 @@ const MUST_BE_CLEAN_IN_DEBUG: &[&str] = &[
 ///
 /// Nothing is suppressed, so the answer is everything the analysis can see.
 fn analyse(profile: &str) -> Vec<(String, Vec<String>)> {
+    analyse_with(profile, &[])
+}
+
+/// Analyses the fixture crate with extra arguments.
+fn analyse_with(profile: &str, extra: &[&str]) -> Vec<(String, Vec<String>)> {
     let exe = PathBuf::from(env!("CARGO_BIN_EXE_panicgraph"));
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -113,6 +120,7 @@ fn analyse(profile: &str) -> Vec<(String, Vec<String>)> {
         .arg("")
         .arg("--format")
         .arg("json")
+        .args(extra)
         .output()
         .expect("the front end should run");
     let report: Value =
@@ -213,4 +221,38 @@ fn a_debug_build_still_folds_the_guards() {
              reported {categories:?}"
         );
     }
+}
+
+#[test]
+fn candidates_expand_dyn_and_pointer_calls() {
+    let reported = analyse_with("release", &["--candidates"]);
+    let found = |name: &str| {
+        reported
+            .iter()
+            .find(|(function, _)| function == name)
+            .map(|(_, categories)| categories.clone())
+            .unwrap_or_default()
+    };
+
+    let dyn_call = found("must_dyn_speak");
+    assert!(
+        dyn_call.iter().any(|c| c == "explicit"),
+        "one implementation panics, so following candidates must surface \
+         it, got {dyn_call:?}"
+    );
+    assert!(
+        dyn_call.iter().any(|c| c == "dyn-call"),
+        "candidates narrow the unknown, they do not close it, got \
+         {dyn_call:?}"
+    );
+
+    let pointer = found("must_fn_ptr");
+    assert!(
+        pointer.iter().any(|c| c == "explicit"),
+        "a reified function of this signature panics, got {pointer:?}"
+    );
+    assert!(
+        pointer.iter().any(|c| c == "fn-pointer"),
+        "the pointer could still hold something unseen, got {pointer:?}"
+    );
 }

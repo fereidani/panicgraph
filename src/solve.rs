@@ -16,21 +16,43 @@ use crate::{
     model::{Body, CallSite, Guard, UnwindOrigin},
 };
 
+/// Which optional edges the solver follows.
+#[derive(Debug, Clone, Copy)]
+pub struct Edges {
+    /// Whether to follow edges that are candidates rather than exact,
+    /// namely vtable and function pointer calls.
+    pub follow_inexact: bool,
+    /// Whether to follow the expanded candidate targets of those calls.
+    ///
+    /// Candidates sharpen the answer, they do not close it: the unresolved
+    /// edge stays alongside them, so the assumed category remains either
+    /// way.
+    pub candidates: bool,
+}
+
+impl Default for Edges {
+    fn default() -> Self {
+        Self {
+            follow_inexact: true,
+            candidates: false,
+        }
+    }
+}
+
 /// What the user wants assumed impossible.
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
     /// Categories treated as though they cannot occur.
     pub suppressed: CategorySet,
-    /// Whether to follow edges that are candidates rather than exact, namely
-    /// vtable and function pointer calls.
-    pub follow_inexact: bool,
+    /// Which optional edges to follow.
+    pub edges: Edges,
 }
 
 impl Default for Policy {
     fn default() -> Self {
         Self {
             suppressed: CategorySet::oom(),
-            follow_inexact: true,
+            edges: Edges::default(),
         }
     }
 }
@@ -213,7 +235,10 @@ impl Eval<'_> {
 
     /// Whether the policy admits this edge.
     const fn follows(&self, call: &CallSite) -> bool {
-        self.policy.follow_inexact || call.kind.is_exact()
+        if call.candidate && !self.policy.edges.candidates {
+            return false;
+        }
+        self.policy.edges.follow_inexact || call.kind.is_exact()
     }
 
     /// The current state of a call's target.
@@ -289,7 +314,10 @@ impl Solution {
     /// Whether the policy admits an edge.
     #[must_use]
     pub const fn follows(&self, call: &CallSite) -> bool {
-        self.policy.follow_inexact || call.kind.is_exact()
+        if call.candidate && !self.policy.edges.candidates {
+            return false;
+        }
+        self.policy.edges.follow_inexact || call.kind.is_exact()
     }
 
     /// How many local functions are clean only because of the policy.
@@ -308,7 +336,7 @@ impl Solution {
             graph,
             Policy {
                 suppressed: CategorySet::EMPTY,
-                follow_inexact: self.policy.follow_inexact,
+                edges: self.policy.edges,
             },
         )
         .solve()?;

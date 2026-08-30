@@ -13,11 +13,17 @@ fn solve(
     bodies: Vec<panicgraph::Body>,
     suppressed: CategorySet,
 ) -> (Graph, panicgraph::Solution) {
+    solve_with(bodies, suppressed, panicgraph::solve::Edges::default())
+}
+
+/// Solves a set of bodies under a full policy.
+fn solve_with(
+    bodies: Vec<panicgraph::Body>,
+    suppressed: CategorySet,
+    edges: panicgraph::solve::Edges,
+) -> (Graph, panicgraph::Solution) {
     let graph = build(bodies);
-    let policy = Policy {
-        suppressed,
-        follow_inexact: true,
-    };
+    let policy = Policy { suppressed, edges };
     let solution = Solver::new(&graph, policy)
         .solve()
         .expect("the solver should converge on a finite graph");
@@ -279,5 +285,39 @@ fn cleanup_gated_on_a_barrier_call_stays_dead() {
     assert!(
         !solution.enabled(caller).contains(Category::Index),
         "nothing unwinds out of a barrier call, so its cleanup cannot run"
+    );
+}
+
+#[test]
+fn a_candidate_edge_is_followed_only_when_asked() {
+    let bodies = || {
+        vec![
+            BodyBuilder::new("one_impl").panics(Category::Index).build(),
+            BodyBuilder::new("caller")
+                .calls_candidate("one_impl")
+                .build(),
+        ]
+    };
+    let (graph, solution) = solve(bodies(), CategorySet::EMPTY);
+    assert!(
+        !solution
+            .enabled(id(&graph, "caller"))
+            .contains(Category::Index),
+        "a candidate is not a proven target, so it stays unfollowed by \
+         default"
+    );
+    let (graph, solution) = solve_with(
+        bodies(),
+        CategorySet::EMPTY,
+        panicgraph::solve::Edges {
+            follow_inexact: true,
+            candidates: true,
+        },
+    );
+    assert!(
+        solution
+            .enabled(id(&graph, "caller"))
+            .contains(Category::Index),
+        "asking for candidates follows the edge"
     );
 }

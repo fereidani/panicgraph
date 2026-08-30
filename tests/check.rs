@@ -36,7 +36,7 @@ fn outcome(bodies: Vec<Body>, argv: &[&str]) -> check::Outcome {
         &built,
         Policy {
             suppressed: settings.suppress,
-            follow_inexact: true,
+            edges: panicgraph::solve::Edges::default(),
         },
     )
     .solve()
@@ -115,7 +115,7 @@ fn an_unusable_pattern_is_rejected() {
         &built,
         Policy {
             suppressed: settings.suppress,
-            follow_inexact: true,
+            edges: panicgraph::solve::Edges::default(),
         },
     )
     .solve()

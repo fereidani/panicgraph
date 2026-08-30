@@ -8,6 +8,7 @@ use panicgraph::{
     Graph, Policy, Solution, Solver,
     args::{Args, Check, Cli, Command},
     check, report, run,
+    solve::Edges,
 };
 
 /// Nothing to report.
@@ -47,7 +48,7 @@ fn dispatch() -> Result<u8> {
             panicgraph::svg::render(
                 &graph,
                 args.suppress,
-                !args.static_only,
+                edges_of(&args),
                 true,
                 &mut out,
             )?;
@@ -98,7 +99,7 @@ fn listen(args: &Args) -> Result<()> {
     };
     let artifacts = run::collect(args)?;
     let graph = Graph::from_artifacts(artifacts);
-    panicgraph::serve::run(graph, addr, !args.static_only)
+    panicgraph::serve::run(graph, addr, edges_of(args))
 }
 
 /// Runs the analysis and renders the report.
@@ -121,13 +122,21 @@ fn analyze(args: &Args, out: &mut String) -> Result<u8> {
     })
 }
 
+/// The edge policy the arguments describe.
+const fn edges_of(args: &Args) -> Edges {
+    Edges {
+        follow_inexact: !args.static_only,
+        candidates: args.candidates,
+    }
+}
+
 /// Builds the crate, merges the artifacts, and solves the graph.
 fn solve(args: &Args) -> Result<(Graph, Solution)> {
     let artifacts = run::collect(args)?;
     let graph = Graph::from_artifacts(artifacts);
     let policy = Policy {
         suppressed: args.suppress,
-        follow_inexact: !args.static_only,
+        edges: edges_of(args),
     };
     let solution = Solver::new(&graph, policy).solve()?;
     Ok((graph, solution))

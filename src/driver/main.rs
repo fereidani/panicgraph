@@ -68,10 +68,12 @@ fn emit(tcx: TyCtxt<'_>) -> std::io::Result<()> {
     std::fs::create_dir_all(&dir)?;
 
     let krate = tcx.crate_name(LOCAL_CRATE).to_string();
+    let extraction = Extractor::new(tcx).run();
     let artifact = Artifact {
         krate: krate.clone(),
         config: build_config(tcx),
-        bodies: Extractor::new(tcx).run(),
+        bodies: extraction.bodies,
+        reified: extraction.reified,
     };
 
     let stamp = tcx.stable_crate_id(LOCAL_CRATE).as_u64();

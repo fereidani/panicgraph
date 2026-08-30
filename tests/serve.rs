@@ -44,7 +44,11 @@ fn start() -> SocketAddr {
         .expect("a bound listener should report its address");
     thread::spawn(move || {
         let graph = Graph::from_artifacts(Vec::new());
-        let _ = serve::serve_on(&listener, graph, true);
+        let _ = serve::serve_on(
+            &listener,
+            graph,
+            panicgraph::solve::Edges::default(),
+        );
     });
     addr
 }

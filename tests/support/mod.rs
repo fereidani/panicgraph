@@ -57,6 +57,15 @@ impl BodyBuilder {
         self
     }
 
+    /// Adds a call that is one possible target rather than the proven one.
+    pub fn calls_candidate(mut self, callee: &str) -> Self {
+        let mut edge = call(callee, Guard::always());
+        edge.candidate = true;
+        edge.kind = EdgeKind::Vtable;
+        self.body.calls.push(edge);
+        self
+    }
+
     /// Adds a call whose unwinding panics are contained, as under a catch.
     pub fn calls_behind_barrier(mut self, callee: &str) -> Self {
         let mut edge = call(callee, Guard::always());
@@ -118,12 +127,15 @@ fn call(callee: &str, guard: Guard) -> CallSite {
         loc: None,
         guard,
         barrier: false,
+        candidate: false,
+        sig: None,
     }
 }
 
 /// Builds the graph a set of bodies makes, as one crate's artifact.
 pub fn graph(bodies: Vec<Body>) -> Graph {
     Graph::from_artifacts(vec![Artifact {
+        reified: Vec::new(),
         krate: "test".to_owned(),
         config: BuildConfig {
             rustc: "test".to_owned(),

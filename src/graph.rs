@@ -5,7 +5,7 @@
 //! state in flat vectors.
 
 use crate::{
-    model::{Artifact, Body, BuildConfig, FuncKey},
+    model::{Artifact, Body, BuildConfig, CallSite, FuncKey, Reified},
     util::Map,
 };
 
@@ -53,6 +53,7 @@ impl Graph {
             callers: Vec::new(),
             config: None,
         };
+        let mut reified: Vec<Reified> = Vec::new();
         for artifact in artifacts {
             if graph.config.is_none() {
                 graph.config = Some(artifact.config.clone());
@@ -60,10 +61,42 @@ impl Graph {
             for body in artifact.bodies {
                 graph.insert_body(body);
             }
+            reified.extend(artifact.reified);
         }
+        graph.expand_fn_pointers(&reified);
         graph.materialize_missing_callees();
         graph.build_reverse_edges();
         graph
+    }
+
+    /// Appends candidate edges for calls made through function pointers.
+    ///
+    /// A reachable function reified to a pointer of the right signature is
+    /// what such a call could be. The edges are marked as candidates, so
+    /// following them stays the caller's choice, and the unresolved edge
+    /// stays alongside them either way.
+    fn expand_fn_pointers(&mut self, reified: &[Reified]) {
+        if reified.is_empty() {
+            return;
+        }
+        for body in &mut self.bodies {
+            let mut extra: Vec<CallSite> = Vec::new();
+            for call in &body.calls {
+                let Some(sig) = &call.sig else { continue };
+                for target in reified {
+                    if &target.sig != sig {
+                        continue;
+                    }
+                    let mut candidate = call.clone();
+                    candidate.callee = Some(target.key.clone());
+                    candidate.callee_display.clone_from(&target.display);
+                    candidate.candidate = true;
+                    candidate.sig = None;
+                    extra.push(candidate);
+                }
+            }
+            body.calls.extend(extra);
+        }
     }
 
     /// Adds or upgrades one body.

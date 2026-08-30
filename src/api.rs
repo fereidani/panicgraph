@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::{
     Body, Category, CategorySet, FuncId, Graph, Solution, Solver, Terminal,
     category::ALL,
-    solve::Policy,
+    solve::{Edges, Policy},
     util::{Map, Set},
     witness,
 };
@@ -89,16 +89,9 @@ fn calls(graph: &Graph, body: &Body) -> Vec<Value> {
 fn solved(
     g: &Graph,
     suppressed: CategorySet,
-    follow_inexact: bool,
+    edges: Edges,
 ) -> Result<Solution> {
-    Solver::new(
-        g,
-        Policy {
-            suppressed,
-            follow_inexact,
-        },
-    )
-    .solve()
+    Solver::new(g, Policy { suppressed, edges }).solve()
 }
 
 /// Runs the solver under one policy and reports the result.
@@ -109,9 +102,9 @@ fn solved(
 pub fn solve(
     g: &Graph,
     suppressed: CategorySet,
-    follow_inexact: bool,
+    edges: Edges,
 ) -> Result<Value> {
-    let solution = solved(g, suppressed, follow_inexact)?;
+    let solution = solved(g, suppressed, edges)?;
 
     let nodes: Vec<Value> = g
         .iter()
@@ -190,7 +183,7 @@ fn counterfactual(
         } else {
             policy.suppressed.union(CategorySet::single(category))
         };
-        let other_solution = solved(g, alternative, policy.follow_inexact)?;
+        let other_solution = solved(g, alternative, policy.edges)?;
         let other = local_dirty(g, &other_solution);
         let cleared = if assumed {
             other.saturating_sub(baseline)
@@ -227,7 +220,7 @@ pub fn why(
     node: usize,
     category: &str,
     suppressed: CategorySet,
-    follow_inexact: bool,
+    edges: Edges,
 ) -> Result<Value> {
     let Ok(category) = category.parse::<Category>() else {
         bail!("unknown panic category `{category}`");
@@ -236,7 +229,7 @@ pub fn why(
         bail!("no function with index {node}");
     }
     let root = FuncId::from_index(node);
-    let solution = solved(g, suppressed, follow_inexact)?;
+    let solution = solved(g, suppressed, edges)?;
 
     let Some(path) = witness::find(g, &solution, root, category) else {
         return Ok(json!({ "found": false }));
@@ -322,10 +315,10 @@ fn terminal(g: &Graph, path: &witness::Witness) -> Value {
 pub fn flame(
     g: &Graph,
     suppressed: CategorySet,
-    follow_inexact: bool,
+    edges: Edges,
     fold: bool,
 ) -> Result<Value> {
-    let rows = flame_rows(g, suppressed, follow_inexact, fold)?;
+    let rows = flame_rows(g, suppressed, edges, fold)?;
     Ok(json!({ "nodes": rows }))
 }
 
@@ -361,10 +354,10 @@ pub struct FlameRow {
 pub fn flame_rows(
     g: &Graph,
     suppressed: CategorySet,
-    follow_inexact: bool,
+    edges: Edges,
     fold: bool,
 ) -> Result<Vec<FlameRow>> {
-    let solution = solved(g, suppressed, follow_inexact)?;
+    let solution = solved(g, suppressed, edges)?;
     let mut tree = Tree::new();
     for (id, body) in g.iter() {
         if !body.local || body.opaque {

@@ -175,6 +175,29 @@ pub struct CallSite {
     /// because nothing can catch them.
     #[serde(default)]
     pub barrier: bool,
+    /// True when the callee is one possible target rather than the proven
+    /// one. Candidate edges are followed only when asked for.
+    #[serde(default)]
+    pub candidate: bool,
+    /// The rendered pointer signature, kept on function pointer calls so
+    /// candidates can be matched to them.
+    #[serde(default)]
+    pub sig: Option<String>,
+}
+
+/// A function reified to a pointer somewhere in the reachable graph.
+///
+/// Recorded so that an indirect call can name its candidates: any reachable
+/// function that became a pointer of the right signature could be what the
+/// pointer holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reified {
+    /// The function's unique key.
+    pub key: FuncKey,
+    /// A readable name, for reports.
+    pub display: String,
+    /// The signature of the pointer it became.
+    pub sig: String,
 }
 
 /// Everything the solver needs to know about one function.
@@ -284,4 +307,7 @@ pub struct Artifact {
     pub config: BuildConfig,
     /// The function bodies observed while compiling this crate.
     pub bodies: Vec<Body>,
+    /// The functions observed being reified to pointers.
+    #[serde(default)]
+    pub reified: Vec<Reified>,
 }

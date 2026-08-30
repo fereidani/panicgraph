@@ -282,3 +282,40 @@ pub fn must_fn_ptr(f: fn() -> u8) -> u8 {
 pub fn must_generic<T: std::fmt::Display>(x: T) -> String {
     x.to_string()
 }
+
+/// A trait with one loud and one quiet implementation, for the candidate
+/// expansion below.
+pub trait Speak {
+    fn speak(&self) -> u8;
+}
+
+pub struct Quiet;
+impl Speak for Quiet {
+    fn speak(&self) -> u8 {
+        0
+    }
+}
+
+pub struct Loud;
+impl Speak for Loud {
+    fn speak(&self) -> u8 {
+        panic!("loud")
+    }
+}
+
+/// Reaches `dyn-call` always, and `explicit` once candidates are followed:
+/// one implementation of the trait panics.
+pub fn must_dyn_speak(s: &dyn Speak) -> u8 {
+    s.speak()
+}
+
+/// The panicking target a reified pointer can name.
+fn loud_pointer_target() -> u8 {
+    panic!("via pointer")
+}
+
+/// Names a panicking function, so a pointer of its signature exists and
+/// every call through such a pointer gains it as a candidate.
+pub fn reifies_loud() -> fn() -> u8 {
+    loud_pointer_target
+}

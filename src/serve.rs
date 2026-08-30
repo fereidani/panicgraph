@@ -14,7 +14,7 @@ use std::{
 use anyhow::{Context, Result};
 use flate2::{Compression, write::GzEncoder};
 
-use crate::{CategorySet, Graph, api, parse_selector, util::Set};
+use crate::{CategorySet, Graph, api, parse_selector, solve::Edges, util::Set};
 
 /// Largest request head accepted, which is ample for a local browser.
 const MAX_HEAD_BYTES: u64 = 16 * 1024;
@@ -46,7 +46,7 @@ const VUE_JS: &str = include_str!("../assets/vue.global.prod.js");
 struct State {
     graph: Graph,
     sources: Set<String>,
-    follow_inexact: bool,
+    edges: Edges,
 }
 
 /// One parsed request.
@@ -172,13 +172,13 @@ fn gzip(body: &[u8]) -> Result<Vec<u8>> {
 /// # Errors
 ///
 /// Returns an error if the address cannot be bound.
-pub fn run(graph: Graph, addr: SocketAddr, follow_inexact: bool) -> Result<()> {
+pub fn run(graph: Graph, addr: SocketAddr, edges: Edges) -> Result<()> {
     let listener = TcpListener::bind(addr)
         .with_context(|| format!("could not bind {addr}"))?;
     let bound = listener.local_addr().unwrap_or(addr);
     println!("panicgraph is serving http://{bound}");
     println!("press ctrl-c to stop");
-    serve_on(&listener, graph, follow_inexact)
+    serve_on(&listener, graph, edges)
 }
 
 /// Serves on an already bound listener.
@@ -192,13 +192,13 @@ pub fn run(graph: Graph, addr: SocketAddr, follow_inexact: bool) -> Result<()> {
 pub fn serve_on(
     listener: &TcpListener,
     graph: Graph,
-    follow_inexact: bool,
+    edges: Edges,
 ) -> Result<()> {
     let sources = api::source_allowlist(&graph);
     let state = Arc::new(State {
         graph,
         sources,
-        follow_inexact,
+        edges,
     });
 
     // A server runs until it is stopped. Each connection is handled on its
@@ -253,12 +253,12 @@ fn route(
         "/api/solve" => out.result(api::solve(
             &state.graph,
             suppressed_from(query),
-            state.follow_inexact,
+            state.edges,
         )),
         "/api/flame" => out.result(api::flame(
             &state.graph,
             suppressed_from(query),
-            state.follow_inexact,
+            state.edges,
             param(query, "expand").is_none(),
         )),
         "/api/why" => out.result(api::why(
@@ -268,7 +268,7 @@ fn route(
                 .unwrap_or(0),
             &param(query, "category").unwrap_or_default(),
             suppressed_from(query),
-            state.follow_inexact,
+            state.edges,
         )),
         "/api/source" => out.result(api::source(
             &state.sources,

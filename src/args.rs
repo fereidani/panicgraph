@@ -97,6 +97,15 @@ pub struct Policy {
     #[arg(long, global = true)]
     pub static_only: bool,
 
+    /// Follow candidate targets for dyn and function pointer calls.
+    ///
+    /// Candidates are every concrete implementation of the trait and every
+    /// reachable function reified to a pointer of a matching signature. The
+    /// dyn-call and fn-pointer categories remain either way: candidates
+    /// narrow what the unknown code could be, they do not close the set.
+    #[arg(long, global = true)]
+    pub candidates: bool,
+
     /// Include dependencies, not just the local crate.
     #[arg(long, global = true)]
     pub all_crates: bool,
@@ -230,6 +239,8 @@ pub struct Args {
     pub format: Format,
     /// Ignore vtable and function pointer edges.
     pub static_only: bool,
+    /// Follow candidate targets for dyn and function pointer calls.
+    pub candidates: bool,
     /// Report functions from dependencies as well as the local crate.
     pub all_crates: bool,
     /// Directory holding the crate to analyse.
@@ -271,6 +282,7 @@ impl Cli {
             std_mode,
             format: self.format,
             static_only: self.policy.static_only,
+            candidates: self.policy.candidates,
             all_crates: self.policy.all_crates,
             manifest_dir: self.scope.manifest_dir,
             package: self.scope.package,

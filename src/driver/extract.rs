@@ -2,7 +2,7 @@
 
 use panicgraph::{
     Body, CallSite, Category, EdgeKind, FuncKey, Guard, Loc, PanicSite,
-    Termination, UnwindOrigin,
+    Reified, Termination, UnwindOrigin,
     util::{Map, Set},
 };
 use rustc_middle::{
@@ -84,6 +84,16 @@ pub struct Extractor<'tcx> {
     sinks: SinkTable,
     bodies: Vec<Body>,
     seen: Set<String>,
+    reified: Vec<Reified>,
+    reified_seen: Set<(FuncKey, String)>,
+}
+
+/// What the extractor found in one crate.
+pub struct Extraction {
+    /// Every function body observed.
+    pub bodies: Vec<Body>,
+    /// Every function observed being reified to a pointer.
+    pub reified: Vec<Reified>,
 }
 
 impl<'tcx> Extractor<'tcx> {
@@ -94,11 +104,13 @@ impl<'tcx> Extractor<'tcx> {
             sinks: SinkTable::new(),
             bodies: Vec::new(),
             seen: Set::default(),
+            reified: Vec::new(),
+            reified_seen: Set::default(),
         }
     }
 
-    /// Walks the whole reachable call graph and returns the bodies found.
-    pub fn run(mut self) -> Vec<Body> {
+    /// Walks the whole reachable call graph and returns what it found.
+    pub fn run(mut self) -> Extraction {
         let mut queue: Vec<Work<'tcx>> = self.roots();
         // Every instance is recorded in `seen` before its callees are
         // queued, so each function is expanded at most once and the walk
@@ -112,7 +124,10 @@ impl<'tcx> Extractor<'tcx> {
             }
             queue.extend(self.build(work, FuncKey(key)));
         }
-        self.bodies
+        Extraction {
+            bodies: self.bodies,
+            reified: self.reified,
+        }
     }
 
     /// Every function defined in the crate under compilation.
@@ -223,12 +238,15 @@ impl<'tcx> Extractor<'tcx> {
         let reach = fold::reachable(self.tcx, cx.inst, cx.env, mir);
         let mut raw = Raw::new();
         for (bb, data) in mir.basic_blocks.iter_enumerated() {
-            let Some(term) = &data.terminator else {
-                continue;
-            };
             if !reach.is_live(bb) {
                 continue;
             }
+            for stmt in &data.statements {
+                self.note_reified(&mut raw, cx, stmt);
+            }
+            let Some(term) = &data.terminator else {
+                continue;
+            };
             let info = term.source_info;
             match &term.kind {
                 TerminatorKind::Assert { msg, unwind, .. } => {
@@ -303,9 +321,22 @@ impl<'tcx> Extractor<'tcx> {
             return;
         };
         let ty::FnDef(did, args) = *ty.kind() else {
-            // A call through a function pointer. The target set is unknown.
-            let name = "<fn pointer>".to_owned();
-            self.push_edge(raw, at, None, name, EdgeKind::FnPtr, false);
+            // A call through a function pointer. The target set is unknown,
+            // but the signature narrows which reified functions could be
+            // behind it.
+            let index = u32::try_from(raw.calls.len()).unwrap_or(u32::MAX);
+            raw.calls.push(CallSite {
+                callee: None,
+                callee_display: "<fn pointer>".to_owned(),
+                kind: EdgeKind::FnPtr,
+                loc: self.loc_of(at.span),
+                guard: Guard::default(),
+                barrier: false,
+                candidate: false,
+                sig: Some(format!("{ty}")),
+            });
+            raw.call_blocks.push(at.bb);
+            Self::record_unwind(raw, UnwindOrigin::Call(index), at.unwind);
             return;
         };
         let Some(args) = args.no_bound_vars() else {
@@ -385,6 +416,8 @@ impl<'tcx> Extractor<'tcx> {
                 inst: callee,
                 env: cx.env,
             });
+        } else {
+            self.push_dyn_candidates(raw, cx, at, callee);
         }
     }
 
@@ -646,9 +679,126 @@ impl<'tcx> Extractor<'tcx> {
             loc: self.loc_of(at.span),
             guard: Guard::default(),
             barrier,
+            candidate: false,
+            sig: None,
         });
         raw.call_blocks.push(at.bb);
         Self::record_unwind(raw, UnwindOrigin::Call(index), at.unwind);
+    }
+
+    /// Records a function being turned into a pointer, so indirect calls
+    /// can name it as a candidate.
+    ///
+    /// Only reachable code is scanned, so a pointer that no execution can
+    /// create never becomes a candidate.
+    fn note_reified(
+        &mut self,
+        raw: &mut Raw<'tcx>,
+        cx: Work<'tcx>,
+        stmt: &mir::Statement<'tcx>,
+    ) {
+        let mir::StatementKind::Assign(pair) = &stmt.kind else {
+            return;
+        };
+        let mir::Rvalue::Cast(
+            mir::CastKind::PointerCoercion(
+                ty::adjustment::PointerCoercion::ReifyFnPointer(_),
+                _,
+            ),
+            mir::Operand::Constant(konst),
+            cast_ty,
+        ) = &pair.1
+        else {
+            return;
+        };
+        let Some(inst) = self.fn_constant(cx, konst) else {
+            return;
+        };
+        let Some(sig) = self.normalize(cx, *cast_ty).map(|ty| ty.to_string())
+        else {
+            return;
+        };
+        let Some(key) = self.symbol_of(inst).map(FuncKey) else {
+            return;
+        };
+        if !self.reified_seen.insert((key.clone(), sig.clone())) {
+            return;
+        }
+        // The candidate's own panics have to be in the artifact for the
+        // edge to mean anything, so its body is walked as well.
+        raw.successors.push(Work { inst, env: cx.env });
+        self.reified.push(Reified {
+            key,
+            display: self.tcx.def_path_str(inst.def_id()),
+            sig,
+        });
+    }
+
+    /// Appends every known implementation a dynamic call could reach.
+    ///
+    /// Candidates are marked as such and followed only when asked for. The
+    /// unresolved edge stays regardless: an implementation in a crate the
+    /// analysis never loads, or behind a generic impl, is still possible.
+    fn push_dyn_candidates(
+        &self,
+        raw: &mut Raw<'tcx>,
+        cx: Work<'tcx>,
+        at: At,
+        virt: Instance<'tcx>,
+    ) {
+        let method = virt.def_id();
+        let Some(trait_did) = self.tcx.trait_of_assoc(method) else {
+            return;
+        };
+        if self.tcx.is_fn_trait(trait_did) {
+            // Every closure in the graph implements these; the candidate
+            // set would be noise rather than narrowing.
+            return;
+        }
+        for impl_did in self.tcx.all_impls(trait_did) {
+            // Skipping normalization is fine here: a concrete impl's self
+            // type and arguments are used only to ask resolution for the
+            // instance, and resolution normalizes what it is given.
+            let trait_ref = self
+                .tcx
+                .impl_trait_ref(impl_did)
+                .instantiate_identity()
+                .skip_normalization();
+            if trait_ref.has_param() {
+                // A generic impl has no single instance to name. The
+                // unresolved edge already covers it.
+                continue;
+            }
+            let args = self.tcx.mk_args_from_iter(
+                std::iter::once(ty::GenericArg::from(trait_ref.self_ty()))
+                    .chain(virt.args.iter().skip(1)),
+            );
+            let Ok(Some(target)) =
+                Instance::try_resolve(self.tcx, cx.env, method, args)
+            else {
+                continue;
+            };
+            let Some(key) = self.symbol_of(target).map(FuncKey) else {
+                continue;
+            };
+            let index = u32::try_from(raw.calls.len()).unwrap_or(u32::MAX);
+            raw.calls.push(CallSite {
+                callee: Some(key),
+                callee_display: self.tcx.def_path_str(target.def_id()),
+                kind: EdgeKind::Vtable,
+                loc: self.loc_of(at.span),
+                guard: Guard::default(),
+                barrier: false,
+                candidate: true,
+                sig: None,
+            });
+            raw.call_blocks.push(at.bb);
+            Self::record_unwind(raw, UnwindOrigin::Call(index), at.unwind);
+            raw.successors.push(Work {
+                inst: target,
+                env: cx.env,
+            });
+        }
     }
 
     /// Notes that unwinding from `origin` transfers control to a cleanup

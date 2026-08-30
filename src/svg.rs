@@ -24,6 +24,7 @@ use anyhow::Result;
 use crate::{
     CategorySet, Graph,
     api::{FlameRow, children_of},
+    solve::Edges,
 };
 
 /// Height of one row of frames.
@@ -80,11 +81,11 @@ struct Frame {
 pub fn render(
     graph: &Graph,
     suppressed: CategorySet,
-    follow_inexact: bool,
+    edges: Edges,
     fold: bool,
     out: &mut String,
 ) -> Result<()> {
-    let rows = crate::api::flame_rows(graph, suppressed, follow_inexact, fold)?;
+    let rows = crate::api::flame_rows(graph, suppressed, edges, fold)?;
     let frames = layout(&rows);
     let depth = frames.iter().map(|f| f.depth).max().unwrap_or(0);
     let height = (depth as f64 + 1.0).mul_add(ROW, HEAD + FOOT);

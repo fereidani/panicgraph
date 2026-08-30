@@ -16,8 +16,14 @@ fn body(name: &str, category: Category) -> Body {
 /// Renders a graph of the given functions.
 fn render(bodies: Vec<Body>) -> String {
     let mut out = String::new();
-    svg::render(&graph(bodies), CategorySet::EMPTY, true, true, &mut out)
-        .expect("the graph should render");
+    svg::render(
+        &graph(bodies),
+        CategorySet::EMPTY,
+        panicgraph::solve::Edges::default(),
+        true,
+        &mut out,
+    )
+    .expect("the graph should render");
     out
 }
 
