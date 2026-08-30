@@ -137,9 +137,20 @@ impl Graph {
             if self.by_key.contains_key(&key) {
                 continue;
             }
+            // The crate can only be guessed from the display path. A
+            // display that is not a path, drop glue for example, is filed
+            // as unknown rather than under a crate named after the text.
             let krate = display
                 .split_once("::")
-                .map_or_else(|| display.clone(), |(c, _)| c.to_owned());
+                .map(|(first, _)| first)
+                .filter(|first| {
+                    !first.is_empty()
+                        && first
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_')
+                })
+                .unwrap_or("unknown")
+                .to_owned();
             self.insert_body(Body::opaque(key, display, krate));
         }
     }
