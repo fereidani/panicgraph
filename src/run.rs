@@ -8,7 +8,7 @@ use std::{
     process::Command,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::{Artifact, StdMode, args::Args};
 
@@ -19,6 +19,12 @@ use crate::{Artifact, StdMode, args::Args};
 /// analysed crate's directory resolves to and the driver would be handed a
 /// sysroot it cannot read.
 const TOOLCHAIN: Option<&str> = option_env!("RUSTUP_TOOLCHAIN");
+
+/// The compiler this tool was built against, as `rustc --version` prints it.
+///
+/// Absent when the build could not ask, in which case the check is skipped
+/// rather than guessed at.
+const BUILT_AGAINST: Option<&str> = option_env!("PANICGRAPH_RUSTC");
 
 /// Where the driver writes artifacts and where the analysis build happens.
 struct Layout {
@@ -34,6 +40,7 @@ struct Layout {
 /// artifact cannot be read.
 pub fn collect(args: &Args) -> Result<Vec<Artifact>> {
     let driver = driver_path()?;
+    check_toolchain()?;
     let root = match &args.manifest_dir {
         Some(dir) => dir.clone(),
         None => env::current_dir()
@@ -61,6 +68,38 @@ pub fn collect(args: &Args) -> Result<Vec<Artifact>> {
         bail!("the build produced no analysis artifacts");
     }
     Ok(artifacts)
+}
+
+/// Reports a toolchain that has moved since this tool was installed.
+///
+/// The driver links the compiler's own libraries, which carry the hash of the
+/// build they came from, so a toolchain update leaves it unable to start at
+/// all. Saying so here turns a loader error naming a missing file into the
+/// one instruction that fixes it.
+fn check_toolchain() -> Result<()> {
+    let (Some(built), Some(current)) = (BUILT_AGAINST, rustc_version()?) else {
+        return Ok(());
+    };
+    ensure!(
+        current == built,
+        "this tool was built against {built}, but the toolchain now offers \
+         {current}. The analysis driver links that compiler's own libraries \
+         and cannot run against another build of it, so reinstall with \
+         `cargo install --path .`"
+    );
+    Ok(())
+}
+
+/// The compiler's version, as `rustc --version` prints it.
+fn rustc_version() -> Result<Option<String>> {
+    let out = rustc()
+        .arg("--version")
+        .output()
+        .context("could not run rustc")?;
+    let text =
+        String::from_utf8(out.stdout).context("rustc printed invalid utf-8")?;
+    let line = text.lines().next().unwrap_or_default().trim().to_owned();
+    Ok((!line.is_empty()).then_some(line))
 }
 
 /// Runs one analysis build.

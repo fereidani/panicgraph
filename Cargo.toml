@@ -7,7 +7,10 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Khashayar Fereidani <info@fereidani.com>"]
 license = "MIT OR Apache-2.0"
-rust-version = "1.100"
+# No `rust-version`. It states a minimum, and the driver links compiler
+# internals that have no stable interface, so a newer toolchain breaks the
+# build as readily as an older one. The requirement is the nightly the tool
+# was built with, which rust-toolchain.toml selects.
 description = "Reports which functions can panic, why, and through what call path."
 repository = "https://github.com/fereidani/panicgraph"
 readme = "README.md"

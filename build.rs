@@ -15,6 +15,20 @@ fn main() {
         eprintln!("\npanicgraph: {problem}\n");
         std::process::exit(1);
     }
+    record_compiler();
+}
+
+/// Records the compiler this build links against.
+///
+/// The driver loads that compiler's own libraries, which are named after the
+/// build they came from, so it cannot start once the toolchain has moved. The
+/// front end compares this against the compiler it finds and says so, rather
+/// than leaving the loader to report a missing file.
+fn record_compiler() {
+    let Ok(version) = rustc_field_from(&["--version"]) else {
+        return;
+    };
+    println!("cargo:rustc-env=PANICGRAPH_RUSTC={version}");
 }
 
 /// Reports the first missing prerequisite, if any.

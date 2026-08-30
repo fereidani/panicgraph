@@ -264,6 +264,8 @@ Read these before trusting a clean result.
   a bound that holds because of what the caller passes is still reported.
 - **The toolchain is pinned.** The driver links against compiler internals,
   which have no stable interface, so it is built for one nightly at a time.
+  Updating the toolchain means reinstalling; the tool says so rather than
+  leaving the loader to report a missing library.
 
 ## License
 

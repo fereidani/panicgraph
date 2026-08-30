@@ -1,5 +1,6 @@
-# The driver links against rustc internals, so the toolchain is pinned and the
-# driver verifies the compiler version it was built against at startup.
+# The driver links against rustc internals, which have no stable interface, so
+# it is built for one nightly at a time. The channel floats rather than naming
+# a date, so updating the toolchain means reinstalling the tool.
 [toolchain]
 channel = "nightly"
 components = ["rustc-dev", "llvm-tools", "rust-src"]
