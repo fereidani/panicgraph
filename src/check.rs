@@ -146,9 +146,10 @@ pub fn run(
             .map(|f| f.function.as_str())
             .collect();
         outcome.fixed = known
-            .keys()
-            .filter(|name| !live.contains(name.as_str()))
-            .cloned()
+            .iter()
+            .filter(|(name, _)| !live.contains(name.as_str()))
+            .filter(|(_, recorded)| in_view(args.only, recorded))
+            .map(|(name, _)| name.clone())
             .collect();
         outcome.fixed.sort();
     }
@@ -160,6 +161,22 @@ pub fn run(
     }
 
     Ok(outcome)
+}
+
+/// Whether the reported categories could have shown a baseline entry.
+///
+/// Absence from the findings means a function no longer panics only when the
+/// analysis was looking for what the baseline recorded. Under `--only`, an
+/// entry outside the selection is not gone, it is out of view, and calling it
+/// fixed would send the reader off to refresh a baseline that is current.
+fn in_view(only: Option<CategorySet>, recorded: &[String]) -> bool {
+    let Some(only) = only else {
+        return true;
+    };
+    recorded
+        .iter()
+        .filter_map(|name| name.parse::<Category>().ok())
+        .any(|category| only.contains(category))
 }
 
 /// Whether a finding is absent from the baseline, or has grown a category.
