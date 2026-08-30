@@ -243,6 +243,16 @@ count overflow's inlined trap. The verdict annotates the finding and never
 removes it: absence from one artifact is a fact about that build, not a
 proof about the source.
 
+## Measuring precision over a corpus
+
+`scripts/corpus.sh` runs the analysis over a list of crate directories and
+prints one markdown table row per crate: functions analysed, findings, how
+many findings carry only assumed categories, and the busiest categories.
+Running it over crates whose panic freedom is proven externally turns every
+non-assumed finding into a false positive to investigate, and keeping the
+table in a log makes precision drift visible between toolchains and
+releases.
+
 ## How it works
 
 The analysis runs as a compiler driver invoked through `RUSTC_WRAPPER`, over

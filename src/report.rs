@@ -307,6 +307,7 @@ fn json(
         .collect();
     let doc = serde_json::json!({
         "config": graph.config(),
+        "analysed": graph.len(),
         "findings": items,
     });
     out.push_str(&serde_json::to_string_pretty(&doc)?);
