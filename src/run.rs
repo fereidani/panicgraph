@@ -247,7 +247,9 @@ fn prune_stale(base: &Path, layout: &Layout) {
             continue;
         }
         if fs::remove_dir_all(&path).is_ok() {
-            println!("removed stale results in {}", path.display());
+            // Housekeeping, not a result. It goes to the error stream so it
+            // cannot land in front of a report something is parsing.
+            eprintln!("removed stale results in {}", path.display());
         }
     }
 }
