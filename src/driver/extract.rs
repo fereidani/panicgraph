@@ -125,6 +125,10 @@ impl<'tcx> Extractor<'tcx> {
             let display = self.tcx.def_path_str(did);
             let krate = self.tcx.crate_name(did.krate).to_string();
             let mut body = Body::opaque(key, display, krate);
+            // Foreign code has no Rust body to read and never will, so it is
+            // reported apart from a Rust function a fuller standard library
+            // would have shown.
+            body.foreign = self.tcx.is_foreign_item(did);
             if self.never_unwinds(did) {
                 // The compiler guarantees this function does not unwind, so
                 // it raises no panic even though its body is unavailable.
@@ -157,6 +161,7 @@ impl<'tcx> Extractor<'tcx> {
             sites,
             calls,
             opaque: false,
+            foreign: false,
             local: did.is_local(),
         });
         raw.successors

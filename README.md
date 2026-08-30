@@ -104,6 +104,7 @@ unreachable along with the failure itself.
 Select categories by name or by group:
 
 ```
+panicgraph --suppress foreign           # calls into C
 panicgraph --suppress oom               # allocation only
 panicgraph --suppress ''                # assume nothing
 panicgraph --suppress all               # assume everything, which reports nothing
@@ -262,7 +263,9 @@ Read these before trusting a clean result.
   something. `check --fail-on-unknown` refuses to treat the two alike.
 - **Dynamic dispatch is not resolved.** A `dyn Trait` or function pointer
   call is recorded as an unknown target rather than expanded to its
-  candidates. `--static-only` drops those edges instead.
+  candidates. `--static-only` drops those edges instead. Once the standard
+  library is fully visible this is what `unknown` mostly means, alongside
+  `foreign`, which names a call into C that has no Rust body to read.
 - **This is a may-panic analysis.** A panic that is unreachable for reasons
   the compiler cannot see is still reported. It answers "could this panic",
   not "will it". Folding settles a check against constants and against what a

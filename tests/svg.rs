@@ -24,6 +24,7 @@ fn body(name: &str, category: Category) -> Body {
         }],
         calls: Vec::new(),
         opaque: false,
+        foreign: false,
         local: true,
     }
 }

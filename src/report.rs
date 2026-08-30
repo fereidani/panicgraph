@@ -314,6 +314,12 @@ fn describe_terminal(graph: &Graph, path: &witness::Witness, out: &mut String) {
             }
             out.push('\n');
         }
+        Terminal::Opaque if body.foreign => {
+            let _ = writeln!(
+                out,
+                "      foreign code, which has no Rust body to read"
+            );
+        }
         Terminal::Opaque => {
             let _ = writeln!(
                 out,

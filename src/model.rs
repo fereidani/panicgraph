@@ -170,6 +170,11 @@ pub struct Body {
     /// True when the compiler had no MIR for this function, so its behaviour
     /// is unknown rather than known to be panic free.
     pub opaque: bool,
+    /// True when the function is foreign, so there is no Rust body to read
+    /// and never will be. Reported apart from an opaque Rust function,
+    /// which a fuller standard library would have shown.
+    #[serde(default)]
+    pub foreign: bool,
     /// True when the function is defined in the crate under analysis.
     pub local: bool,
 }
@@ -186,6 +191,7 @@ impl Body {
             sites: Vec::new(),
             calls: Vec::new(),
             opaque: true,
+            foreign: false,
             local: false,
         }
     }

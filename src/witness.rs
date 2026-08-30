@@ -77,8 +77,14 @@ pub fn find(
     while let Some(id) = queue.pop_front() {
         let body = graph.body(id);
 
-        // A function with no recorded body is the source of an unknown.
-        if body.opaque && category == Category::Unknown {
+        // A function with no recorded body is the source of whichever
+        // category stands for code the analysis could not read.
+        let unreadable = if body.foreign {
+            Category::Foreign
+        } else {
+            Category::Unknown
+        };
+        if body.opaque && category == unreadable {
             return Some(Witness {
                 hops: rebuild(&came_from, root, id),
                 func: id,

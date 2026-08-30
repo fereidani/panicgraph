@@ -22,6 +22,7 @@ impl BodyBuilder {
                 sites: Vec::new(),
                 calls: Vec::new(),
                 opaque: false,
+                foreign: false,
                 local: true,
             },
         }

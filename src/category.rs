@@ -74,10 +74,12 @@ pub enum Category {
     /// A standard library precondition check, present only in a build that
     /// has undefined behaviour checks turned on.
     UbCheck = 16,
+    /// A call into foreign code, which has no Rust body to read.
+    Foreign = 17,
 }
 
 /// Every category, in discriminant order.
-pub const ALL: [Category; 17] = [
+pub const ALL: [Category; 18] = [
     Category::Index,
     Category::Overflow,
     Category::DivideByZero,
@@ -95,6 +97,7 @@ pub const ALL: [Category; 17] = [
     Category::MisalignedRef,
     Category::Unknown,
     Category::UbCheck,
+    Category::Foreign,
 ];
 
 impl Category {
@@ -119,6 +122,7 @@ impl Category {
             Self::MisalignedRef => "misaligned-ref",
             Self::Unknown => "unknown",
             Self::UbCheck => "ub-check",
+            Self::Foreign => "foreign",
         }
     }
 
@@ -143,6 +147,7 @@ impl Category {
             Self::MisalignedRef => "reference from a misaligned pointer",
             Self::Unknown => "unclassified panic",
             Self::UbCheck => "standard library precondition check",
+            Self::Foreign => "call into foreign code, which has no Rust body",
         }
     }
 

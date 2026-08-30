@@ -30,6 +30,7 @@ fn body(name: &str, category: Option<Category>) -> Body {
             .collect(),
         calls: Vec::new(),
         opaque: false,
+        foreign: false,
         local: true,
     }
 }

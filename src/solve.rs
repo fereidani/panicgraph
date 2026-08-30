@@ -61,10 +61,10 @@ struct Eval<'a> {
 }
 
 impl Eval<'_> {
-    /// The state an unknown or unresolved target contributes.
-    const fn unknown(&self) -> NodeState {
-        let enabled = CategorySet::single(Category::Unknown)
-            .difference(self.policy.suppressed);
+    /// The state a target the analysis cannot read contributes.
+    const fn unreadable(&self, category: Category) -> NodeState {
+        let enabled =
+            CategorySet::single(category).difference(self.policy.suppressed);
         NodeState {
             enabled,
             unwinds: !enabled.is_empty(),
@@ -75,8 +75,14 @@ impl Eval<'_> {
     fn evaluate(&self, id: FuncId) -> NodeState {
         let body = self.graph.body(id);
         if body.opaque {
-            // An opaque body is unknown, not proven clean.
-            return self.unknown();
+            // An opaque body is unknown, not proven clean. Foreign code is
+            // named apart: it has no Rust body to read and no fuller
+            // standard library would produce one.
+            return self.unreadable(if body.foreign {
+                Category::Foreign
+            } else {
+                Category::Unknown
+            });
         }
 
         let activity = self.activity(body);
@@ -176,7 +182,7 @@ impl Eval<'_> {
     fn callee_state(&self, call: &CallSite) -> NodeState {
         let Some(key) = &call.callee else {
             // An unresolved target is unknown, and unknown code may unwind.
-            return self.unknown();
+            return self.unreadable(Category::Unknown);
         };
         self.graph
             .id_of(key)
