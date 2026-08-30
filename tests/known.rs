@@ -43,6 +43,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_fn_ptr", "fn-pointer"),
     ("must_generic", "generic-bound"),
     ("must_dyn_speak", "dyn-call"),
+    ("must_zeroed_ref", "explicit"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -74,6 +75,7 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_guarded_index_flipped",
     "clean_while_index",
     "clean_nonzero_divide",
+    "clean_zeroed_int",
 ];
 
 /// The functions that must stay clean in a debug build as well.

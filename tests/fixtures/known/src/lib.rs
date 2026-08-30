@@ -319,3 +319,15 @@ fn loud_pointer_target() -> u8 {
 pub fn reifies_loud() -> fn() -> u8 {
     loud_pointer_target
 }
+
+/// Reaches `explicit`: a zeroed reference is invalid, and the guard on the
+/// instantiation aborts in every build.
+pub fn must_zeroed_ref() -> u8 {
+    let r: &'static u8 = unsafe { std::mem::zeroed() };
+    *r
+}
+
+/// Clean. A zeroed integer is a valid integer, so no check is emitted.
+pub fn clean_zeroed_int() -> u32 {
+    unsafe { std::mem::zeroed() }
+}

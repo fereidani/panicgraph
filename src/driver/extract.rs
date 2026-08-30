@@ -385,6 +385,14 @@ impl<'tcx> Extractor<'tcx> {
                 self.push_catch(raw, cx, at, operands, mir);
                 return;
             }
+            if let Some(requirement) =
+                ty::layout::ValidityRequirement::from_intrinsic(
+                    self.tcx.item_name(callee.def_id()),
+                )
+            {
+                self.push_validity(raw, cx, at, callee, requirement);
+                return;
+            }
             if self.refcount_abort(cx, at, callee.def_id(), mir) {
                 let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
                 raw.sites.push(PanicSite {
@@ -582,6 +590,65 @@ impl<'tcx> Extractor<'tcx> {
         match alloc {
             interpret::GlobalAlloc::Function { instance } => Some(instance),
             _ => None,
+        }
+    }
+
+    /// Records the check inside an instantiation the type system cannot
+    /// see.
+    ///
+    /// `mem::zeroed`, `mem::uninitialized`, and `assume_init` guard their
+    /// instantiation with an intrinsic that aborts when the type forbids
+    /// the value, in every build. The guard is resolved here the way
+    /// codegen resolves it: a type that satisfies the requirement raises
+    /// nothing, and one that cannot aborts every time it is reached.
+    fn push_validity(
+        &self,
+        raw: &mut Raw<'tcx>,
+        cx: Work<'tcx>,
+        at: At,
+        callee: Instance<'tcx>,
+        requirement: ty::layout::ValidityRequirement,
+    ) {
+        let Some(ty) = callee
+            .args
+            .first()
+            .and_then(|arg| arg.as_type())
+            .and_then(|ty| self.normalize(cx, ty))
+        else {
+            self.unresolved(raw, at, "<validity of an unknown type>".into());
+            return;
+        };
+        if ty.has_param() {
+            self.generic(raw, at, format!("validity of {ty}"));
+            return;
+        }
+        match self.tcx.check_validity_requirement((
+            requirement,
+            cx.env.as_query_input(ty),
+        )) {
+            // The type allows the value, so the compiler emits no check.
+            Ok(true) => {}
+            Ok(false) => {
+                let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
+                raw.sites.push(PanicSite {
+                    category: Category::Explicit,
+                    termination: Termination::Abort,
+                    reason: format!(
+                        "instantiating {ty} this way is invalid, so the \
+                         check aborts"
+                    ),
+                    sink: None,
+                    loc: self.loc_of(at.span),
+                    guard: Guard::default(),
+                });
+                raw.site_blocks.push(at.bb);
+                Self::record_unwind(raw, UnwindOrigin::Site(index), at.unwind);
+            }
+            // The layout could not be computed, so neither answer is safe
+            // to claim.
+            Err(_) => {
+                self.unresolved(raw, at, format!("validity of {ty}"));
+            }
         }
     }
 
