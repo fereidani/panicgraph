@@ -37,6 +37,9 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_dyn", "unknown"),
     ("must_foreign", "foreign"),
     ("must_catch_abort", "alloc-failure"),
+    ("must_index_off_by_one", "index"),
+    ("must_index_wrong_slice", "index"),
+    ("must_modulo_signed", "index"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -61,13 +64,37 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_guarded_divide_ne",
     "clean_guarded_remainder",
     "clean_guarded_widening",
+    "clean_modulo_index",
+    "clean_masked_index",
+    "clean_guarded_index",
+    "clean_guarded_index_flipped",
+    "clean_while_index",
+];
+
+/// The functions that must stay clean in a debug build as well.
+///
+/// A debug build folds the same guards without the optimizer's help: no
+/// inlining has merged the comparison into the check, so every settled
+/// verdict below is the analysis's own reasoning. The full clean list is
+/// not used because a debug build genuinely adds checks inside the standard
+/// library that some of those functions reach.
+const MUST_BE_CLEAN_IN_DEBUG: &[&str] = &[
+    "clean_divide_by_constant",
+    "clean_guarded_divide",
+    "clean_guarded_divide_ne",
+    "clean_guarded_remainder",
+    "clean_modulo_index",
+    "clean_masked_index",
+    "clean_guarded_index",
+    "clean_guarded_index_flipped",
+    "clean_while_index",
 ];
 
 /// Analyses the fixture crate and returns the categories reported per
 /// function.
 ///
 /// Nothing is suppressed, so the answer is everything the analysis can see.
-fn analyse() -> Vec<(String, Vec<String>)> {
+fn analyse(profile: &str) -> Vec<(String, Vec<String>)> {
     let exe = PathBuf::from(env!("CARGO_BIN_EXE_panicgraph"));
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -76,6 +103,8 @@ fn analyse() -> Vec<(String, Vec<String>)> {
     let output = Command::new(&exe)
         .arg("--manifest-dir")
         .arg(&fixture)
+        .arg("--profile")
+        .arg(profile)
         .arg("--suppress")
         .arg("")
         .arg("--format")
@@ -111,7 +140,7 @@ fn analyse() -> Vec<(String, Vec<String>)> {
 
 #[test]
 fn a_known_crate_reports_exactly_its_panics() {
-    let reported = analyse();
+    let reported = analyse("release");
     let found = |name: &str| {
         reported
             .iter()
@@ -144,6 +173,40 @@ fn a_known_crate_reports_exactly_its_panics() {
             found(function).is_none(),
             "{function} cannot panic, but was reported with {:?}",
             found(function)
+        );
+    }
+}
+
+#[test]
+fn a_debug_build_still_folds_the_guards() {
+    let reported = analyse("debug");
+    let found = |name: &str| {
+        reported
+            .iter()
+            .find(|(function, _)| function == name)
+            .map(|(_, categories)| categories.clone())
+    };
+
+    for function in MUST_BE_CLEAN_IN_DEBUG {
+        assert!(
+            found(function).is_none(),
+            "{function} cannot panic in a debug build either, but was \
+             reported with {:?}",
+            found(function)
+        );
+    }
+
+    for (function, category) in MUST_PANIC {
+        let categories = found(function).unwrap_or_else(|| {
+            panic!(
+                "{function} can panic with {category} in a debug build and \
+                 was not reported"
+            )
+        });
+        assert!(
+            categories.iter().any(|c| c == category),
+            "{function} can panic with {category}, but a debug build \
+             reported {categories:?}"
         );
     }
 }

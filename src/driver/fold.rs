@@ -18,6 +18,11 @@ use rustc_middle::{
     ty::{self, Instance, Ty, TyCtxt, TypeVisitableExt, TypingEnv},
 };
 
+use crate::{
+    sinks::SinkTable,
+    value::{self, Against, Bounds, Fact, Known, Taught, Value, truncate},
+};
+
 /// What one instantiation of a body reaches.
 pub struct Reach {
     live: Vec<bool>,
@@ -61,89 +66,8 @@ pub fn reachable<'tcx>(
     .run()
 }
 
-/// A value the folder is certain of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Known<'tcx> {
-    /// The value, zero extended from the bit pattern of its type.
-    bits: u128,
-    /// The type it was read at, which decides how the bits compare.
-    ty: Ty<'tcx>,
-    /// The width of that type, in bits.
-    width: u32,
-}
-
-impl Known<'_> {
-    /// Whether the type reads its top bit as a sign.
-    fn is_signed(self) -> bool {
-        matches!(self.ty.kind(), ty::Int(_))
-    }
-
-    /// The value read as a signed integer.
-    ///
-    /// The bits are held zero extended, so the sign has to be put back by
-    /// shifting the value up to the top of the word and down again.
-    const fn as_signed(self) -> i128 {
-        let Some(shift) = 128u32.checked_sub(self.width) else {
-            return self.bits.cast_signed();
-        };
-        if shift == 0 || shift == 128 {
-            return self.bits.cast_signed();
-        }
-        (self.bits << shift).cast_signed() >> shift
-    }
-
-    /// Whether the value is the one a branch treats as true.
-    const fn truth(self) -> bool {
-        self.bits != 0
-    }
-}
-
-/// Masks a value to the width of its type.
-const fn truncate(bits: u128, width: u32) -> u128 {
-    match 1u128.checked_shl(width) {
-        Some(above) => bits & above.wrapping_sub(1),
-        None => bits,
-    }
-}
-
-/// What a local is known about.
-///
-/// A branch teaches the arm it guards something its condition never states
-/// outright: past `if rhs != 0`, the divisor is not zero, which is the fact
-/// the division's own check is asking for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Value<'tcx> {
-    /// Exactly this value.
-    Exact(Known<'tcx>),
-    /// Anything but this value.
-    Other(Known<'tcx>),
-}
-
-impl<'tcx> Value<'tcx> {
-    /// The value, when it is settled.
-    const fn exact(self) -> Option<Known<'tcx>> {
-        match self {
-            Self::Exact(known) => Some(known),
-            Self::Other(_) => None,
-        }
-    }
-
-    /// Records that a value is anything but `known`.
-    ///
-    /// A `bool` has only two values, so ruling one out settles the other.
-    fn other_than(known: Known<'tcx>) -> Self {
-        if known.ty.is_bool() && known.bits <= 1 {
-            return Self::Exact(Known {
-                bits: 1 - known.bits,
-                ..known
-            });
-        }
-        Self::Other(known)
-    }
-}
-
 /// What every local is known about at one point.
-type State<'tcx> = Vec<Option<Value<'tcx>>>;
+type State<'tcx> = Vec<Fact<'tcx>>;
 
 /// What a branch reads, and what its arms therefore prove.
 #[derive(Debug, Clone, Copy)]
@@ -159,10 +83,10 @@ struct Subject<'tcx> {
 /// A comparison a branch turns into a fact about the local it measured.
 #[derive(Debug, Clone, Copy)]
 struct Compared<'tcx> {
-    /// Whether the comparison asked for equality or difference.
-    equality: bool,
+    /// The operator, read with the measured local on the left.
+    op: BinOp,
     local: mir::Local,
-    against: Known<'tcx>,
+    against: Against<'tcx>,
 }
 
 /// The blocks still to visit, and what each is entered with.
@@ -196,8 +120,9 @@ impl<'tcx> Work<'tcx> {
             Some(existing) => {
                 let mut changed = false;
                 for (held, arriving) in existing.iter_mut().zip(&incoming) {
-                    if held.is_some() && held != arriving {
-                        *held = None;
+                    let next = held.agreed(*arriving);
+                    if next != *held {
+                        *held = next;
                         changed = true;
                     }
                 }
@@ -285,7 +210,7 @@ impl<'tcx> Folder<'_, 'tcx> {
             settled: vec![false; blocks],
         };
         let mut work = Work::new(blocks);
-        work.merge(mir::START_BLOCK, vec![None; locals]);
+        work.merge(mir::START_BLOCK, vec![Fact::default(); locals]);
 
         // A block is recorded once and afterwards only loses locals, so it
         // is queued at most `locals + 1` times and the walk ends within the
@@ -352,9 +277,17 @@ impl<'tcx> Folder<'_, 'tcx> {
                 let (place, rvalue) = &**pair;
                 match place.as_local() {
                     Some(local) if !self.escapes(local) => {
-                        let value = self.rvalue(state, rvalue);
+                        // The value is read before the write is applied, so
+                        // an rvalue naming the target reads its old value.
+                        let mut fact = self.rvalue(state, rvalue);
+                        forget(state, local);
+                        if fact.same == Some(local) {
+                            // A link to the local being written says
+                            // nothing.
+                            fact.same = None;
+                        }
                         if let Some(slot) = state.get_mut(local.as_usize()) {
-                            *slot = value;
+                            *slot = fact;
                         }
                     }
                     // A write into part of a place, or through a pointer.
@@ -407,7 +340,7 @@ impl<'tcx> Folder<'_, 'tcx> {
                     work.merge(targets.target_for_value(value.bits), state);
                     return;
                 }
-                let subject = self.subject_of(bb, discr);
+                let subject = self.subject_of(bb, discr, &state);
                 let mut taken = Vec::new();
                 for (value, target) in targets.iter() {
                     taken.push(value);
@@ -442,6 +375,8 @@ impl<'tcx> Folder<'_, 'tcx> {
                 work,
             ),
             TerminatorKind::Call {
+                func,
+                args,
                 destination,
                 target,
                 unwind,
@@ -449,6 +384,13 @@ impl<'tcx> Folder<'_, 'tcx> {
             } => {
                 let mut after = state.clone();
                 forget(&mut after, destination.local);
+                if let Some(value) = self.call_summary(&state, func, args)
+                    && let Some(local) = destination.as_local()
+                    && !self.escapes(local)
+                    && let Some(slot) = after.get_mut(local.as_usize())
+                {
+                    *slot = Fact::of(value);
+                }
                 if let Some(target) = target {
                     work.merge(*target, after);
                 }
@@ -503,12 +445,47 @@ impl<'tcx> Folder<'_, 'tcx> {
             // A yield or an inline assembly block writes through operands
             // this walk does not read, so nothing survives it.
             _ => {
-                let blank = vec![None; state.len()];
+                let blank = vec![Fact::default(); state.len()];
                 for succ in kind.successors() {
                     work.merge(succ, blank.clone());
                 }
             }
         }
+    }
+
+    /// The value the call being made is known to return.
+    ///
+    /// Only functions whose result the checks downstream consume are
+    /// summarized, and only ones whose contract guarantees the claim for
+    /// every implementation the resolution can reach.
+    fn call_summary(
+        &self,
+        state: &State<'tcx>,
+        func: &mir::Operand<'tcx>,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+    ) -> Option<Value<'tcx>> {
+        let ty = self.monomorphize(func.ty(&self.mir.local_decls, self.tcx))?;
+        let ty::FnDef(did, _) = *ty.kind() else {
+            return None;
+        };
+        if self.tcx.crate_name(did.krate).as_str() != "core" {
+            return None;
+        }
+        let path = SinkTable::def_path(self.tcx, did);
+        if path != "slice::len" {
+            return None;
+        }
+        let receiver = args.first()?;
+        let (mir::Operand::Copy(place) | mir::Operand::Move(place)) =
+            &receiver.node
+        else {
+            return None;
+        };
+        let local = root_of(state, place.as_local()?);
+        if self.escapes(local) {
+            return None;
+        }
+        Some(Value::Length(local))
     }
 
     /// What a branch reads, when an arm of it proves something.
@@ -520,6 +497,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         &self,
         bb: BasicBlock,
         discr: &mir::Operand<'tcx>,
+        state: &State<'tcx>,
     ) -> Option<Subject<'tcx>> {
         let (mir::Operand::Copy(place) | mir::Operand::Move(place)) = discr
         else {
@@ -537,7 +515,7 @@ impl<'tcx> Folder<'_, 'tcx> {
             width: self.width(ty)?,
             compared: ty
                 .is_bool()
-                .then(|| self.comparison_behind(bb, read))
+                .then(|| self.comparison_behind(bb, read, state))
                 .flatten(),
         })
     }
@@ -547,6 +525,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         &self,
         bb: BasicBlock,
         result: mir::Local,
+        state: &State<'tcx>,
     ) -> Option<Compared<'tcx>> {
         let block = &self.mir.basic_blocks[bb];
         let at = block.statements.iter().rposition(|s| writes(s, result))?;
@@ -560,47 +539,70 @@ impl<'tcx> Folder<'_, 'tcx> {
         let mir::Rvalue::BinaryOp(op, operands) = &pair.1 else {
             return None;
         };
-        let equality = match op {
-            BinOp::Eq => true,
-            BinOp::Ne => false,
-            _ => return None,
-        };
-        let (local, against) = self.compared(&operands.0, &operands.1)?;
+        if !matches!(
+            op,
+            BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+        ) {
+            return None;
+        }
+        let (op, raw, against) =
+            self.compared(state, *op, &operands.0, &operands.1)?;
+        let local = root_of(state, raw);
         if self.escapes(local) {
             return None;
         }
+        // The facts read at the branch have to be the ones that stood when
+        // the comparison ran, so nothing it involved may change in between.
         let after = &block.statements[at.saturating_add(1)..];
-        if after.iter().any(|s| writes(s, local) || writes(s, result)) {
+        let touched = |s: &mir::Statement<'_>| {
+            writes(s, local)
+                || writes(s, raw)
+                || writes(s, result)
+                || match against {
+                    Against::Constant(_) => false,
+                    Against::Length(of) => writes(s, of),
+                }
+        };
+        if after.iter().any(touched) {
             return None;
         }
-        Some(Compared {
-            equality,
-            local,
-            against,
-        })
+        Some(Compared { op, local, against })
     }
 
-    /// Splits a comparison into the local it reads and the value it is
-    /// measured against, in whichever order they were written.
+    /// Splits a comparison into the local it measures, what it is measured
+    /// against, and the operator read with the local on the left.
     fn compared(
         &self,
+        state: &State<'tcx>,
+        op: BinOp,
         left: &mir::Operand<'tcx>,
         right: &mir::Operand<'tcx>,
-    ) -> Option<(mir::Local, Known<'tcx>)> {
+    ) -> Option<(BinOp, mir::Local, Against<'tcx>)> {
         let read = |operand: &mir::Operand<'tcx>| match operand {
             mir::Operand::Copy(place) | mir::Operand::Move(place) => {
                 place.as_local()
             }
             _ => None,
         };
-        let value = |operand: &mir::Operand<'tcx>| match operand {
-            mir::Operand::Constant(konst) => self.constant(konst),
-            _ => None,
+        let measure = |operand: &mir::Operand<'tcx>| {
+            if let mir::Operand::Constant(konst) = operand {
+                return self.constant(konst).map(Against::Constant);
+            }
+            match self.fact(state, operand).value {
+                Some(Value::Length(of)) => Some(Against::Length(of)),
+                _ => None,
+            }
         };
-        match (read(left), value(right)) {
-            (Some(local), Some(against)) => Some((local, against)),
-            _ => Some((read(right)?, value(left)?)),
+        if let (Some(local), Some(against)) = (read(left), measure(right)) {
+            return Some((op, local, against));
         }
+        let (local, against) = (read(right)?, measure(left)?);
+        Some((value::from_left(op), local, against))
     }
 
     /// Follows an `Assert`, recording it when its condition cannot fail.
@@ -616,7 +618,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         let (cond, expected, target) = assert;
         // Passing the check proves what it was testing, which is what makes
         // a second division by the same divisor free.
-        let proved = self.subject_of(bb, cond);
+        let proved = self.subject_of(bb, cond, &state);
         let held = Some(u128::from(expected));
         match self.exact(&state, cond).map(Known::truth) {
             Some(actual) if actual == expected => {
@@ -639,28 +641,65 @@ impl<'tcx> Folder<'_, 'tcx> {
         &self,
         state: &State<'tcx>,
         rvalue: &mir::Rvalue<'tcx>,
-    ) -> Option<Value<'tcx>> {
-        match rvalue {
-            mir::Rvalue::Use(operand, _) => self.operand(state, operand),
+    ) -> Fact<'tcx> {
+        let value = match rvalue {
+            mir::Rvalue::Use(operand, _) => {
+                return self.traced(state, operand);
+            }
             mir::Rvalue::Cast(mir::CastKind::IntToInt, operand, ty) => {
                 self.cast(state, operand, *ty)
             }
             mir::Rvalue::BinaryOp(op, pair) => {
-                let left = self.operand(state, &pair.0)?;
-                let right = self.operand(state, &pair.1)?;
+                let left = self.fact(state, &pair.0);
+                let right = self.fact(state, &pair.1);
                 self.binary(*op, left, right)
             }
             mir::Rvalue::UnaryOp(mir::UnOp::Not, operand) => {
-                let value = self.exact(state, operand)?;
-                let bits = if value.ty.is_bool() {
-                    u128::from(!value.truth())
-                } else {
-                    truncate(!value.bits, value.width)
-                };
-                Some(Value::Exact(Known { bits, ..value }))
+                self.exact(state, operand).map(|value| {
+                    let bits = if value.ty.is_bool() {
+                        u128::from(!value.truth())
+                    } else {
+                        truncate(!value.bits, value.width)
+                    };
+                    Value::Exact(Known { bits, ..value })
+                })
+            }
+            mir::Rvalue::UnaryOp(mir::UnOp::PtrMetadata, operand) => {
+                self.length_of(state, operand)
             }
             _ => None,
+        };
+        Fact {
+            value,
+            order: None,
+            same: None,
         }
+    }
+
+    /// The length a wide pointer carries, when the pointee is a slice.
+    fn length_of(
+        &self,
+        state: &State<'tcx>,
+        operand: &mir::Operand<'tcx>,
+    ) -> Option<Value<'tcx>> {
+        let (mir::Operand::Copy(place) | mir::Operand::Move(place)) = operand
+        else {
+            return None;
+        };
+        let local = root_of(state, place.as_local()?);
+        if self.escapes(local) {
+            return None;
+        }
+        let ty =
+            self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))?;
+        let pointee = match ty.kind() {
+            ty::Ref(_, inner, _) | ty::RawPtr(inner, _) => *inner,
+            _ => return None,
+        };
+        if !matches!(pointee.kind(), ty::Slice(_) | ty::Str) {
+            return None;
+        }
+        Some(Value::Length(local))
     }
 
     /// Reads an operand, when its value is settled.
@@ -669,30 +708,81 @@ impl<'tcx> Folder<'_, 'tcx> {
         state: &State<'tcx>,
         operand: &mir::Operand<'tcx>,
     ) -> Option<Known<'tcx>> {
-        self.operand(state, operand)?.exact()
+        self.fact(state, operand).value?.exact()
     }
 
-    /// Reads an operand.
-    fn operand(
+    /// Reads everything known about an operand, reading through its link
+    /// of sameness.
+    ///
+    /// A link always names a local that carries no link of its own, so one
+    /// step is all there ever is. A claim held locally and one held at the
+    /// source were both true when made and neither has been swept, so
+    /// whichever exists is usable.
+    fn fact(
         &self,
         state: &State<'tcx>,
         operand: &mir::Operand<'tcx>,
-    ) -> Option<Value<'tcx>> {
+    ) -> Fact<'tcx> {
         match operand {
             mir::Operand::Copy(place) | mir::Operand::Move(place) => {
-                let local = place.as_local()?;
-                *state.get(local.as_usize())?
+                let Some(local) = place.as_local() else {
+                    return Fact::default();
+                };
+                let Some(own) = state.get(local.as_usize()).copied() else {
+                    return Fact::default();
+                };
+                let Some(root) = own.same else {
+                    return own;
+                };
+                let at_root =
+                    state.get(root.as_usize()).copied().unwrap_or_default();
+                Fact {
+                    value: own.value.or(at_root.value),
+                    order: own.order.or(at_root.order),
+                    same: own.same,
+                }
             }
-            mir::Operand::Constant(konst) => {
-                self.constant(konst).map(Value::Exact)
-            }
+            mir::Operand::Constant(konst) => self
+                .constant(konst)
+                .map(Value::Exact)
+                .map_or_else(Fact::default, Fact::of),
             // Whether a check is on is settled by the session compiling the
             // crate, which is what makes a standard library block vanish in
             // a build that turns the check off.
-            mir::Operand::RuntimeChecks(check) => {
-                self.boolean(check.value(self.tcx.sess)).map(Value::Exact)
-            }
+            mir::Operand::RuntimeChecks(check) => self
+                .boolean(check.value(self.tcx.sess))
+                .map(Value::Exact)
+                .map_or_else(Fact::default, Fact::of),
         }
+    }
+
+    /// Reads an operand for an assignment, recording where a copy of a
+    /// plain local came from.
+    ///
+    /// The link is kept even when the value itself is known: a fact the
+    /// source learns later still has to reach the checks that read the
+    /// copy, and the link is how it travels.
+    fn traced(
+        &self,
+        state: &State<'tcx>,
+        operand: &mir::Operand<'tcx>,
+    ) -> Fact<'tcx> {
+        let mut fact = self.fact(state, operand);
+        let (mir::Operand::Copy(place) | mir::Operand::Move(place)) = operand
+        else {
+            return fact;
+        };
+        let Some(local) = place.as_local() else {
+            return fact;
+        };
+        if self.escapes(local) {
+            return fact;
+        }
+        let root = root_of(state, local);
+        if !self.escapes(root) {
+            fact.same = Some(root);
+        }
+        fact
     }
 
     /// Evaluates a constant for the arguments this body was reached with.
@@ -729,7 +819,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         operand: &mir::Operand<'tcx>,
         ty: Ty<'tcx>,
     ) -> Option<Value<'tcx>> {
-        let value = self.operand(state, operand)?;
+        let value = self.fact(state, operand).value?;
         let ty = self.monomorphize(ty)?;
         let width = self.width(ty)?;
         match value {
@@ -741,8 +831,32 @@ impl<'tcx> Folder<'_, 'tcx> {
             Value::Other(known) if width >= known.width => {
                 Some(Value::other_than(Self::converted(known, ty, width)))
             }
-            Value::Other(_) => None,
+            // A range survives a cast only when both ends keep their
+            // mathematical value, which is when the map is order preserving.
+            Value::Within(bounds) => {
+                let lo = Self::preserved(bounds.lo, ty, width)?;
+                let hi = Self::preserved(bounds.hi, ty, width)?;
+                Bounds::new(lo, hi).map(Value::Within)
+            }
+            _ => None,
         }
+    }
+
+    /// Reads a value at another integer type, when the value fits.
+    fn preserved(
+        value: Known<'tcx>,
+        ty: Ty<'tcx>,
+        width: u32,
+    ) -> Option<Known<'tcx>> {
+        let semantic = |known: Known<'tcx>| {
+            if known.is_signed() {
+                Some(known.as_signed())
+            } else {
+                i128::try_from(known.bits).ok()
+            }
+        };
+        let converted = Self::converted(value, ty, width);
+        (semantic(value)? == semantic(converted)?).then_some(converted)
     }
 
     /// Reads a value at another integer type.
@@ -762,32 +876,55 @@ impl<'tcx> Folder<'_, 'tcx> {
         }
     }
 
-    /// Applies an operator the folder can evaluate exactly.
+    /// Applies an operator the folder can evaluate.
     ///
-    /// Arithmetic is deliberately absent. The checks worth folding compare a
-    /// size against a bound, and every further operator is another chance to
-    /// disagree with the machine and drop a panic that is real.
+    /// General arithmetic is deliberately absent. The checks worth folding
+    /// compare a value against a bound, and every further operator is
+    /// another chance to disagree with the machine and drop a panic that is
+    /// real. The two exceptions bound their result by construction: a
+    /// remainder by a constant and a masked value cannot leave the range the
+    /// operator itself defines.
     fn binary(
         &self,
         op: BinOp,
-        left: Value<'tcx>,
-        right: Value<'tcx>,
+        left: Fact<'tcx>,
+        right: Fact<'tcx>,
     ) -> Option<Value<'tcx>> {
-        match (left, right) {
-            (Value::Exact(left), Value::Exact(right)) => {
-                self.settled(op, left, right).map(Value::Exact)
-            }
-            // One side is known to differ from exactly the value the other
-            // side holds, which answers an equality and nothing else.
-            (Value::Exact(known), Value::Other(ruled_out))
-            | (Value::Other(ruled_out), Value::Exact(known))
-                if known == ruled_out =>
-            {
-                match op {
-                    BinOp::Eq => self.boolean(false).map(Value::Exact),
-                    BinOp::Ne => self.boolean(true).map(Value::Exact),
-                    _ => None,
+        if let Some(truth) = value::compare(op, left, right) {
+            return self.boolean(truth).map(Value::Exact);
+        }
+        if let (Some(Value::Exact(l)), Some(Value::Exact(r))) =
+            (left.value, right.value)
+            && let Some(known) = Self::settled(op, l, r)
+        {
+            return Some(Value::Exact(known));
+        }
+        match op {
+            // The remainder of anything by a positive constant lies below
+            // it. Negative operands are signed, and a signed remainder can
+            // be negative, so only unsigned types make the claim.
+            BinOp::Rem => {
+                let divisor = right.value?.exact()?;
+                if divisor.is_signed() || divisor.bits == 0 {
+                    return None;
                 }
+                let hi = divisor.predecessor()?;
+                Bounds::new(divisor.type_min(), hi).map(Value::Within)
+            }
+            // A mask with no sign bit pins the result between zero and
+            // itself, whatever the other operand held.
+            BinOp::BitAnd => {
+                let ((Some(mask), _) | (None, Some(mask))) = (
+                    left.value.and_then(Value::exact),
+                    right.value.and_then(Value::exact),
+                ) else {
+                    return None;
+                };
+                if mask.is_signed() && mask.as_signed() < 0 {
+                    return None;
+                }
+                let zero = Known { bits: 0, ..mask };
+                Bounds::new(zero, mask).map(Value::Within)
             }
             _ => None,
         }
@@ -795,7 +932,6 @@ impl<'tcx> Folder<'_, 'tcx> {
 
     /// Applies an operator to two settled values.
     fn settled(
-        &self,
         op: BinOp,
         left: Known<'tcx>,
         right: Known<'tcx>,
@@ -803,32 +939,16 @@ impl<'tcx> Folder<'_, 'tcx> {
         if left.ty != right.ty || left.width != right.width {
             return None;
         }
-        if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) {
-            let bits = match op {
-                BinOp::BitAnd => left.bits & right.bits,
-                BinOp::BitOr => left.bits | right.bits,
-                _ => left.bits ^ right.bits,
-            };
-            return Some(Known {
-                bits: truncate(bits, left.width),
-                ..left
-            });
-        }
-        let order = if left.is_signed() {
-            left.as_signed().cmp(&right.as_signed())
-        } else {
-            left.bits.cmp(&right.bits)
-        };
-        let verdict = match op {
-            BinOp::Eq => order.is_eq(),
-            BinOp::Ne => order.is_ne(),
-            BinOp::Lt => order.is_lt(),
-            BinOp::Le => order.is_le(),
-            BinOp::Gt => order.is_gt(),
-            BinOp::Ge => order.is_ge(),
+        let bits = match op {
+            BinOp::BitAnd => left.bits & right.bits,
+            BinOp::BitOr => left.bits | right.bits,
+            BinOp::BitXor => left.bits ^ right.bits,
             _ => return None,
         };
-        self.boolean(verdict)
+        Some(Known {
+            bits: truncate(bits, left.width),
+            ..left
+        })
     }
 
     /// A `bool` the folder is certain of.
@@ -866,6 +986,14 @@ impl<'tcx> Folder<'_, 'tcx> {
     }
 }
 
+/// The local a local's link of sameness points at, or the local itself.
+fn root_of(state: &State<'_>, local: mir::Local) -> mir::Local {
+    state
+        .get(local.as_usize())
+        .and_then(|fact| fact.same)
+        .unwrap_or(local)
+}
+
 /// Applies what taking one arm of a branch proves.
 ///
 /// `matched` says whether the arm was reached by naming `value` or by being
@@ -887,16 +1015,19 @@ fn refined<'tcx>(
         ty: subject.ty,
         width: subject.width,
     };
-    learn(&mut next, subject.read, settle(read, matched));
+    learn(
+        &mut next,
+        subject.read,
+        Taught::Value(settle(read, matched)),
+    );
     if let Some(compared) = subject.compared {
         // A boolean has two arms, so the fallback settles the comparison
         // just as firmly as naming its value does.
-        let held = if matched { value == 1 } else { value == 0 };
-        learn(
-            &mut next,
-            compared.local,
-            settle(compared.against, held == compared.equality),
-        );
+        let truth = if matched { value == 1 } else { value == 0 };
+        if let Some(fact) = value::fact_of(compared.op, compared.against, truth)
+        {
+            learn(&mut next, compared.local, fact);
+        }
     }
     next
 }
@@ -910,15 +1041,31 @@ fn settle(known: Known<'_>, holds: bool) -> Value<'_> {
     }
 }
 
-/// Records a fact, leaving anything already settled alone.
+/// Records what a branch taught, leaving anything already settled alone.
 ///
-/// A settled value cannot be improved on, and disagreeing with it would mean
-/// the arm is unreachable, which this pass does not claim.
-fn learn<'tcx>(state: &mut State<'tcx>, local: mir::Local, value: Value<'tcx>) {
-    if let Some(slot) = state.get_mut(local.as_usize())
-        && slot.is_none()
-    {
-        *slot = Some(value);
+/// A settled claim cannot be improved on, and disagreeing with it would
+/// mean the arm is unreachable, which this pass does not claim. The two
+/// planes fill independently: a counter that is exactly zero can still
+/// learn that it is below a length.
+fn learn<'tcx>(
+    state: &mut State<'tcx>,
+    local: mir::Local,
+    taught: Taught<'tcx>,
+) {
+    let Some(slot) = state.get_mut(local.as_usize()) else {
+        return;
+    };
+    match taught {
+        Taught::Value(value) => {
+            if slot.value.is_none() {
+                slot.value = Some(value);
+            }
+        }
+        Taught::Order(rel, of) => {
+            if slot.order.is_none() {
+                slot.order = Some((rel, of));
+            }
+        }
     }
 }
 
@@ -946,10 +1093,29 @@ fn writes(stmt: &mir::Statement<'_>, local: mir::Local) -> bool {
     }
 }
 
-/// Drops what is known about one local.
+/// Drops what is known about one local, along with every claim that leans
+/// on it.
+///
+/// A claim of sameness or one measured against a slice is only as good as
+/// the local it names, so writing that local sweeps those claims with it.
+/// Each plane is swept on its own: an ordering against an untouched slice
+/// outlives the loss of the value it was learned beside.
 fn forget(state: &mut State<'_>, local: mir::Local) {
+    for slot in state.iter_mut() {
+        if slot.value.is_some_and(|value| value.leans_on(local)) {
+            slot.value = None;
+        }
+        if slot.order.is_some_and(|(_, of)| of == local) {
+            slot.order = None;
+        }
+        if slot.same == Some(local) {
+            // The copied value itself stands; only the claim of still
+            // being the same as the source dies with the write.
+            slot.same = None;
+        }
+    }
     if let Some(slot) = state.get_mut(local.as_usize()) {
-        *slot = None;
+        *slot = Fact::default();
     }
 }
 

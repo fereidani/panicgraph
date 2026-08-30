@@ -217,3 +217,50 @@ pub fn must_not_catch_explicit(x: u32) -> u32 {
 pub fn must_catch_abort(x: u32) -> u32 {
     std::panic::catch_unwind(move || *Box::new(x)).unwrap_or(0)
 }
+
+/// Clean. The remainder of anything by eight lies below eight.
+pub fn clean_modulo_index(v: &[u8; 8], i: usize) -> u8 {
+    v[i % 8]
+}
+
+/// Clean. A mask with no sign bit pins the index below the length.
+pub fn clean_masked_index(v: &[u8; 4], i: usize) -> u8 {
+    v[i & 3]
+}
+
+/// Clean. The guard compares against the length the check reads.
+pub fn clean_guarded_index(v: &[u8], i: usize) -> u8 {
+    if i < v.len() { v[i] } else { 0 }
+}
+
+/// Clean. The same guard, written the other way round.
+pub fn clean_guarded_index_flipped(v: &[u8], i: usize) -> u8 {
+    if v.len() > i { v[i] } else { 0 }
+}
+
+/// Clean. The loop's own condition proves each read in range.
+pub fn clean_while_index(v: &[u8]) -> u32 {
+    let mut total = 0u32;
+    let mut i = 0usize;
+    while i < v.len() {
+        total = total.wrapping_add(u32::from(v[i]));
+        i = i.wrapping_add(1);
+    }
+    total
+}
+
+/// Reaches `index`: the guard admits an index one past the end.
+pub fn must_index_off_by_one(v: &[u8], i: usize) -> u8 {
+    if i <= v.len() { v[i] } else { 0 }
+}
+
+/// Reaches `index`: the guard measures a different slice.
+pub fn must_index_wrong_slice(a: &[u8], b: &[u8], i: usize) -> u8 {
+    if i < a.len() { b[i] } else { 0 }
+}
+
+/// Reaches `index`: a signed remainder can be negative, and the cast wraps
+/// it far past the end.
+pub fn must_modulo_signed(v: &[u8; 8], i: isize) -> u8 {
+    v[(i % 8) as usize]
+}

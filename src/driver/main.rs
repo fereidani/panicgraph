@@ -16,6 +16,7 @@ extern crate rustc_span;
 mod extract;
 mod fold;
 mod sinks;
+mod value;
 
 use std::{path::PathBuf, process::Command};
 
