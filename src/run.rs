@@ -3,7 +3,7 @@
 use std::{
     env,
     ffi::OsString,
-    fs,
+    fs, path,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -41,8 +41,14 @@ struct Layout {
 pub fn collect(args: &Args) -> Result<Vec<Artifact>> {
     let driver = driver_path()?;
     check_toolchain()?;
+    // The analysis build runs in the crate's own directory, so a relative
+    // path here would resolve against that rather than against where the
+    // tool was started: the artifacts would be written one tree deeper than
+    // they are read back from, and the run would either report nothing or
+    // report whatever an earlier run left behind.
     let root = match &args.manifest_dir {
-        Some(dir) => dir.clone(),
+        Some(dir) => path::absolute(dir)
+            .with_context(|| format!("could not resolve {}", dir.display()))?,
         None => env::current_dir()
             .context("could not determine the current directory")?,
     };
