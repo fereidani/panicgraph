@@ -331,3 +331,13 @@ pub fn must_zeroed_ref() -> u8 {
 pub fn clean_zeroed_int() -> u32 {
     unsafe { std::mem::zeroed() }
 }
+
+/// Reaches `index` at the language level; the optimizer proves the loop in
+/// range and keeps no check, which the verifying sweep must say.
+pub fn verify_absent_loop(v: &[u8]) -> u32 {
+    let mut s = 0u32;
+    for i in 0..v.len() {
+        s = s.wrapping_add(u32::from(v[i]));
+    }
+    s
+}

@@ -8,6 +8,7 @@ use crate::{
     Body, Category, CategorySet, FuncId, Graph, Solution, Terminal,
     args::{Args, Format},
     util::Map,
+    verify::{Verdict, Verdicts},
     witness,
 };
 
@@ -36,12 +37,15 @@ pub fn analysis(
     graph: &Graph,
     solution: &Solution,
     args: &Args,
+    verdicts: Option<&Verdicts>,
     out: &mut String,
 ) -> Result<()> {
     let findings = collect(graph, solution, args);
     match args.format {
-        Format::Human => human(graph, solution, args, &findings, out),
-        Format::Json => json(graph, &findings, out)?,
+        Format::Human => {
+            human(graph, solution, args, &findings, verdicts, out);
+        }
+        Format::Json => json(graph, &findings, verdicts, out)?,
         Format::Github => github(graph, &findings, out),
         // Handled before the report is built, because it draws the tree
         // rather than the list of findings.
@@ -49,6 +53,31 @@ pub fn analysis(
         Format::Svg => {}
     }
     Ok(())
+}
+
+/// The artifact's verdict on one finding and category.
+///
+/// A finding can merge several instantiations of one function; whichever
+/// the artifact confirms decides, and only unanimity can call it absent.
+fn verdict_of(
+    graph: &Graph,
+    verdicts: &Verdicts,
+    finding: &Finding,
+    category: Category,
+) -> Verdict {
+    let mut all_absent = true;
+    for &id in &finding.ids {
+        match verdicts.of(&graph.body(id).key, category) {
+            Verdict::Confirmed => return Verdict::Confirmed,
+            Verdict::Absent => {}
+            Verdict::Unverified => all_absent = false,
+        }
+    }
+    if all_absent {
+        Verdict::Absent
+    } else {
+        Verdict::Unverified
+    }
 }
 
 /// Every function worth reporting, with the categories it reports under.
@@ -113,6 +142,7 @@ fn human(
     solution: &Solution,
     args: &Args,
     findings: &[Finding],
+    verdicts: Option<&Verdicts>,
     out: &mut String,
 ) {
     header(graph, args, findings.len(), out);
@@ -136,15 +166,24 @@ fn human(
                     if let Some(loc) = site.1 {
                         let _ = write!(out, " at {loc}");
                     }
-                    out.push('\n');
                 }
                 None => {
-                    let _ = writeln!(
+                    let _ = write!(
                         out,
                         "    {category:<18} reached through a call"
                     );
                 }
             }
+            if let Some(verdicts) = verdicts {
+                let word = match verdict_of(graph, verdicts, finding, category)
+                {
+                    Verdict::Confirmed => "confirmed in",
+                    Verdict::Absent => "absent from",
+                    Verdict::Unverified => "unverified in",
+                };
+                let _ = write!(out, " ({word} the compiled artifact)");
+            }
+            out.push('\n');
         }
         out.push('\n');
     }
@@ -209,12 +248,17 @@ fn header(graph: &Graph, args: &Args, found: usize, out: &mut String) {
 }
 
 /// Writes the machine readable report.
-fn json(graph: &Graph, findings: &[Finding], out: &mut String) -> Result<()> {
+fn json(
+    graph: &Graph,
+    findings: &[Finding],
+    verdicts: Option<&Verdicts>,
+    out: &mut String,
+) -> Result<()> {
     let items: Vec<serde_json::Value> = findings
         .iter()
         .map(|f| {
             let body = graph.body(f.id());
-            serde_json::json!({
+            let mut item = serde_json::json!({
                 "function": body.display,
                 "crate": body.krate,
                 "location": body.loc.as_ref().map(ToString::to_string),
@@ -223,7 +267,23 @@ fn json(graph: &Graph, findings: &[Finding], out: &mut String) -> Result<()> {
                     .iter()
                     .map(crate::Category::name)
                     .collect::<Vec<_>>(),
-            })
+            });
+            if let Some(verdicts) = verdicts {
+                let verified: serde_json::Map<String, serde_json::Value> = f
+                    .categories
+                    .iter()
+                    .map(|category| {
+                        (
+                            category.name().to_owned(),
+                            verdict_of(graph, verdicts, f, category)
+                                .name()
+                                .into(),
+                        )
+                    })
+                    .collect();
+                item["verified"] = verified.into();
+            }
+            item
         })
         .collect();
     let doc = serde_json::json!({

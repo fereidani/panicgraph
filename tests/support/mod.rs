@@ -158,26 +158,7 @@ pub fn analyse_fixture(
     profile: &str,
     extra: &[&str],
 ) -> Vec<(String, Vec<String>)> {
-    let exe = PathBuf::from(env!("CARGO_BIN_EXE_panicgraph"));
-    let output = Command::new(&exe)
-        .arg("--manifest-dir")
-        .arg(fixture_dir())
-        .arg("--profile")
-        .arg(profile)
-        .arg("--suppress")
-        .arg("")
-        .arg("--format")
-        .arg("json")
-        .args(extra)
-        .output()
-        .expect("the front end should run");
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|err| {
-            panic!(
-                "the report should be json: {err}\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-        });
+    let report = analyse_fixture_json(profile, extra);
     let findings = report["findings"]
         .as_array()
         .expect("the report should list findings");
@@ -196,6 +177,32 @@ pub fn analyse_fixture(
             (name.to_owned(), categories)
         })
         .collect()
+}
+
+/// Analyses the known fixture crate and returns the raw json report.
+pub fn analyse_fixture_json(
+    profile: &str,
+    extra: &[&str],
+) -> serde_json::Value {
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_panicgraph"));
+    let output = Command::new(&exe)
+        .arg("--manifest-dir")
+        .arg(fixture_dir())
+        .arg("--profile")
+        .arg(profile)
+        .arg("--suppress")
+        .arg("")
+        .arg("--format")
+        .arg("json")
+        .args(extra)
+        .output()
+        .expect("the front end should run");
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "the report should be json: {err}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
 }
 
 /// Where the known fixture crate lives.

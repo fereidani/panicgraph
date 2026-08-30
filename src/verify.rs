@@ -1,0 +1,377 @@
+//! Verification of findings against the compiled artifact.
+//!
+//! The analysis reads MIR, which is what the program means; the artifact is
+//! what the optimizer kept. A check the folder could not settle is often
+//! settled by the optimizer anyway, so each finding is looked up in the
+//! compiled code: a panic entry point still reachable from the function
+//! confirms it, a function whose calls are all accounted for and reach no
+//! entry point shows the optimizer removed it, and anything else stays
+//! unverified. The verdict is a confidence tier, never a removal.
+//!
+//! The sweep reads relocations, so a call the compiler emitted without one,
+//! an indirect tail call for example, is invisible; functions making calls
+//! through registers are therefore never claimed panic free.
+
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use anyhow::{Context, Result, bail};
+
+use crate::{
+    Category, CategorySet, FuncKey,
+    util::{Map, Set},
+};
+
+/// How a finding relates to the compiled artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// A matching panic entry point is reachable from the compiled code.
+    Confirmed,
+    /// The compiled code reaches no matching entry point, and every call it
+    /// makes was seen, so the optimizer removed the panic path.
+    Absent,
+    /// The artifact cannot settle it: the function was inlined away, calls
+    /// code the sweep cannot see into, or the category leaves no symbol.
+    Unverified,
+}
+
+impl Verdict {
+    /// The name used in reports.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::Absent => "absent",
+            Self::Unverified => "unverified",
+        }
+    }
+}
+
+/// What one compiled function was seen to do.
+#[derive(Debug, Clone, Copy, Default)]
+struct Facts {
+    /// Categories of the panic entry points reachable from it.
+    reaches: CategorySet,
+    /// Whether it reaches code the sweep cannot follow.
+    open: bool,
+}
+
+/// Verdicts for every function the artifact defines.
+#[derive(Debug, Default)]
+pub struct Verdicts {
+    facts: Map<String, Facts>,
+}
+
+/// Categories that leave no symbol in the artifact.
+///
+/// A reference count overflow aborts through an inlined trap instruction,
+/// and the assumed categories name missing knowledge rather than an entry
+/// point, so none of them can be confirmed or ruled out by a symbol sweep.
+const SYMBOLLESS: &[Category] = &[
+    Category::RefCountOverflow,
+    Category::Unknown,
+    Category::Foreign,
+    Category::DynCall,
+    Category::FnPointer,
+    Category::GenericBound,
+];
+
+impl Verdicts {
+    /// The verdict for one function and category.
+    #[must_use]
+    pub fn of(&self, key: &FuncKey, category: Category) -> Verdict {
+        if SYMBOLLESS.contains(&category) {
+            return Verdict::Unverified;
+        }
+        let Some(facts) = self.facts.get(&key.0) else {
+            return Verdict::Unverified;
+        };
+        if facts.reaches.contains(category) {
+            return Verdict::Confirmed;
+        }
+        if facts.open {
+            return Verdict::Unverified;
+        }
+        Verdict::Absent
+    }
+}
+
+/// Panic entry points by demangled name, most specific first.
+///
+/// An entry maps to every category its symbol could stand for: the funnels
+/// serve several, and claiming the narrowest would confirm too little.
+fn entry_categories(demangled: &str) -> Option<CategorySet> {
+    use Category::{
+        AllocFailure, Borrow, CapacityOverflow, DivideByZero, Explicit, Fmt,
+        Index, MisalignedRef, NullDeref, Overflow, Poison, RemainderByZero,
+        StrBoundary, UbCheck, Unwrap,
+    };
+    let unwraps = [Unwrap, Poison, Fmt].into_iter().collect();
+    let table: &[(&str, CategorySet)] = &[
+        (
+            "core::panicking::panic_bounds_check",
+            CategorySet::single(Index),
+        ),
+        ("core::slice::index::slice_", CategorySet::single(Index)),
+        (
+            "core::str::slice_error_fail",
+            CategorySet::single(StrBoundary),
+        ),
+        ("core::option::unwrap_failed", unwraps),
+        ("core::option::expect_failed", unwraps),
+        ("core::result::unwrap_failed", unwraps),
+        ("core::cell::panic_already", CategorySet::single(Borrow)),
+        (
+            "alloc::raw_vec::capacity_overflow",
+            CategorySet::single(CapacityOverflow),
+        ),
+        (
+            "alloc::raw_vec::handle_error",
+            [CapacityOverflow, AllocFailure].into_iter().collect(),
+        ),
+        ("handle_alloc_error", CategorySet::single(AllocFailure)),
+        ("panic_const_div_by_zero", CategorySet::single(DivideByZero)),
+        (
+            "panic_const_rem_by_zero",
+            CategorySet::single(RemainderByZero),
+        ),
+        ("panic_const_coroutine", CategorySet::single(Explicit)),
+        ("panic_const_async", CategorySet::single(Explicit)),
+        ("panic_const_gen_fn", CategorySet::single(Explicit)),
+        ("panic_const_", CategorySet::single(Overflow)),
+        (
+            "panic_misaligned_pointer",
+            CategorySet::single(MisalignedRef),
+        ),
+        ("panic_null_pointer", CategorySet::single(NullDeref)),
+        (
+            "core::panicking::panic_nounwind",
+            [Explicit, UbCheck].into_iter().collect(),
+        ),
+        ("resume_unwind", CategorySet::single(Explicit)),
+        ("len_mismatch_fail", CategorySet::single(Explicit)),
+        ("core::panicking::", CategorySet::single(Explicit)),
+    ];
+    table
+        .iter()
+        .find(|(name, _)| demangled.contains(name))
+        .map(|(_, set)| *set)
+}
+
+/// Sweeps the compiled libraries under an analysis build tree.
+///
+/// # Errors
+///
+/// Returns an error when no library is found or a tool cannot run.
+pub fn sweep(tree: &Path) -> Result<Verdicts> {
+    let objects = libraries_in(tree);
+    if objects.is_empty() {
+        bail!(
+            "no compiled library found under {}; run the analysis first",
+            tree.display()
+        );
+    }
+    let objdump = llvm_tool("llvm-objdump")?;
+    let mut graph = Graphed::default();
+    for object in &objects {
+        let listing = Command::new(&objdump)
+            .arg("-d")
+            .arg("-r")
+            .arg("--no-show-raw-insn")
+            .arg(object)
+            .output()
+            .with_context(|| {
+                format!("could not disassemble {}", object.display())
+            })?;
+        graph.read(&String::from_utf8_lossy(&listing.stdout));
+    }
+    Ok(graph.resolve())
+}
+
+/// The call graph read out of the disassembly.
+#[derive(Debug, Default)]
+struct Graphed {
+    calls: Map<String, Set<String>>,
+    open: Set<String>,
+}
+
+impl Graphed {
+    /// Reads one disassembly listing into the graph.
+    fn read(&mut self, listing: &str) {
+        let mut current: Option<String> = None;
+        for line in listing.lines() {
+            if let Some(label) = function_label(line) {
+                self.calls.entry(label.clone()).or_default();
+                current = Some(label);
+                continue;
+            }
+            let Some(function) = &current else { continue };
+            if let Some(target) = relocation_target(line) {
+                self.calls
+                    .entry(function.clone())
+                    .or_default()
+                    .insert(target);
+                continue;
+            }
+            // A call through a bare register has no relocation to name its
+            // target. A load-and-call through the GOT is not one: its
+            // target arrives on the next relocation line.
+            if line.contains("call") && line.contains("*%") {
+                self.open.insert(function.clone());
+            }
+        }
+    }
+
+    /// Settles what every defined function reaches.
+    fn resolve(self) -> Verdicts {
+        let mut out = Verdicts::default();
+        for name in self.calls.keys() {
+            let mut facts = Facts::default();
+            let mut seen: Set<&str> = Set::default();
+            let mut stack: Vec<&str> = vec![name];
+            // Each symbol enters `seen` once, so the walk is bounded by the
+            // number of symbols in the artifact.
+            while let Some(at) = stack.pop() {
+                if !seen.insert(at) {
+                    continue;
+                }
+                if self.open.contains(at) {
+                    facts.open = true;
+                }
+                let Some(callees) = self.calls.get(at) else {
+                    // Defined nowhere in the sweep. A panic entry point is
+                    // the whole story; anything else could do anything.
+                    // The alternate form drops crate disambiguators, so the
+                    // table can match plain paths.
+                    let readable =
+                        format!("{:#}", rustc_demangle::demangle(at));
+                    match entry_categories(&readable) {
+                        Some(set) => {
+                            facts.reaches = facts.reaches.union(set);
+                        }
+                        None => facts.open = true,
+                    }
+                    continue;
+                };
+                for callee in callees {
+                    stack.push(callee);
+                }
+            }
+            out.facts.insert(name.clone(), facts);
+        }
+        out
+    }
+}
+
+/// The function a disassembly label line defines.
+fn function_label(line: &str) -> Option<String> {
+    let rest = line.strip_suffix(">:")?;
+    let (address, name) = rest.split_once(" <")?;
+    if address.is_empty() || !address.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
+/// The symbol a relocation line points at, when it is code.
+fn relocation_target(line: &str) -> Option<String> {
+    if !line.contains(":  R_") {
+        return None;
+    }
+    let raw = line.split_whitespace().last()?;
+    let raw = raw
+        .rfind(['+', '-'])
+        .filter(|at| raw[at + 1..].starts_with("0x"))
+        .map_or(raw, |at| &raw[..at]);
+    if let Some(inner) = raw.split_once("._R").map(|(_, sym)| sym) {
+        // A relocation against a text section names the function through
+        // the section that holds it.
+        return raw.starts_with(".text").then(|| format!("_R{inner}"));
+    }
+    if let Some(inner) = raw.split_once("._ZN").map(|(_, sym)| sym) {
+        return raw.starts_with(".text").then(|| format!("_ZN{inner}"));
+    }
+    if raw.starts_with('.') {
+        // Data the code refers to. Reading it is not calling it, and an
+        // actual call through it shows up as a register call.
+        return None;
+    }
+    Some(raw.to_owned())
+}
+
+/// Every local library compiled by the analysis build.
+///
+/// Dependencies are skipped: a finding is about a local function, whose
+/// compiled body sits in the crate's own library.
+fn libraries_in(tree: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![tree.to_path_buf()];
+    // Each directory is visited once, so the walk is bounded by the size of
+    // the build tree.
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "deps") {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            let named_lib = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("lib")
+                        && Path::new(name)
+                            .extension()
+                            .is_some_and(|ext| ext == "rlib")
+                });
+            let under_release = path
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "release" || name == "debug");
+            if named_lib && under_release {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// A tool shipped with the pinned toolchain.
+fn llvm_tool(name: &str) -> Result<PathBuf> {
+    let sysroot = Command::new("rustc")
+        .arg("--print")
+        .arg("sysroot")
+        .output()
+        .context("could not run rustc to find the sysroot")?;
+    let sysroot = String::from_utf8_lossy(&sysroot.stdout);
+    let host = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .context("could not run rustc to find the host")?;
+    let host = String::from_utf8_lossy(&host.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("host: ").map(str::to_owned))
+        .context("rustc did not report a host triple")?;
+    let tool = PathBuf::from(sysroot.trim())
+        .join("lib")
+        .join("rustlib")
+        .join(host.trim())
+        .join("bin")
+        .join(name);
+    if !tool.exists() {
+        bail!(
+            "{name} is missing from the toolchain; install the llvm-tools \
+             component"
+        );
+    }
+    Ok(tool)
+}

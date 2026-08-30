@@ -129,6 +129,16 @@ fn main() -> std::process::ExitCode {
     // invisible.
     args.push("-Zalways-encode-mir".to_owned());
 
+    // The crate under analysis is the leaf of the build, so nothing ever
+    // inlines from it, and marking its functions inlinable only makes
+    // codegen skip their machine code. Keeping every body in the compiled
+    // library is what lets a finding be checked against the artifact.
+    // Dependencies are left alone: their inlinability into the leaf is part
+    // of what the analysis measures.
+    if std::env::var_os("CARGO_PRIMARY_PACKAGE").is_some() {
+        args.push("-Zcross-crate-inline-threshold=never".to_owned());
+    }
+
     rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&args, &mut PanicGraph);
     })

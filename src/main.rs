@@ -105,7 +105,12 @@ fn listen(args: &Args) -> Result<()> {
 /// Runs the analysis and renders the report.
 fn analyze(args: &Args, out: &mut String) -> Result<u8> {
     let (graph, solution) = solve(args)?;
-    report::analysis(&graph, &solution, args, out)?;
+    let verdicts = if args.verify {
+        Some(panicgraph::verify::sweep(&run::build_tree(args)?)?)
+    } else {
+        None
+    };
+    report::analysis(&graph, &solution, args, verdicts.as_ref(), out)?;
     // The hint is prose, so it belongs only in the rendering that is prose.
     // Appending it to json left the output unparseable.
     if matches!(args.format, panicgraph::args::Format::Human)

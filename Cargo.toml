@@ -57,6 +57,9 @@ flate2 = { version = "1", default-features = false, features = [
 ], optional = true }
 hashbrown = "0.17"
 regex = "1"
+# Official demangler from the rust-lang organization, used to recognize
+# panic entry points in compiled artifacts by their readable names.
+rustc-demangle = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

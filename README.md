@@ -221,6 +221,28 @@ itself when scripting is off.
 
 Machine readable output is available everywhere with `--format json`.
 
+## Checking findings against the compiled artifact
+
+This is a may-panic analysis over MIR, and the optimizer sees further than
+the folder does. `--verify` disassembles the libraries the analysis build
+produced and follows each finding into the machine code:
+
+```
+verify_absent_loop
+    index reached through a call (absent from the compiled artifact)
+must_index
+    index index out of bounds at src/lib.rs:10:5 (confirmed in the compiled artifact)
+```
+
+A confirmed finding still calls a panic entry point in the artifact. An
+absent one was removed by the optimizer: every call the compiled function
+makes was accounted for and none reaches a panic. Everything else is
+unverified, which includes calls through registers, code the sweep cannot
+see into, and categories that leave no symbol behind, such as a reference
+count overflow's inlined trap. The verdict annotates the finding and never
+removes it: absence from one artifact is a fact about that build, not a
+proof about the source.
+
 ## How it works
 
 The analysis runs as a compiler driver invoked through `RUSTC_WRAPPER`, over

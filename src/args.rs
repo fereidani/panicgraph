@@ -84,6 +84,10 @@ pub struct Scope {
 
 /// What the analysis is allowed to assume.
 #[derive(Debug, Clone, Group)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent, orthogonal policy choice"
+)]
 pub struct Policy {
     /// Categories to assume impossible.
     #[arg(long, value_name = "LIST", default_value = "default", global = true)]
@@ -105,6 +109,16 @@ pub struct Policy {
     /// narrow what the unknown code could be, they do not close the set.
     #[arg(long, global = true)]
     pub candidates: bool,
+
+    /// Check each finding against the compiled artifact and say which
+    /// survived the optimizer.
+    ///
+    /// A finding the artifact confirms still calls a panic entry point; an
+    /// absent one was removed by the optimizer; the rest cannot be settled
+    /// at the binary level. The verdict annotates the finding, it never
+    /// removes it.
+    #[arg(long, global = true)]
+    pub verify: bool,
 
     /// Include dependencies, not just the local crate.
     #[arg(long, global = true)]
@@ -224,6 +238,10 @@ impl From<Std> for StdMode {
 
 /// The resolved settings the rest of the program reads.
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent, orthogonal policy choice"
+)]
 pub struct Args {
     /// The subcommand.
     pub command: Command,
@@ -241,6 +259,8 @@ pub struct Args {
     pub static_only: bool,
     /// Follow candidate targets for dyn and function pointer calls.
     pub candidates: bool,
+    /// Annotate findings with what the compiled artifact still contains.
+    pub verify: bool,
     /// Report functions from dependencies as well as the local crate.
     pub all_crates: bool,
     /// Directory holding the crate to analyse.
@@ -283,6 +303,7 @@ impl Cli {
             format: self.format,
             static_only: self.policy.static_only,
             candidates: self.policy.candidates,
+            verify: self.policy.verify,
             all_crates: self.policy.all_crates,
             manifest_dir: self.scope.manifest_dir,
             package: self.scope.package,

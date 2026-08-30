@@ -46,12 +46,7 @@ pub fn collect(args: &Args) -> Result<Vec<Artifact>> {
     // tool was started: the artifacts would be written one tree deeper than
     // they are read back from, and the run would either report nothing or
     // report whatever an earlier run left behind.
-    let root = match &args.manifest_dir {
-        Some(dir) => path::absolute(dir)
-            .with_context(|| format!("could not resolve {}", dir.display()))?,
-        None => env::current_dir()
-            .context("could not determine the current directory")?,
-    };
+    let root = crate_root(args)?;
     let layout = prepare(&root, &driver, args)?;
 
     build(args, &driver, &root, &layout)?;
@@ -70,6 +65,30 @@ pub fn collect(args: &Args) -> Result<Vec<Artifact>> {
         bail!("the build produced no analysis artifacts");
     }
     Ok(artifacts)
+}
+
+/// The directory of the crate under analysis.
+fn crate_root(args: &Args) -> Result<PathBuf> {
+    args.manifest_dir.as_ref().map_or_else(
+        || {
+            env::current_dir()
+                .context("could not determine the current directory")
+        },
+        |dir| {
+            path::absolute(dir)
+                .with_context(|| format!("could not resolve {}", dir.display()))
+        },
+    )
+}
+
+/// Where the analysis build for these settings compiles into.
+///
+/// # Errors
+///
+/// Returns an error when the crate directory cannot be resolved.
+pub fn build_tree(args: &Args) -> Result<PathBuf> {
+    let root = crate_root(args)?;
+    analysis_target(&root, args)
 }
 
 /// Reports a toolchain that has moved since this tool was installed.
@@ -169,19 +188,9 @@ fn prepare(root: &Path, driver: &Path, args: &Args) -> Result<Layout> {
         args.std_mode.name(),
         args.package.as_deref().unwrap_or("all"),
     );
-    // Rebuilding the standard library costs one full build and depends only
-    // on the toolchain, so that tree is shared across projects rather than
-    // paid for once per target directory. The artifacts stay local: they
-    // describe this crate.
-    let target = match args.std_mode {
-        StdMode::Full => {
-            shared_build_dir()?.unwrap_or_else(|| base.join("build"))
-        }
-        StdMode::Shipped => base.join("build"),
-    };
     let layout = Layout {
         out: base.join(&slot),
-        target,
+        target: analysis_target(root, args)?,
     };
     let marker = format!("{slot}\n{}\n", driver_stamp(driver));
     discard_if_stale(&layout, &marker)?;
@@ -266,6 +275,22 @@ fn prune_stale(base: &Path, layout: &Layout) {
             eprintln!("removed stale results in {}", path.display());
         }
     }
+}
+
+/// The tree the analysis build for these settings compiles into.
+///
+/// Rebuilding the standard library costs one full build and depends only
+/// on the toolchain, so that tree is shared across projects rather than
+/// paid for once per target directory. The artifacts stay local: they
+/// describe one crate.
+fn analysis_target(root: &Path, args: &Args) -> Result<PathBuf> {
+    let base = root.join("target").join("panicgraph");
+    Ok(match args.std_mode {
+        StdMode::Full => {
+            shared_build_dir()?.unwrap_or_else(|| base.join("build"))
+        }
+        StdMode::Shipped => base.join("build"),
+    })
 }
 
 /// The shared tree a rebuilt standard library is compiled into.

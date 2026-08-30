@@ -13,6 +13,7 @@ pub mod graph;
 pub mod model;
 pub mod solve;
 pub mod util;
+pub mod verify;
 pub mod witness;
 
 /// Shared by the interactive view and the drawing, so it is only built
