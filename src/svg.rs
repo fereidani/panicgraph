@@ -7,8 +7,11 @@
 //! frame carries a native title.
 //!
 //! The shape follows the flame graph convention, which readers already know:
-//! width is how much reaches through a frame, depth is call depth, and
-//! clicking a frame zooms into it.
+//! width is how much reaches through a frame, depth is call depth, clicking
+//! a frame zooms into it, and `ctrl-F` searches. Zooming keeps the path to
+//! the frame in view as full width bars and hides what the frame does not
+//! contain, so the picture stays a picture of one path. Searching colours
+//! what matched and says how much of the whole it accounts for.
 
 // Laying out a drawing means turning counts into coordinates. The counts are
 // frame and panic totals, which stay many orders of magnitude below the point
@@ -22,7 +25,7 @@ use std::fmt::Write as _;
 use anyhow::Result;
 
 use crate::{
-    CategorySet, Graph,
+    Category, CategorySet, Graph,
     api::{FlameRow, children_of},
     solve::Edges,
 };
@@ -31,8 +34,9 @@ use crate::{
 const ROW: f64 = 17.0;
 /// Gap between frames, so neighbours stay separable.
 const GAP: f64 = 1.0;
-/// Space above the frames for the title and the search box.
-const HEAD: f64 = 46.0;
+/// Space above the frames for the title, the policy it was drawn under,
+/// and the controls.
+const HEAD: f64 = 62.0;
 /// Space below the frames for the hovered frame's details.
 const FOOT: f64 = 34.0;
 /// Width of the drawing.
@@ -41,6 +45,12 @@ const WIDTH: f64 = 1200.0;
 const CHAR: f64 = 5.9;
 /// Narrowest frame that can carry a label.
 const MIN_LABEL: f64 = 28.0;
+/// Narrowest frame that is drawn at all.
+///
+/// A frame thinner than this is a sliver no reader can hover or click, and
+/// dropping it with everything under it keeps a wide graph a file that can
+/// be opened.
+const MIN_WIDTH: f64 = 0.1;
 
 /// Colours, matching the interactive view.
 ///
@@ -94,15 +104,35 @@ pub fn render(
     header(WIDTH, height, out);
     let _ = writeln!(
         out,
-        "<text id=\"title\" x=\"{:.1}\" y=\"24\" text-anchor=\"middle\" \
+        "<text id=\"title\" x=\"{:.1}\" y=\"22\" text-anchor=\"middle\" \
          class=\"title\">Reachable panics</text>",
         WIDTH / 2.0
+    );
+    // The policy belongs on the picture. A flame graph of what can panic
+    // says nothing definite without the assumptions it was drawn under.
+    let _ = writeln!(
+        out,
+        "<text id=\"subtitle\" x=\"{:.1}\" y=\"38\" \
+         text-anchor=\"middle\" class=\"note\">{}</text>",
+        WIDTH / 2.0,
+        escape(&policy(suppressed))
+    );
+    let _ = writeln!(
+        out,
+        "<text id=\"unzoom\" x=\"10\" y=\"22\" class=\"ctl\">Reset \
+         Zoom</text>"
+    );
+    let _ = writeln!(
+        out,
+        "<text id=\"search\" x=\"{:.1}\" y=\"22\" text-anchor=\"end\" \
+         class=\"ctl on\">Search</text>",
+        WIDTH - 10.0
     );
     let _ = writeln!(
         out,
         "<text id=\"note\" x=\"10\" y=\"{:.1}\" class=\"note\">{} frames, \
-         {total} reachable panics. Click a frame to zoom, click the title to \
-         reset.</text>",
+         {total} reachable panics. Click a frame to zoom, ctrl-F to \
+         search.</text>",
         height - 12.0,
         frames.len()
     );
@@ -111,14 +141,32 @@ pub fn render(
         "<text id=\"detail\" x=\"10\" y=\"{:.1}\" class=\"detail\"> </text>",
         height - 12.0
     );
+    let _ = writeln!(
+        out,
+        "<text id=\"matched\" x=\"{:.1}\" y=\"{:.1}\" \
+         text-anchor=\"end\" class=\"note\"> </text>",
+        WIDTH - 10.0,
+        height - 12.0
+    );
 
+    out.push_str("<g id=\"frames\">\n");
     for frame in &frames {
         let row = &rows[frame.row];
         draw(frame, row, total, out);
     }
+    out.push_str("</g>\n");
 
     out.push_str("</svg>\n");
     Ok(())
+}
+
+/// The assumptions the picture was drawn under, written out.
+fn policy(suppressed: CategorySet) -> String {
+    let names: Vec<&str> = suppressed.iter().map(Category::name).collect();
+    if names.is_empty() {
+        return "assuming nothing impossible".to_owned();
+    }
+    format!("assuming impossible: {}", names.join(", "))
 }
 
 /// Places every frame, widest first so the heavy paths lead.
@@ -168,8 +216,13 @@ fn layout(rows: &[FlameRow]) -> Vec<Frame> {
         });
         let mut at = x;
         for kid in children.get(&id).into_iter().flatten() {
-            work.push((*kid, at, depth + 1));
-            at = (value[*kid] as f64).mul_add(scale, at);
+            let span = value[*kid] as f64 * scale;
+            // A sliver cannot be read, hovered or clicked, and neither can
+            // anything under it, so the whole branch goes.
+            if span >= MIN_WIDTH {
+                work.push((*kid, at, depth + 1));
+            }
+            at += span;
         }
     }
     frames
@@ -198,9 +251,17 @@ fn draw(frame: &Frame, row: &FlameRow, total: usize, out: &mut String) {
         "{name} ({kind}, {} reachable, {share:.1}%{folded})",
         frame.value
     );
+    // The label is fitted here for a reader with scripting off, and the
+    // whole name is kept beside it so the script can fit it again whenever
+    // zooming changes how much room the frame has.
     let _ = writeln!(
         out,
-        "<g class=\"f\" data-name=\"{name}\" data-info=\"{info}\">"
+        "<g class=\"f\" data-name=\"{name}\" data-info=\"{info}\" \
+         data-more=\"{}\" data-x=\"{:.2}\" data-w=\"{:.2}\" \
+         data-y=\"{y:.1}\">",
+        row.elided.len(),
+        frame.x,
+        frame.width
     );
     let _ = writeln!(out, "<title>{info}</title>");
     let _ = writeln!(
@@ -294,32 +355,49 @@ const STYLE: &str = r"<style>
   text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .title { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 15px;
     font-weight: 600; fill: #0b0b0b; cursor: pointer; }
-  .note, .detail { font-family: ui-sans-serif, system-ui, sans-serif;
+  .note, .detail, .ctl { font-family: ui-sans-serif, system-ui, sans-serif;
     font-size: 11px; fill: #78766f; }
   .detail { fill: #0b0b0b; }
+  .ctl { fill: #0b0b0b; cursor: pointer; display: none; }
+  .ctl.on { display: inline; }
+  .ctl:hover { text-decoration: underline; }
   .l { font-size: 10px; fill: #0b0b0b; pointer-events: none; }
   .f rect { stroke-width: 1; }
   .f:hover rect { opacity: 0.72; cursor: pointer; }
-  .dim rect { opacity: 0.16; }
-  .hit rect { stroke: #0b0b0b; stroke-width: 2; }
+  .parent rect { opacity: 0.28; }
+  .hide { display: none; }
+  /* Magenta belongs to no category, so a match is never read as one. */
+  .match rect { fill: #e600e6; }
 </style>
 ";
 
 /// The script that makes the picture explorable.
 ///
 /// Zooming rescales the frames rather than redrawing them, so the file stays
-/// one pass of output and works from the filesystem with no server.
+/// one pass of output and works from the filesystem with no server. What a
+/// search matched is written into the address, so a picture opened at a
+/// finding can be handed to someone else as it stands.
 const SCRIPT: &str = r#"<script type="text/ecmascript"><![CDATA[
-var frames = [], base = [], detail = null, note = null, width = 0;
+var frames = [], base = [], detail = null, note = null;
+var unzoombtn = null, searchbtn = null, matchedtxt = null;
+var width = 0, searching = "";
 
 function init() {
   width = document.documentElement.width.baseVal.value;
   detail = document.getElementById("detail");
   note = document.getElementById("note");
-  frames = Array.prototype.slice.call(document.getElementsByClassName("f"));
+  unzoombtn = document.getElementById("unzoom");
+  searchbtn = document.getElementById("search");
+  matchedtxt = document.getElementById("matched");
+  frames = Array.prototype.slice.call(
+    document.getElementById("frames").children);
   frames.forEach(function (g) {
-    var r = g.getElementsByTagName("rect")[0];
-    base.push({ x: +r.getAttribute("x"), w: +r.getAttribute("width") });
+    base.push({
+      x: +g.getAttribute("data-x"),
+      w: +g.getAttribute("data-w"),
+      y: +g.getAttribute("data-y"),
+      hidden: false, above: false, hit: false
+    });
     g.addEventListener("mouseover", function () {
       detail.textContent = g.getAttribute("data-info");
       note.style.display = "none";
@@ -330,44 +408,152 @@ function init() {
     });
     g.addEventListener("click", function (e) { zoom(g); e.stopPropagation(); });
   });
-  document.getElementById("title").addEventListener("click", reset);
+  document.getElementById("title").addEventListener("click", unzoom);
+  unzoombtn.addEventListener("click", unzoom);
+  searchbtn.addEventListener("click", prompt_for_search);
+  window.addEventListener("keydown", function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+      e.preventDefault();
+      prompt_for_search();
+    }
+  });
+  var asked = /[?&]s=([^&]*)/.exec(window.location.search);
+  if (asked) search(decodeURIComponent(asked[1].replace(/\+/g, " ")));
 }
 
-/* Rescales so the clicked frame fills the width. Frames outside it keep
-   their place but are dimmed, so the surrounding shape is still legible. */
+/* Rescales so the clicked frame fills the width. The frames it sits under
+   stay as full width bars, because the path to a frame is part of reading
+   it, and everything the frame does not contain is taken out of the way. */
 function zoom(target) {
   var i = frames.indexOf(target);
   if (i < 0) return;
-  var from = base[i].x, span = base[i].w || 1, scale = width / span;
+  var at = base[i], span = at.w || 1, scale = width / span;
   frames.forEach(function (g, j) {
     var b = base[j];
-    var x = (b.x - from) * scale, w = b.w * scale;
-    var outside = x + w < 0 || x > width;
-    g.setAttribute("class", outside ? "f dim" : "f");
-    var r = g.getElementsByTagName("rect")[0];
-    r.setAttribute("x", x.toFixed(1));
-    r.setAttribute("width", Math.max(w - 1, 0.6).toFixed(1));
-    var t = g.getElementsByTagName("text")[0];
-    if (t) {
-      t.setAttribute("x", (x + 4).toFixed(1));
-      t.style.display = w > 28 ? "" : "none";
+    b.hidden = b.x + b.w <= at.x + 0.01 || b.x >= at.x + at.w - 0.01;
+    b.above = !b.hidden && b.y < at.y;
+    if (b.above) {
+      place(g, 0, width);
+    } else if (!b.hidden) {
+      place(g, (b.x - at.x) * scale, b.w * scale);
     }
+    paint(g, b);
   });
+  show(unzoombtn, true);
+  if (searching) search(searching);
 }
 
-function reset() {
+function unzoom() {
   frames.forEach(function (g, j) {
     var b = base[j];
-    g.setAttribute("class", "f");
-    var r = g.getElementsByTagName("rect")[0];
-    r.setAttribute("x", b.x.toFixed(1));
-    r.setAttribute("width", Math.max(b.w - 1, 0.6).toFixed(1));
-    var t = g.getElementsByTagName("text")[0];
-    if (t) {
-      t.setAttribute("x", (b.x + 4).toFixed(1));
-      t.style.display = b.w > 28 ? "" : "none";
-    }
+    b.hidden = false;
+    b.above = false;
+    place(g, b.x, b.w);
+    paint(g, b);
   });
+  show(unzoombtn, false);
+  if (searching) search(searching);
+}
+
+/* Writes what a frame is now: out of the way, on the path to the zoom, or
+   matching the search. One place decides, so the three cannot disagree. */
+function paint(g, b) {
+  var cls = "f";
+  if (b.hidden) cls += " hide";
+  if (b.above) cls += " parent";
+  if (b.hit) cls += " match";
+  g.setAttribute("class", cls);
+}
+
+/* Moves one frame, and fits its label to the room it now has. */
+function place(g, x, w) {
+  var r = g.getElementsByTagName("rect")[0];
+  r.setAttribute("x", x.toFixed(1));
+  r.setAttribute("width", Math.max(w - 1, 0.6).toFixed(1));
+  var t = g.getElementsByTagName("text")[0];
+  if (!t) return;
+  t.setAttribute("x", (x + 4).toFixed(1));
+  if (w <= 28) {
+    t.style.display = "none";
+    return;
+  }
+  t.style.display = "";
+  t.textContent = tail(g.getAttribute("data-name"),
+    Math.floor((w - 8) / 5.9), +g.getAttribute("data-more"));
+}
+
+/* Keeps the end of a path, which is the part that identifies it. */
+function tail(text, room, more) {
+  var badge = more > 0 ? " +" + more : "";
+  room -= badge.length;
+  if (room < 5) return badge.replace(" ", "");
+  if (text.length <= room) return text + badge;
+  var cut = text.lastIndexOf("::");
+  if (cut >= 0 && text.length - cut - 2 <= room - 2) {
+    return ".." + text.slice(cut + 2) + badge;
+  }
+  return ".." + text.slice(text.length - (room - 2)) + badge;
+}
+
+function prompt_for_search() {
+  if (searching) {
+    reset_search();
+    return;
+  }
+  var term = window.prompt("Search frames, as a regular expression", "");
+  if (term) search(term);
+}
+
+/* Colours what matched, and says how much of the whole it accounts for.
+   A frame under another that also matched is not counted twice: only the
+   widest claim at each position is kept, which is the one that contains
+   the rest. */
+function search(term) {
+  var re;
+  try { re = new RegExp(term, "i"); } catch (e) { return; }
+  var widest = {};
+  searching = term;
+  frames.forEach(function (g, j) {
+    var b = base[j];
+    b.hit = !b.hidden && re.test(g.getAttribute("data-name"));
+    if (b.hit && (widest[b.x] === undefined || widest[b.x] < b.w)) {
+      widest[b.x] = b.w;
+    }
+    paint(g, b);
+  });
+  var matched = 0;
+  for (var x in widest) matched += widest[x];
+  var whole = base.length ? base[0].w || 1 : 1;
+  matchedtxt.textContent =
+    "Matched: " + (100 * matched / whole).toFixed(1) + "%";
+  searchbtn.textContent = "Reset Search";
+  remember(term);
+}
+
+function reset_search() {
+  frames.forEach(function (g, j) {
+    base[j].hit = false;
+    paint(g, base[j]);
+  });
+  searching = "";
+  matchedtxt.textContent = " ";
+  searchbtn.textContent = "Search";
+  remember("");
+}
+
+function show(el, on) {
+  el.setAttribute("class", on ? "ctl on" : "ctl");
+}
+
+/* Writes the search into the address, where the file can be opened from
+   again. A document opened straight off a filesystem may refuse this, and
+   the picture is no worse for it. */
+function remember(term) {
+  try {
+    var here = window.location.href.split("?")[0];
+    window.history.replaceState(null, "",
+      term ? here + "?s=" + encodeURIComponent(term) : here);
+  } catch (e) {}
 }
 ]]></script>
 "#;

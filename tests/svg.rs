@@ -15,10 +15,15 @@ fn body(name: &str, category: Category) -> Body {
 
 /// Renders a graph of the given functions.
 fn render(bodies: Vec<Body>) -> String {
+    render_under(bodies, CategorySet::EMPTY)
+}
+
+/// Renders a graph drawn under the given assumptions.
+fn render_under(bodies: Vec<Body>, suppressed: CategorySet) -> String {
     let mut out = String::new();
     svg::render(
         &graph(bodies),
-        CategorySet::EMPTY,
+        suppressed,
         panicgraph::solve::Edges::default(),
         true,
         &mut out,
@@ -137,4 +142,61 @@ fn an_empty_graph_still_renders() {
     let out = render(Vec::new());
     assert!(out.contains("</svg>"));
     parse(&out);
+}
+
+#[test]
+fn the_picture_carries_the_controls_it_describes() {
+    let out = render(vec![body("parse", Category::Unwrap)]);
+    for id in ["title", "subtitle", "unzoom", "search", "matched", "detail"] {
+        assert!(
+            out.contains(&format!("id=\"{id}\"")),
+            "the {id} element is what the script reads and writes"
+        );
+    }
+    assert!(
+        out.contains("id=\"frames\""),
+        "the frames travel in one group, which is what the script walks"
+    );
+    for rule in [".hide", ".parent rect", ".match rect", ".ctl"] {
+        assert!(
+            out.contains(rule),
+            "the {rule} rule is what a zoom or a search turns on"
+        );
+    }
+    parse(&out);
+}
+
+#[test]
+fn the_assumptions_are_written_on_the_picture() {
+    let bare = render(vec![body("parse", Category::Unwrap)]);
+    assert!(
+        bare.contains("assuming nothing impossible"),
+        "a graph drawn under no assumption has to say so"
+    );
+
+    let assumed =
+        render_under(vec![body("parse", Category::Unwrap)], CategorySet::oom());
+    assert!(
+        assumed.contains("assuming impossible:"),
+        "a graph is only readable beside the policy it was drawn under"
+    );
+    assert!(assumed.contains("alloc-failure"));
+    parse(&assumed);
+}
+
+#[test]
+fn a_frame_carries_what_the_script_zooms_and_searches_with() {
+    let out = render(vec![
+        body("parse", Category::Unwrap),
+        body("read", Category::Index),
+    ]);
+    let frames = out.matches("<g class=\"f\"").count();
+    assert!(frames > 0);
+    for attribute in ["data-x=", "data-w=", "data-y=", "data-name="] {
+        assert_eq!(
+            out.matches(attribute).count(),
+            frames,
+            "every frame needs {attribute} for the script to place it again"
+        );
+    }
 }

@@ -236,6 +236,16 @@ The file carries its own styling and behaviour, so it opens from disk with
 nothing else present, and every frame keeps a title so it still explains
 itself when scripting is off.
 
+Clicking a frame zooms into it: the path it sits on stays in view as full
+width bars and everything the frame does not contain goes, so what is left
+is a picture of one path. `ctrl-F` searches the frames with a regular
+expression, colours what matched, and says what share of the whole those
+matches account for. `Reset Zoom` and `Reset Search` undo either. A search
+is written into the address, so a picture opened at a finding can be handed
+on as it stands. The policy the graph was drawn under is written under the
+title, because a flame graph of what can panic says nothing definite without
+the assumptions behind it.
+
 Machine readable output is available everywhere with `--format json`.
 
 ## Checking findings against the compiled artifact
