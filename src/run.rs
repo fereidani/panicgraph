@@ -387,14 +387,14 @@ fn library_path() -> Result<Option<OsString>> {
 }
 
 /// The compiler's sysroot.
-fn sysroot() -> Result<Option<String>> {
+pub(crate) fn sysroot() -> Result<Option<String>> {
     let text = rustc_output(&["--print", "sysroot"])?;
     let text = text.trim();
     Ok((!text.is_empty()).then(|| text.to_owned()))
 }
 
 /// The compiler's host target triple.
-fn host_triple() -> Result<String> {
+pub(crate) fn host_triple() -> Result<String> {
     rustc_field("host: ")?.context("rustc did not report a host triple")
 }
 

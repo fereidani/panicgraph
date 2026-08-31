@@ -21,7 +21,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    Category, CategorySet, FuncKey,
+    Category, CategorySet, FuncKey, run,
     util::{Map, Set},
 };
 
@@ -322,24 +322,14 @@ fn libraries_in(tree: &Path) -> Vec<PathBuf> {
 
 /// A tool shipped with the pinned toolchain.
 fn llvm_tool(name: &str) -> Result<PathBuf> {
-    let sysroot = Command::new("rustc")
-        .arg("--print")
-        .arg("sysroot")
-        .output()
-        .context("could not run rustc to find the sysroot")?;
-    let sysroot = String::from_utf8_lossy(&sysroot.stdout);
-    let host = Command::new("rustc")
-        .arg("-vV")
-        .output()
-        .context("could not run rustc to find the host")?;
-    let host = String::from_utf8_lossy(&host.stdout)
-        .lines()
-        .find_map(|line| line.strip_prefix("host: ").map(str::to_owned))
-        .context("rustc did not report a host triple")?;
-    let tool = PathBuf::from(sysroot.trim())
+    // Ask through the same pinned compiler the analysis ran under. A crate
+    // that selects another toolchain would otherwise be verified with tools
+    // from a sysroot that never built the artifact.
+    let sysroot = run::sysroot()?.context("rustc did not report a sysroot")?;
+    let tool = PathBuf::from(sysroot)
         .join("lib")
         .join("rustlib")
-        .join(host.trim())
+        .join(run::host_triple()?)
         .join("bin")
         .join(name);
     if !tool.exists() {
