@@ -265,6 +265,16 @@ pub fn must_modulo_signed(v: &[u8; 8], i: isize) -> u8 {
     v[(i % 8) as usize]
 }
 
+/// Reaches `index`: neither length was measured against this slice, so
+/// nothing here proves the read is in range. Both lengths carry an ordering
+/// and a length claim at once, which is what the folder has to compare
+/// without exchanging the operands back and forth forever.
+pub fn must_two_lengths(a: &[u8], b: &[u8], c: &[u8], d: &[u8]) -> u8 {
+    let n = a.len();
+    let m = b.len();
+    if n < c.len() && m < d.len() && n == m { a[0] } else { 0 }
+}
+
 /// Clean. The value inside a nonzero is never zero, so the division's own
 /// check cannot fail.
 pub fn clean_nonzero_divide(a: u32, b: std::num::NonZeroU32) -> u32 {

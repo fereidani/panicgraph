@@ -58,6 +58,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("Cursor::must_field_of_other", "index"),
     ("must_wide_index", "index"),
     ("must_unwrap_argument", "unwrap"),
+    ("must_two_lengths", "index"),
     ("must_unwrap_wrong_arm", "unwrap"),
     ("must_match_panic", "explicit"),
     ("must_nonnull_of_argument", "unwrap"),

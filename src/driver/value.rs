@@ -597,27 +597,41 @@ pub fn compare<'tcx>(
     left: Fact<'tcx>,
     right: Fact<'tcx>,
 ) -> Option<bool> {
-    use mir::BinOp::{Ge, Gt, Le, Lt};
     // An index the branch proved in range, compared against the length it
-    // was measured by.
-    if let (Some((rel, of)), Some(Value::Length(len))) =
-        (left.order, right.value)
-        && of == len
-    {
-        match (rel, op) {
-            (LenRel::Below, Lt | Le) | (LenRel::AtMost, Le) => {
-                return Some(true);
-            }
-            (LenRel::Below, Ge | Gt) | (LenRel::AtMost, Gt) => {
-                return Some(false);
-            }
-            _ => {}
-        }
+    // was measured by, read from each end in turn. Reading the second end
+    // by exchanging the operands and calling back in would not terminate:
+    // two lengths that each carry an ordering exchange them forever.
+    if let Some(settled) = measured_against(op, left, right) {
+        return Some(settled);
     }
-    if let (Some(Value::Length(_)), Some(_)) = (left.value, right.order) {
-        return compare(mirrored(op), right, left);
+    if let Some(settled) = measured_against(mirrored(op), right, left) {
+        return Some(settled);
     }
     values_compare(op, sized(left)?, sized(right)?)
+}
+
+/// What an index measured against a length proves about a comparison.
+///
+/// The measured value is on the left and the length it was measured by on
+/// the right.
+fn measured_against(
+    op: mir::BinOp,
+    left: Fact<'_>,
+    right: Fact<'_>,
+) -> Option<bool> {
+    use mir::BinOp::{Ge, Gt, Le, Lt};
+    let (Some((rel, of)), Some(Value::Length(len))) = (left.order, right.value)
+    else {
+        return None;
+    };
+    if of != len {
+        return None;
+    }
+    match (rel, op) {
+        (LenRel::Below, Lt | Le) | (LenRel::AtMost, Le) => Some(true),
+        (LenRel::Below, Ge | Gt) | (LenRel::AtMost, Gt) => Some(false),
+        _ => None,
+    }
 }
 
 /// What a fact claims about its value, reading a length as the range that
