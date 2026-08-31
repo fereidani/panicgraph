@@ -330,6 +330,31 @@ fn param(query: &str, name: &str) -> Option<String> {
     })
 }
 
+/// The two hexadecimal digits of the percent escape at `at`.
+///
+/// Read from the bytes rather than by slicing the text: the two characters
+/// after a `%` need not begin a character, and slicing a string through one
+/// panics.
+fn escape(bytes: &[u8], at: usize) -> Option<(u8, u8)> {
+    let (Some(hi), Some(lo)) = (nibble(bytes, at + 1), nibble(bytes, at + 2))
+    else {
+        return None;
+    };
+    Some((hi, lo))
+}
+
+/// One hexadecimal digit of an escape, as its value.
+fn nibble(bytes: &[u8], at: usize) -> Option<u8> {
+    let &digit = bytes.get(at)?;
+    Some(match digit {
+        b'0'..=b'9' => digit - b'0',
+        b'a'..=b'f' => digit - b'a' + 10,
+        b'A'..=b'F' => digit - b'A' + 10,
+        // Anything else is not an escape, so the `%` stands for itself.
+        _ => return None,
+    })
+}
+
 /// Decodes percent escapes and `+` in a query value.
 fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
@@ -342,14 +367,9 @@ fn percent_decode(text: &str) -> String {
                 out.push(b' ');
                 i += 1;
             }
-            b'%' if i + 2 < bytes.len() => {
-                if let Ok(byte) = u8::from_str_radix(&text[i + 1..i + 3], 16) {
-                    out.push(byte);
-                    i += 3;
-                } else {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
+            b'%' if let Some((hi, lo)) = escape(bytes, i) => {
+                out.push(hi * 16 + lo);
+                i += 3;
             }
             byte => {
                 out.push(byte);

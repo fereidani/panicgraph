@@ -154,3 +154,16 @@ fn an_unknown_path_is_a_not_found() {
     let addr = start();
     assert!(get(addr, "/api/nope", false).has("404"));
 }
+
+#[test]
+fn an_escape_before_a_multibyte_character_is_answered() {
+    let addr = start();
+    // The two characters after a `%` need not sit on a character boundary,
+    // and a decoder that slices the text through one takes the connection
+    // down with it.
+    let reply = get(addr, "/api/source?file=%\u{20ac}x", false);
+    assert!(
+        reply.head.starts_with("HTTP/1.1 "),
+        "a malformed escape must be answered, not dropped"
+    );
+}
