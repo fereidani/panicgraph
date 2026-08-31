@@ -283,6 +283,16 @@ cannot be zero, and `v[i]` under `if v.len() >= 4` is in range for `i` below
 four. Where two arms of a branch meet, what both leave behind survives as a
 range instead of being given up.
 
+A claim belongs to the place it was read from rather than to whichever local
+happened to hold it, so a guard on `self.pos` still stands at the next read
+of that field, and a write to it, a call, or a pointer that could be aimed
+at it takes the claim away again. Values carry what their own type says: a
+byte is an index every table of two hundred and fifty six has room for, and
+a pointer taken of a place holds an address, so the null check written under
+`NonNull::new` cannot fail. An enum carries which variant it holds, which is
+what folds a `match` and what makes `unwrap` of a value built as `Some`
+reach nothing at all.
+
 The driver injects `-Zalways-encode-mir`. Without it, a dependency keeps MIR
 only for generic and small items, so its concrete functions are opaque and
 the panics inside them cannot be seen.
@@ -318,9 +328,14 @@ Read these before trusting a clean result.
 - **This is a may-panic analysis.** A panic that is unreachable for reasons
   the compiler cannot see is still reported. It answers "could this panic",
   not "will it". Folding settles a check against constants, against what a
-  branch above it proves, and against what walking a callee shows it
-  returns. An invariant that holds for reasons spread further than that, or
-  one carried through a value the walk does not model, is still reported.
+  branch above it proves, against what a type admits, and against what
+  walking a callee shows it returns or cannot raise. An invariant held
+  further out than that is still reported: one a loop carries round, one a
+  caller establishes and the callee only assumes, and one a structure keeps
+  across the methods that maintain it. A function that panics for some input
+  is reported whatever its callers do, which is the honest answer for the
+  function and the reason a caller that rules the input out is cleared
+  separately.
 - **The toolchain is pinned.** The driver links against compiler internals,
   which have no stable interface, so it is built for one nightly at a time.
   Updating the toolchain means reinstalling; the tool says so rather than
