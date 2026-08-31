@@ -77,7 +77,11 @@ impl Responder<'_> {
         plain: &[u8],
         packed: &[u8],
     ) -> Result<()> {
-        let use_packed = self.gzip && packed.len() < plain.len();
+        // No packed bytes means compression failed. An empty body is not
+        // what the asset says, and it would win the comparison below, so
+        // the plain bytes have to be what goes out.
+        let use_packed =
+            self.gzip && !packed.is_empty() && packed.len() < plain.len();
         let payload = if use_packed { packed } else { plain };
         self.write(200, content_type, payload, use_packed)
     }
