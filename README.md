@@ -1,4 +1,21 @@
+<div align="center">
+
 # panicgraph
+
+[![Crates.io][crates-badge]][crates-url]
+[![Documentation][doc-badge]][doc-url]
+[![MIT or Apache-2.0 licensed][license-badge]][license-url]
+
+[crates-badge]: https://img.shields.io/crates/v/panicgraph.svg?style=for-the-badge
+[crates-url]: https://crates.io/crates/panicgraph
+[doc-badge]: https://img.shields.io/docsrs/panicgraph?style=for-the-badge
+[doc-url]: https://docs.rs/panicgraph
+[license-badge]: https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg?style=for-the-badge
+[license-url]: https://github.com/fereidani/panicgraph#license
+
+<img src="screenshot.png" alt="panicgraph reporting which functions of a crate can panic, why, and through what call path" width="820">
+
+</div>
 
 Reports which functions in a Rust crate can panic, why, and through what call
 path. It reads the compiler's own view of the program, so the answer covers
