@@ -14,7 +14,8 @@ use crate::{CategorySet, StdMode, parse_selector};
 /// Trailing help that explains the shared vocabulary once.
 const SELECTOR_HELP: &str = "\
 A category LIST is comma separated. It accepts category names plus the group
-aliases `oom`, `default`, and `all`. Run `panicgraph kinds` for the names.
+aliases `oom`, `assumed`, `default`, and `all`. Run `panicgraph kinds` for the
+names.
 
 Allocation failure, capacity overflow, and standard library precondition
 checks are assumed impossible by default: every growable collection reaches

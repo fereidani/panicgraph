@@ -326,7 +326,8 @@ impl fmt::Display for CategorySet {
 
 /// Resolves a comma-separated selector into a category set.
 ///
-/// Accepts individual category names plus the group aliases `oom` and `all`.
+/// Accepts individual category names plus the group aliases `oom`,
+/// `assumed`, `default`, and `all`.
 ///
 /// # Errors
 ///

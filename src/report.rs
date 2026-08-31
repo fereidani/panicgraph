@@ -477,7 +477,8 @@ pub fn kinds(out: &mut String) {
     }
     out.push_str(
         "\nGroup aliases: `oom` covers capacity-overflow and alloc-failure, \
-         `default` adds ub-check, `all` covers everything.\n",
+         `default` adds ub-check, `assumed` covers what the analysis could \
+         not read, `all` covers everything.\n",
     );
 }
 
