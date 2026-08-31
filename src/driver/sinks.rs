@@ -161,28 +161,19 @@ const DISCARDED: &[(Category, &str, &str)] = &[
 ];
 
 /// Resolves panic entry points and caches the answer per `DefId`.
+#[derive(Default)]
 pub struct SinkTable {
     cache: Map<DefId, Option<Sink>>,
 }
 
 impl SinkTable {
-    /// Creates an empty table.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            cache: Map::default(),
-        }
-    }
-
     /// Classifies a function, returning `None` when it is not a panic entry
     /// point.
     pub fn get(&mut self, tcx: TyCtxt<'_>, did: DefId) -> Option<Sink> {
-        if let Some(hit) = self.cache.get(&did) {
-            return *hit;
-        }
-        let sink = Self::classify(tcx, did);
-        self.cache.insert(did, sink);
-        sink
+        *self
+            .cache
+            .entry(did)
+            .or_insert_with(|| Self::classify(tcx, did))
     }
 
     /// Works out whether a function raises a panic, and of what kind.
@@ -328,11 +319,5 @@ impl SinkTable {
             out.push_str(name.as_str());
         }
         out
-    }
-}
-
-impl Default for SinkTable {
-    fn default() -> Self {
-        Self::new()
     }
 }

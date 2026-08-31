@@ -199,6 +199,12 @@ impl Graph {
             .map(|(i, b)| (FuncId::from_index(i), b))
     }
 
+    /// Every function defined in the crate under analysis whose body the
+    /// analysis could read.
+    pub fn locals(&self) -> impl Iterator<Item = (FuncId, &Body)> {
+        self.iter().filter(|(_, b)| b.local && !b.opaque)
+    }
+
     /// Looks a function up by key.
     #[must_use]
     pub fn id_of(&self, key: &FuncKey) -> Option<FuncId> {

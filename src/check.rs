@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::{
     Category, CategorySet, Graph, Solution,
     args::{Args, Check, Format},
-    report::{reportable, reported_name, workflow_location},
+    report::{self, workflow_location},
     util::{Map, Set},
 };
 
@@ -111,10 +111,7 @@ pub fn run(
         && check.max.is_none()
         && check.baseline.is_none();
 
-    let baseline = match &check.baseline {
-        Some(path) => Some(read_baseline(path)?),
-        None => None,
-    };
+    let baseline = check.baseline.as_deref().map(read_baseline).transpose()?;
 
     for finding in &outcome.findings {
         if allow.is_match(&finding.function) {
@@ -199,45 +196,25 @@ fn is_new(known: &Map<String, Vec<String>>, finding: &Finding) -> bool {
 /// under the same name, so they are merged: the gate asks whether a function
 /// can panic, and it can if any of its instantiations can.
 fn collect(graph: &Graph, solution: &Solution, args: &Args) -> Vec<Finding> {
-    let mut findings: Vec<Finding> = Vec::new();
-    let mut index: Map<(String, String), usize> = Map::default();
-    for (_, body, categories) in reportable(graph, solution, args) {
-        let finding = Finding {
-            function: reported_name(body, args).to_owned(),
-            krate: body.krate.clone(),
-            loc: body.loc.as_ref().map(ToString::to_string),
-            categories: categories
+    report::collect(graph, solution, args)
+        .into_iter()
+        .map(|found| Finding {
+            function: found.name.to_owned(),
+            krate: found.krate.to_owned(),
+            // Instantiations of one generic function share a definition,
+            // so the first that records one names them all.
+            loc: found
+                .ids
+                .iter()
+                .find_map(|id| graph.body(*id).loc.as_ref())
+                .map(ToString::to_string),
+            categories: found
+                .categories
                 .iter()
                 .map(|c| c.name().to_owned())
                 .collect(),
-        };
-        let name = (finding.krate.clone(), finding.function.clone());
-        if let Some(&at) = index.get(&name) {
-            merge(&mut findings[at], finding);
-        } else {
-            index.insert(name, findings.len());
-            findings.push(finding);
-        }
-    }
-    findings.sort_by(|a, b| a.function.cmp(&b.function));
-    findings
-}
-
-/// Folds a second instantiation of the same function into the first.
-///
-/// Categories stay in the order the taxonomy declares them, which is the
-/// order every other report uses.
-fn merge(into: &mut Finding, other: Finding) {
-    let mut set = CategorySet::EMPTY;
-    for name in into.categories.iter().chain(&other.categories) {
-        if let Ok(category) = name.parse::<Category>() {
-            set.insert(category);
-        }
-    }
-    into.categories = set.iter().map(|c| c.name().to_owned()).collect();
-    if into.loc.is_none() {
-        into.loc = other.loc;
-    }
+        })
+        .collect()
 }
 
 /// Compiles a set of patterns, naming the flag when one is unusable.
@@ -259,7 +236,7 @@ pub fn write_baseline(
     let doc = json!({
         "version": BASELINE_VERSION,
         "profile": args.profile,
-        "std_mode": format!("{:?}", args.std_mode).to_lowercase(),
+        "std_mode": args.std_mode.name(),
         "suppressed": args.suppress.iter()
             .map(Category::name).collect::<Vec<_>>(),
         "findings": findings.iter().map(|f| json!({

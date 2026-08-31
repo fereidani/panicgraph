@@ -44,7 +44,9 @@ fn dispatch() -> Result<u8> {
         }
         #[cfg(feature = "svg")]
         Command::Analyze if args.format == panicgraph::args::Format::Svg => {
-            let (graph, _) = solve(&args)?;
+            // The drawing solves the graph for itself, so solving here as
+            // well would run the fixpoint twice for one picture.
+            let graph = Graph::from_artifacts(run::collect(&args)?);
             panicgraph::svg::render(
                 &graph,
                 args.suppress,

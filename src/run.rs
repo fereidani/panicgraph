@@ -304,20 +304,17 @@ fn analysis_target(root: &Path, args: &Args) -> Result<PathBuf> {
 ///
 /// Returns an error when the compiler's version cannot be read at all.
 fn shared_build_dir() -> Result<Option<PathBuf>> {
-    let base =
-        env::var_os("PANICGRAPH_CACHE")
-            .map(PathBuf::from)
-            .or_else(|| {
-                env::var_os("XDG_CACHE_HOME")
-                    .map(|dir| PathBuf::from(dir).join("panicgraph"))
-                    .or_else(|| {
-                        env::var_os("HOME").map(|home| {
-                            PathBuf::from(home)
-                                .join(".cache")
-                                .join("panicgraph")
-                        })
-                    })
-            });
+    let base = env::var_os("PANICGRAPH_CACHE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("XDG_CACHE_HOME")
+                .map(|dir| PathBuf::from(dir).join("panicgraph"))
+        })
+        .or_else(|| {
+            env::var_os("HOME").map(|home| {
+                PathBuf::from(home).join(".cache").join("panicgraph")
+            })
+        });
     let Some(base) = base else {
         return Ok(None);
     };

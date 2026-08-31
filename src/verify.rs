@@ -65,25 +65,17 @@ pub struct Verdicts {
     facts: Map<String, Facts>,
 }
 
-/// Categories that leave no symbol in the artifact.
-///
-/// A reference count overflow aborts through an inlined trap instruction,
-/// and the assumed categories name missing knowledge rather than an entry
-/// point, so none of them can be confirmed or ruled out by a symbol sweep.
-const SYMBOLLESS: &[Category] = &[
-    Category::RefCountOverflow,
-    Category::Unknown,
-    Category::Foreign,
-    Category::DynCall,
-    Category::FnPointer,
-    Category::GenericBound,
-];
-
 impl Verdicts {
     /// The verdict for one function and category.
     #[must_use]
     pub fn of(&self, key: &FuncKey, category: Category) -> Verdict {
-        if SYMBOLLESS.contains(&category) {
+        // A reference count overflow aborts through an inlined trap
+        // instruction, and the assumed categories name missing knowledge
+        // rather than an entry point, so a symbol sweep can neither
+        // confirm nor rule either out.
+        if CategorySet::assumed().contains(category)
+            || category == Category::RefCountOverflow
+        {
             return Verdict::Unverified;
         }
         let Some(facts) = self.facts.get(&key.0) else {
@@ -109,56 +101,39 @@ fn entry_categories(demangled: &str) -> Option<CategorySet> {
         Index, MisalignedRef, NullDeref, Overflow, Poison, RemainderByZero,
         StrBoundary, UbCheck, Unwrap,
     };
-    let unwraps = [Unwrap, Poison, Fmt].into_iter().collect();
-    let table: &[(&str, CategorySet)] = &[
-        (
-            "core::panicking::panic_bounds_check",
-            CategorySet::single(Index),
-        ),
-        ("core::slice::index::slice_", CategorySet::single(Index)),
-        (
-            "core::str::slice_error_fail",
-            CategorySet::single(StrBoundary),
-        ),
-        ("core::option::unwrap_failed", unwraps),
-        ("core::option::expect_failed", unwraps),
-        ("core::result::unwrap_failed", unwraps),
-        ("core::cell::panic_already", CategorySet::single(Borrow)),
-        (
-            "alloc::raw_vec::capacity_overflow",
-            CategorySet::single(CapacityOverflow),
-        ),
+    // Storing the categories as a slice keeps the whole table a constant
+    // rather than a set rebuilt on every lookup.
+    let table: &[(&str, &[Category])] = &[
+        ("core::panicking::panic_bounds_check", &[Index]),
+        ("core::slice::index::slice_", &[Index]),
+        ("core::str::slice_error_fail", &[StrBoundary]),
+        ("core::option::unwrap_failed", &[Unwrap, Poison, Fmt]),
+        ("core::option::expect_failed", &[Unwrap, Poison, Fmt]),
+        ("core::result::unwrap_failed", &[Unwrap, Poison, Fmt]),
+        ("core::cell::panic_already", &[Borrow]),
+        ("alloc::raw_vec::capacity_overflow", &[CapacityOverflow]),
         (
             "alloc::raw_vec::handle_error",
-            [CapacityOverflow, AllocFailure].into_iter().collect(),
+            &[CapacityOverflow, AllocFailure],
         ),
-        ("handle_alloc_error", CategorySet::single(AllocFailure)),
-        ("panic_const_div_by_zero", CategorySet::single(DivideByZero)),
-        (
-            "panic_const_rem_by_zero",
-            CategorySet::single(RemainderByZero),
-        ),
-        ("panic_const_coroutine", CategorySet::single(Explicit)),
-        ("panic_const_async", CategorySet::single(Explicit)),
-        ("panic_const_gen_fn", CategorySet::single(Explicit)),
-        ("panic_const_", CategorySet::single(Overflow)),
-        (
-            "panic_misaligned_pointer",
-            CategorySet::single(MisalignedRef),
-        ),
-        ("panic_null_pointer", CategorySet::single(NullDeref)),
-        (
-            "core::panicking::panic_nounwind",
-            [Explicit, UbCheck].into_iter().collect(),
-        ),
-        ("resume_unwind", CategorySet::single(Explicit)),
-        ("len_mismatch_fail", CategorySet::single(Explicit)),
-        ("core::panicking::", CategorySet::single(Explicit)),
+        ("handle_alloc_error", &[AllocFailure]),
+        ("panic_const_div_by_zero", &[DivideByZero]),
+        ("panic_const_rem_by_zero", &[RemainderByZero]),
+        ("panic_const_coroutine", &[Explicit]),
+        ("panic_const_async", &[Explicit]),
+        ("panic_const_gen_fn", &[Explicit]),
+        ("panic_const_", &[Overflow]),
+        ("panic_misaligned_pointer", &[MisalignedRef]),
+        ("panic_null_pointer", &[NullDeref]),
+        ("core::panicking::panic_nounwind", &[Explicit, UbCheck]),
+        ("resume_unwind", &[Explicit]),
+        ("len_mismatch_fail", &[Explicit]),
+        ("core::panicking::", &[Explicit]),
     ];
     table
         .iter()
         .find(|(name, _)| demangled.contains(name))
-        .map(|(_, set)| *set)
+        .map(|(_, set)| set.iter().copied().collect())
 }
 
 /// Sweeps the compiled libraries under an analysis build tree.

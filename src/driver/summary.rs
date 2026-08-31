@@ -386,11 +386,8 @@ impl<'tcx> Folder<'_, 'tcx> {
                 // A claim written at another type describes another value.
                 param == value.ty()
             }),
-            order: held.order,
             same: None,
-            extent: held.extent,
-            address: held.address,
-            tag: held.tag,
+            ..held
         };
         Carried { slot, alike, fact }
     }

@@ -301,14 +301,8 @@ impl Cli {
     /// that does not resolve.
     pub fn resolve(self) -> Result<Args> {
         #[cfg(feature = "serve")]
-        let listen = match self.listen {
-            Some(text) => Some(listen_addr(&text)?),
-            None => None,
-        };
-        let only = match self.policy.only {
-            Some(text) => Some(selector(&text)?),
-            None => None,
-        };
+        let listen = self.listen.as_deref().map(listen_addr).transpose()?;
+        let only = self.policy.only.as_deref().map(selector).transpose()?;
         let command = self.command.unwrap_or(Command::Analyze);
         let std_mode = self
             .scope

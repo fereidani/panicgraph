@@ -57,6 +57,17 @@ impl Default for Policy {
     }
 }
 
+impl Policy {
+    /// Whether the policy admits this edge.
+    #[must_use]
+    pub const fn follows(&self, call: &CallSite) -> bool {
+        if call.candidate && !self.edges.candidates {
+            return false;
+        }
+        self.edges.follow_inexact || call.kind.is_exact()
+    }
+}
+
 /// The solved state of one function.
 ///
 /// The two planes exist for the unwind barrier: a catch contains what
@@ -154,7 +165,7 @@ impl Eval<'_> {
         }
 
         for (i, call) in body.calls.iter().enumerate() {
-            if !activity.calls[i] || !self.follows(call) {
+            if !activity.calls[i] || !self.policy.follows(call) {
                 continue;
             }
             let callee = self.callee_state(call);
@@ -225,20 +236,12 @@ impl Eval<'_> {
                 let i = i as usize;
                 body.calls.get(i).is_some_and(|call| {
                     act.calls[i]
-                        && self.follows(call)
+                        && self.policy.follows(call)
                         && !call.barrier
                         && self.callee_state(call).unwinds()
                 })
             }
         })
-    }
-
-    /// Whether the policy admits this edge.
-    const fn follows(&self, call: &CallSite) -> bool {
-        if call.candidate && !self.policy.edges.candidates {
-            return false;
-        }
-        self.policy.edges.follow_inexact || call.kind.is_exact()
     }
 
     /// The current state of a call's target.
@@ -314,10 +317,7 @@ impl Solution {
     /// Whether the policy admits an edge.
     #[must_use]
     pub const fn follows(&self, call: &CallSite) -> bool {
-        if call.candidate && !self.policy.edges.candidates {
-            return false;
-        }
-        self.policy.edges.follow_inexact || call.kind.is_exact()
+        self.policy.follows(call)
     }
 
     /// How many local functions are clean only because of the policy.
@@ -341,8 +341,7 @@ impl Solution {
         )
         .solve()?;
         Ok(graph
-            .iter()
-            .filter(|(_, body)| body.local && !body.opaque)
+            .locals()
             .filter(|(id, _)| self.is_clean(*id) && !bare.is_clean(*id))
             .count())
     }

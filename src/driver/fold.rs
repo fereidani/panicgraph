@@ -743,7 +743,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         }
         let (local, (against, source)) = (read(right)?, measure(left)?);
         Some(Compared {
-            op: value::from_left(op),
+            op: value::mirrored(op),
             local,
             against,
             source,

@@ -13,15 +13,19 @@ use crate::{
 };
 
 /// One reported function.
-struct Finding {
+pub(crate) struct Finding<'a> {
+    /// The crate the function is defined in.
+    pub krate: &'a str,
+    /// The name it reports under.
+    pub name: &'a str,
     /// Every node that renders under this name. A generic function has one
     /// per instantiation, and they share a source location, so reporting
     /// them separately would print the same line several times.
-    ids: Vec<FuncId>,
-    categories: CategorySet,
+    pub ids: Vec<FuncId>,
+    pub categories: CategorySet,
 }
 
-impl Finding {
+impl Finding<'_> {
     /// The node the report describes the function through.
     fn id(&self) -> FuncId {
         self.ids.first().copied().unwrap_or(FuncId(0))
@@ -62,7 +66,7 @@ pub fn analysis(
 fn verdict_of(
     graph: &Graph,
     verdicts: &Verdicts,
-    finding: &Finding,
+    finding: &Finding<'_>,
     category: Category,
 ) -> Verdict {
     let mut all_absent = true;
@@ -93,10 +97,9 @@ pub(crate) fn reportable<'a>(
         if body.opaque || !(args.all_crates || body.local) {
             return None;
         }
-        let categories = args.only.map_or_else(
-            || solution.enabled(id),
-            |only| solution.enabled(id).intersection(only),
-        );
+        let enabled = solution.enabled(id);
+        let categories =
+            args.only.map_or(enabled, |only| enabled.intersection(only));
         (!categories.is_empty()).then_some((id, body, categories))
     })
 }
@@ -129,29 +132,35 @@ pub fn any_finding(graph: &Graph, solution: &Solution, args: &Args) -> bool {
 }
 
 /// Selects the functions worth reporting, one entry per name.
-fn collect(graph: &Graph, solution: &Solution, args: &Args) -> Vec<Finding> {
-    let mut by_name: Vec<(&str, Finding)> = Vec::new();
+///
+/// The report and the gate both group here, so a function that reports
+/// under one name cannot be gated under another.
+pub(crate) fn collect<'a>(
+    graph: &'a Graph,
+    solution: &'a Solution,
+    args: &'a Args,
+) -> Vec<Finding<'a>> {
+    let mut findings: Vec<Finding<'a>> = Vec::new();
     let mut index: Map<(&str, &str), usize> = Map::default();
     for (id, body, categories) in reportable(graph, solution, args) {
-        let display = reported_name(body, args);
-        let name = (body.krate.as_str(), display);
-        if let Some(&at) = index.get(&name) {
-            let finding = &mut by_name[at].1;
+        let name = reported_name(body, args);
+        let key = (body.krate.as_str(), name);
+        if let Some(&at) = index.get(&key) {
+            let finding = &mut findings[at];
             finding.ids.push(id);
             finding.categories = finding.categories.union(categories);
         } else {
-            index.insert(name, by_name.len());
-            by_name.push((
-                display,
-                Finding {
-                    ids: vec![id],
-                    categories,
-                },
-            ));
+            index.insert(key, findings.len());
+            findings.push(Finding {
+                krate: &body.krate,
+                name,
+                ids: vec![id],
+                categories,
+            });
         }
     }
-    by_name.sort_by(|a, b| a.0.cmp(b.0));
-    by_name.into_iter().map(|(_, f)| f).collect()
+    findings.sort_by(|a, b| a.name.cmp(b.name));
+    findings
 }
 
 /// Writes the human readable report.
@@ -159,7 +168,7 @@ fn human(
     graph: &Graph,
     solution: &Solution,
     args: &Args,
-    findings: &[Finding],
+    findings: &[Finding<'_>],
     verdicts: Option<&Verdicts>,
     out: &mut String,
 ) {
@@ -216,7 +225,7 @@ fn human(
 fn direct_site<'a>(
     graph: &'a Graph,
     solution: &Solution,
-    finding: &Finding,
+    finding: &Finding<'_>,
     category: Category,
 ) -> Option<(&'a str, Option<String>)> {
     for &id in &finding.ids {
@@ -268,7 +277,7 @@ fn header(graph: &Graph, args: &Args, found: usize, out: &mut String) {
 /// Writes the machine readable report.
 fn json(
     graph: &Graph,
-    findings: &[Finding],
+    findings: &[Finding<'_>],
     args: &Args,
     verdicts: Option<&Verdicts>,
     out: &mut String,
@@ -330,7 +339,12 @@ pub(crate) fn workflow_location(loc: Option<&str>) -> String {
 
 /// Writes one workflow command per finding, which a continuous integration
 /// log turns into an annotation against the source.
-fn github(graph: &Graph, findings: &[Finding], args: &Args, out: &mut String) {
+fn github(
+    graph: &Graph,
+    findings: &[Finding<'_>],
+    args: &Args,
+    out: &mut String,
+) {
     for finding in findings {
         let body = graph.body(finding.id());
         let loc = body.loc.as_ref().map(ToString::to_string);

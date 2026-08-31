@@ -136,16 +136,12 @@ pub fn solve(
 
 /// How many local functions can panic under a solution.
 fn local_dirty(g: &Graph, solution: &Solution) -> usize {
-    g.iter()
-        .filter(|(_, b)| b.local && !b.opaque)
-        .filter(|(id, _)| !solution.is_clean(*id))
-        .count()
+    g.locals().filter(|(id, _)| !solution.is_clean(*id)).count()
 }
 
 /// How many local functions reach one category under a solution.
 fn local_reaching(g: &Graph, solution: &Solution, kind: Category) -> usize {
-    g.iter()
-        .filter(|(_, b)| b.local && !b.opaque)
+    g.locals()
         .filter(|(id, _)| solution.enabled(*id).contains(kind))
         .count()
 }
@@ -359,10 +355,7 @@ pub fn flame_rows(
 ) -> Result<Vec<FlameRow>> {
     let solution = solved(g, suppressed, edges)?;
     let mut tree = Tree::new();
-    for (id, body) in g.iter() {
-        if !body.local || body.opaque {
-            continue;
-        }
+    for (id, _) in g.locals() {
         for category in solution.enabled(id).iter() {
             let Some(path) = witness::find(g, &solution, id, category) else {
                 continue;
@@ -370,7 +363,7 @@ pub fn flame_rows(
             tree.insert(g, id, &path, category);
         }
     }
-    let rows = tree.finish();
+    let rows = tree.rows;
     Ok(if fold { fold_chains(&rows) } else { rows })
 }
 
@@ -399,7 +392,6 @@ const EDGE_KINDS: [&str; 5] =
 pub fn fold_chains(rows: &[FlameRow]) -> Vec<FlameRow> {
     let children = children_of(rows);
     let mut kept: Vec<FlameRow> = Vec::new();
-    let mut remap: Map<usize, usize> = Map::default();
     let mut stack = vec![(0usize, None::<usize>, Vec::<String>::new())];
     // Every frame is visited at most once, so this ends within the input.
     while let Some((id, parent, mut elided)) = stack.pop() {
@@ -421,7 +413,6 @@ pub fn fold_chains(rows: &[FlameRow]) -> Vec<FlameRow> {
             kids = grand;
         }
         let new_id = kept.len();
-        remap.insert(id, new_id);
         let mut row = rows[id].clone();
         row.id = new_id;
         row.parent = parent;
@@ -515,11 +506,6 @@ impl Tree {
             leaf,
         );
         self.rows[at].value += 1;
-    }
-
-    /// Emits the tree as flat records with parent links.
-    fn finish(self) -> Vec<FlameRow> {
-        self.rows
     }
 }
 

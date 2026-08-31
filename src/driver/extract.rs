@@ -56,6 +56,7 @@ impl At {
 }
 
 /// Entries collected from one body before reachability guards are attached.
+#[derive(Default)]
 struct Raw<'tcx> {
     sites: Vec<PanicSite>,
     site_blocks: Vec<BasicBlock>,
@@ -66,14 +67,32 @@ struct Raw<'tcx> {
 }
 
 impl Raw<'_> {
-    const fn new() -> Self {
-        Self {
-            sites: Vec::new(),
-            site_blocks: Vec::new(),
-            calls: Vec::new(),
-            call_blocks: Vec::new(),
-            unwind_edges: Vec::new(),
-            successors: Vec::new(),
+    /// Appends a panic site and the cleanup path unwinding out of it
+    /// reaches.
+    ///
+    /// The origin names the entry by its position, so the index has to be
+    /// read before the push, and every caller has to go through here for
+    /// the two vectors to stay in step.
+    fn add_site(&mut self, at: At, site: PanicSite) {
+        let index = u32::try_from(self.sites.len()).unwrap_or(u32::MAX);
+        self.sites.push(site);
+        self.site_blocks.push(at.bb);
+        self.record_unwind(UnwindOrigin::Site(index), at.unwind);
+    }
+
+    /// Appends a call edge and the cleanup path unwinding out of it reaches.
+    fn add_call(&mut self, at: At, call: CallSite) {
+        let index = u32::try_from(self.calls.len()).unwrap_or(u32::MAX);
+        self.calls.push(call);
+        self.call_blocks.push(at.bb);
+        self.record_unwind(UnwindOrigin::Call(index), at.unwind);
+    }
+
+    /// Notes that unwinding from `origin` transfers control to a cleanup
+    /// block.
+    fn record_unwind(&mut self, origin: UnwindOrigin, unwind: UnwindAction) {
+        if let UnwindAction::Cleanup(target) = unwind {
+            self.unwind_edges.push((origin, target));
         }
     }
 }
@@ -101,7 +120,7 @@ impl<'tcx> Extractor<'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>) -> Self {
         Self {
             tcx,
-            sinks: SinkTable::new(),
+            sinks: SinkTable::default(),
             bodies: Vec::new(),
             seen: Set::default(),
             reified: Vec::new(),
@@ -236,7 +255,7 @@ impl<'tcx> Extractor<'tcx> {
             env: Self::env_for(work),
         };
         let reach = fold::reachable(self.tcx, cx.inst, cx.env, mir);
-        let mut raw = Raw::new();
+        let mut raw = Raw::default();
         for (bb, data) in mir.basic_blocks.iter_enumerated() {
             if !reach.is_live(bb) {
                 continue;
@@ -300,17 +319,15 @@ impl<'tcx> Extractor<'tcx> {
             return;
         }
         let (category, termination, reason) = classify_assert(msg);
-        let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
-        raw.sites.push(PanicSite {
+        let site = PanicSite {
             category,
             termination,
             reason: reason.to_owned(),
             sink: None,
             loc: self.loc_of(at.span),
             guard: Guard::default(),
-        });
-        raw.site_blocks.push(at.bb);
-        Self::record_unwind(raw, UnwindOrigin::Site(index), at.unwind);
+        };
+        raw.add_site(at, site);
     }
 
     /// Records a call, either as a panic site or as a graph edge.
@@ -331,8 +348,7 @@ impl<'tcx> Extractor<'tcx> {
             // A call through a function pointer. The target set is unknown,
             // but the signature narrows which reified functions could be
             // behind it.
-            let index = u32::try_from(raw.calls.len()).unwrap_or(u32::MAX);
-            raw.calls.push(CallSite {
+            let site = CallSite {
                 callee: None,
                 callee_display: "<fn pointer>".to_owned(),
                 kind: EdgeKind::FnPtr,
@@ -341,9 +357,8 @@ impl<'tcx> Extractor<'tcx> {
                 barrier: false,
                 candidate: false,
                 sig: Some(format!("{ty}")),
-            });
-            raw.call_blocks.push(at.bb);
-            Self::record_unwind(raw, UnwindOrigin::Call(index), at.unwind);
+            };
+            raw.add_call(at, site);
             return;
         };
         let Some(args) = args.no_bound_vars() else {
@@ -388,17 +403,15 @@ impl<'tcx> Extractor<'tcx> {
                 return;
             }
             if self.refcount_abort(cx, at, callee.def_id(), mir) {
-                let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
-                raw.sites.push(PanicSite {
+                let site = PanicSite {
                     category: Category::RefCountOverflow,
                     termination: Termination::Abort,
                     reason: "the reference count would overflow".to_owned(),
                     sink: Some("core::intrinsics::abort".to_owned()),
                     loc: self.loc_of(at.span),
                     guard: Guard::default(),
-                });
-                raw.site_blocks.push(at.bb);
-                Self::record_unwind(raw, UnwindOrigin::Site(index), at.unwind);
+                };
+                raw.add_site(at, site);
             }
             // Other intrinsics are compiler defined operations. They cannot
             // call back into the program, so they add nothing to the graph,
@@ -519,17 +532,15 @@ impl<'tcx> Extractor<'tcx> {
             |msg| format!("panics with \"{msg}\""),
         );
         for (category, termination) in sink.raises() {
-            let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
-            raw.sites.push(PanicSite {
+            let site = PanicSite {
                 category,
                 termination,
                 reason: reason.clone(),
                 sink: Some(path.clone()),
                 loc: self.loc_of(at.span),
                 guard: Guard::default(),
-            });
-            raw.site_blocks.push(at.bb);
-            Self::record_unwind(raw, UnwindOrigin::Site(index), at.unwind);
+            };
+            raw.add_site(at, site);
         }
     }
 
@@ -689,8 +700,7 @@ impl<'tcx> Extractor<'tcx> {
             // The type allows the value, so the compiler emits no check.
             Ok(true) => {}
             Ok(false) => {
-                let index = u32::try_from(raw.sites.len()).unwrap_or(u32::MAX);
-                raw.sites.push(PanicSite {
+                let site = PanicSite {
                     category: Category::Explicit,
                     termination: Termination::Abort,
                     reason: format!(
@@ -700,9 +710,8 @@ impl<'tcx> Extractor<'tcx> {
                     sink: None,
                     loc: self.loc_of(at.span),
                     guard: Guard::default(),
-                });
-                raw.site_blocks.push(at.bb);
-                Self::record_unwind(raw, UnwindOrigin::Site(index), at.unwind);
+                };
+                raw.add_site(at, site);
             }
             // The layout could not be computed, so neither answer is safe
             // to claim.
@@ -798,8 +807,7 @@ impl<'tcx> Extractor<'tcx> {
         kind: EdgeKind,
         barrier: bool,
     ) {
-        let index = u32::try_from(raw.calls.len()).unwrap_or(u32::MAX);
-        raw.calls.push(CallSite {
+        let site = CallSite {
             callee,
             callee_display,
             kind,
@@ -808,9 +816,8 @@ impl<'tcx> Extractor<'tcx> {
             barrier,
             candidate: false,
             sig: None,
-        });
-        raw.call_blocks.push(at.bb);
-        Self::record_unwind(raw, UnwindOrigin::Call(index), at.unwind);
+        };
+        raw.add_call(at, site);
     }
 
     /// Records a function being turned into a pointer, so indirect calls
@@ -908,8 +915,7 @@ impl<'tcx> Extractor<'tcx> {
             let Some(key) = self.symbol_of(target).map(FuncKey) else {
                 continue;
             };
-            let index = u32::try_from(raw.calls.len()).unwrap_or(u32::MAX);
-            raw.calls.push(CallSite {
+            let site = CallSite {
                 callee: Some(key),
                 callee_display: self.tcx.def_path_str(target.def_id()),
                 kind: EdgeKind::Vtable,
@@ -918,25 +924,12 @@ impl<'tcx> Extractor<'tcx> {
                 barrier: false,
                 candidate: true,
                 sig: None,
-            });
-            raw.call_blocks.push(at.bb);
-            Self::record_unwind(raw, UnwindOrigin::Call(index), at.unwind);
+            };
+            raw.add_call(at, site);
             raw.successors.push(Work {
                 inst: target,
                 env: cx.env,
             });
-        }
-    }
-
-    /// Notes that unwinding from `origin` transfers control to a cleanup
-    /// block.
-    fn record_unwind(
-        raw: &mut Raw<'tcx>,
-        origin: UnwindOrigin,
-        unwind: UnwindAction,
-    ) {
-        if let UnwindAction::Cleanup(target) = unwind {
-            raw.unwind_edges.push((origin, target));
         }
     }
 

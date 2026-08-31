@@ -383,7 +383,7 @@ pub struct Path {
 impl Path {
     /// The place, when it is one this walk can name.
     fn of(place: &mir::Place<'_>) -> Option<Self> {
-        if place.projection.is_empty() {
+        if place.projection.is_empty() || place.projection.len() > REACH {
             return None;
         }
         let mut steps = [None; REACH];
@@ -400,9 +400,6 @@ impl Path {
                 // cast is not a place this walk can tell apart from another.
                 _ => return None,
             });
-        }
-        if place.projection.len() > REACH {
-            return None;
         }
         Some(Self {
             base: place.local,

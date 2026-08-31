@@ -517,7 +517,10 @@ pub enum Against<'tcx> {
 }
 
 /// The comparison operator with its operands exchanged.
-const fn mirrored(op: mir::BinOp) -> mir::BinOp {
+///
+/// This is also what normalizes a comparison read backwards, constant
+/// first.
+pub const fn mirrored(op: mir::BinOp) -> mir::BinOp {
     use mir::BinOp::{Ge, Gt, Le, Lt};
     match op {
         Lt => Gt,
@@ -540,11 +543,6 @@ const fn negated(op: mir::BinOp) -> mir::BinOp {
         Ne => Eq,
         other => other,
     }
-}
-
-/// Normalizes a comparison read backwards, constant first.
-pub const fn from_left(op: mir::BinOp) -> mir::BinOp {
-    mirrored(op)
 }
 
 /// What holding or failing a comparison proves about the measured local.
@@ -641,21 +639,10 @@ fn values_compare<'tcx>(
     left: Value<'tcx>,
     right: Value<'tcx>,
 ) -> Option<bool> {
-    use std::cmp::Ordering;
-
-    use mir::BinOp::{Eq, Ge, Gt, Le, Lt, Ne};
+    use mir::BinOp::{Eq, Ne};
     match (left, right) {
         (Value::Exact(a), Value::Exact(b)) => {
-            let order = a.order(b)?;
-            Some(match op {
-                Eq => order == Ordering::Equal,
-                Ne => order != Ordering::Equal,
-                Lt => order == Ordering::Less,
-                Le => order != Ordering::Greater,
-                Gt => order == Ordering::Greater,
-                Ge => order != Ordering::Less,
-                _ => return None,
-            })
+            range_compare(op, Bounds { lo: a, hi: a }, b)
         }
         // One side is known to differ from exactly the value the other side
         // holds, which answers an equality and nothing else.
@@ -663,39 +650,49 @@ fn values_compare<'tcx>(
         | (Value::Other(ruled_out), Value::Exact(known))
             if known == ruled_out =>
         {
-            match op {
-                Eq => Some(false),
-                Ne => Some(true),
-                _ => None,
-            }
+            matches!(op, Eq | Ne).then_some(op == Ne)
         }
         (Value::Within(range), Value::Exact(k)) => range_compare(op, range, k),
         (Value::Exact(k), Value::Within(range)) => {
             range_compare(mirrored(op), range, k)
         }
-        (Value::Within(a), Value::Within(b)) => match op {
-            Lt => match a.hi.order(b.lo)? {
-                Ordering::Less => Some(true),
-                _ => (a.lo.order(b.hi)? != Ordering::Less).then_some(false),
-            },
-            Gt => values_compare(Lt, Value::Within(b), Value::Within(a)),
-            Le => match a.hi.order(b.lo)? {
-                Ordering::Less | Ordering::Equal => Some(true),
-                Ordering::Greater => {
-                    (a.lo.order(b.hi)? == Ordering::Greater).then_some(false)
-                }
-            },
-            Ge => values_compare(Le, Value::Within(b), Value::Within(a)),
-            Eq | Ne => {
-                let apart = a.hi.order(b.lo)? == Ordering::Less
-                    || b.hi.order(a.lo)? == Ordering::Less;
-                if !apart {
-                    return None;
-                }
-                Some(op == Ne)
-            }
-            _ => None,
+        (Value::Within(a), Value::Within(b)) => spans_compare(op, a, b),
+        _ => None,
+    }
+}
+
+/// Evaluates a comparison between two ranges.
+///
+/// Equality is settled only by ranges that do not meet. Ranges that overlap
+/// leave it open, because a range standing for a whole span says nothing
+/// about which value inside it is held; the caller refines that where it
+/// knows the range holds one value.
+///
+/// The mirrored operators recurse once and the mirror of a mirror is not
+/// taken, so the depth is one.
+fn spans_compare<'tcx>(
+    op: mir::BinOp,
+    a: Bounds<'tcx>,
+    b: Bounds<'tcx>,
+) -> Option<bool> {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+
+    use mir::BinOp::{Eq, Ge, Gt, Le, Lt, Ne};
+    match op {
+        Lt => match a.hi.order(b.lo)? {
+            Less => Some(true),
+            _ => (a.lo.order(b.hi)? != Less).then_some(false),
         },
+        Le => match a.hi.order(b.lo)? {
+            Less | Equal => Some(true),
+            Greater => (a.lo.order(b.hi)? == Greater).then_some(false),
+        },
+        Gt => spans_compare(Lt, b, a),
+        Ge => spans_compare(Le, b, a),
+        Eq | Ne => {
+            let apart = a.hi.order(b.lo)? == Less || b.hi.order(a.lo)? == Less;
+            apart.then_some(op == Ne)
+        }
         _ => None,
     }
 }
@@ -706,46 +703,12 @@ fn range_compare<'tcx>(
     range: Bounds<'tcx>,
     k: Known<'tcx>,
 ) -> Option<bool> {
-    use std::cmp::Ordering;
-
-    use mir::BinOp::{Eq, Ge, Gt, Le, Lt, Ne};
-    match op {
-        Lt => match range.hi.order(k)? {
-            Ordering::Less => Some(true),
-            _ => (range.lo.order(k)? != Ordering::Less).then_some(false),
-        },
-        Le => match range.hi.order(k)? {
-            Ordering::Less | Ordering::Equal => Some(true),
-            Ordering::Greater => {
-                (range.lo.order(k)? == Ordering::Greater).then_some(false)
-            }
-        },
-        Gt => match range.lo.order(k)? {
-            Ordering::Greater => Some(true),
-            _ => (range.hi.order(k)? != Ordering::Greater).then_some(false),
-        },
-        Ge => match range.lo.order(k)? {
-            Ordering::Greater | Ordering::Equal => Some(true),
-            Ordering::Less => {
-                (range.hi.order(k)? == Ordering::Less).then_some(false)
-            }
-        },
-        Eq => {
-            if range.admits(k)? {
-                // The value could be anywhere in the range, so equality is
-                // only settled when the range holds nothing else.
-                (range.lo == range.hi && range.lo == k).then_some(true)
-            } else {
-                Some(false)
-            }
-        }
-        Ne => {
-            if range.admits(k)? {
-                (range.lo == range.hi && range.lo == k).then_some(false)
-            } else {
-                Some(true)
-            }
-        }
-        _ => None,
+    use mir::BinOp::{Eq, Ne};
+    if let Some(settled) = spans_compare(op, range, Bounds { lo: k, hi: k }) {
+        return Some(settled);
     }
+    // The range meets the value, so equality is only settled when the range
+    // holds nothing else.
+    let single = range.lo == range.hi && range.lo == k;
+    (single && matches!(op, Eq | Ne)).then_some(op == Eq)
 }
