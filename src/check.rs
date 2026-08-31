@@ -127,8 +127,13 @@ pub fn run(
                 name.parse::<Category>()
                     .is_ok_and(|c| CategorySet::assumed().contains(c))
             };
+            // A pattern scopes which functions are asked about. A ceiling
+            // or a baseline narrows how many findings may fail, not what
+            // counts as unreadable, so neither takes this question away.
+            let asked =
+                check.forbid.is_empty() || forbid.is_match(&finding.function);
             (check.fail_on_unknown
-                && covered
+                && asked
                 && finding.categories.iter().any(assumed))
             .then_some(Reason::Unclassified)
         });

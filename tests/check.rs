@@ -225,3 +225,30 @@ fn instantiations_of_one_function_report_once() {
     // Both instantiations contribute, in the order the taxonomy declares.
     assert_eq!(finding.categories, vec!["index", "unwrap"]);
 }
+
+#[test]
+fn a_ceiling_does_not_disable_the_unknown_check() {
+    // A ceiling narrows how many findings may fail, not what counts as
+    // unreadable, so asking about visibility must still be answered.
+    let bodies = vec![body("speaks", Some(Category::DynCall))];
+    let result = outcome(bodies, &["--max", "10", "--fail-on-unknown"]);
+    assert!(
+        result.failed(),
+        "--fail-on-unknown must reach a finding a ceiling left standing"
+    );
+}
+
+#[test]
+fn forbid_still_scopes_the_unknown_check() {
+    let bodies = vec![
+        body("speaks", Some(Category::DynCall)),
+        body("other", Some(Category::DynCall)),
+    ];
+    let result =
+        outcome(bodies, &["--forbid", "^speaks$", "--fail-on-unknown"]);
+    assert_eq!(
+        result.violations.len(),
+        1,
+        "a pattern that names one function must not gate the other"
+    );
+}
