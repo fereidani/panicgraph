@@ -420,9 +420,11 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 sweep_aliased(&mut after, &self.places, &self.escaped);
                 work.merge(*target, after.clone());
                 if let Some(drop) = *drop {
-                    work.merge(drop, after);
+                    work.merge(drop, after.clone());
                 }
-                unwind_to(*unwind, &state, work);
+                // Glue that unwinds part way through has still run part
+                // way, so the cleanup path inherits the same losses.
+                unwind_to(*unwind, &after, work);
             }
             // What a body leaves behind is read here rather than after the
             // walk, since a local's claim only stands where it was made.
@@ -576,7 +578,15 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         if let Some(target) = call.target {
             work.merge(target, after);
         }
-        unwind_to(call.unwind, state, work);
+        if let UnwindAction::Cleanup(cleanup) = call.unwind {
+            // The callee can write through a pointer it was handed and
+            // unwind afterwards, so what escaped cannot be read in the
+            // cleanup block either. The destination is left alone: a call
+            // that unwound never wrote one.
+            let mut unwound = state.clone();
+            sweep_aliased(&mut unwound, &self.places, &self.escaped);
+            work.merge(cleanup, unwound);
+        }
     }
 
     /// Follows the terminators that write nothing this walk reads.
