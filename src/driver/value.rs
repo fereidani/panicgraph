@@ -95,6 +95,45 @@ impl Known<'_> {
             ..self
         })
     }
+
+    /// The result of an arithmetic operator, when it lands inside the type.
+    ///
+    /// The answer is the arithmetic one. An operation that would leave the
+    /// type has no answer here rather than the wrapped one, so a range built
+    /// from these ends never describes a wraparound it cannot hold.
+    pub fn arith(self, op: mir::BinOp, other: Self) -> Option<Self> {
+        use mir::BinOp::{Add, Mul, Sub};
+        if self.ty != other.ty || self.width != other.width {
+            return None;
+        }
+        let bits = if self.is_signed() {
+            let (left, right) = (self.as_signed(), other.as_signed());
+            let value = match op {
+                Add => left.checked_add(right)?,
+                Sub => left.checked_sub(right)?,
+                Mul => left.checked_mul(right)?,
+                _ => return None,
+            };
+            if value < self.type_min().as_signed()
+                || value > self.type_max().as_signed()
+            {
+                return None;
+            }
+            truncate(value.cast_unsigned(), self.width)
+        } else {
+            let value = match op {
+                Add => self.bits.checked_add(other.bits)?,
+                Sub => self.bits.checked_sub(other.bits)?,
+                Mul => self.bits.checked_mul(other.bits)?,
+                _ => return None,
+            };
+            if value > self.type_max().bits {
+                return None;
+            }
+            value
+        };
+        Some(Self { bits, ..self })
+    }
 }
 
 /// Masks a value to the width of its type.
@@ -124,6 +163,57 @@ impl<'tcx> Bounds<'tcx> {
         let above = self.lo.order(value)? != std::cmp::Ordering::Greater;
         let below = value.order(self.hi)? != std::cmp::Ordering::Greater;
         Some(above && below)
+    }
+
+    /// The smallest range holding both.
+    fn hull(self, other: Self) -> Option<Self> {
+        use std::cmp::Ordering::Greater;
+        let lo = if self.lo.order(other.lo)? == Greater {
+            other.lo
+        } else {
+            self.lo
+        };
+        let hi = if self.hi.order(other.hi)? == Greater {
+            self.hi
+        } else {
+            other.hi
+        };
+        Self::new(lo, hi)
+    }
+
+    /// The part both ranges hold, when they meet at all.
+    fn overlap(self, other: Self) -> Option<Self> {
+        use std::cmp::Ordering::Greater;
+        let lo = if self.lo.order(other.lo)? == Greater {
+            self.lo
+        } else {
+            other.lo
+        };
+        let hi = if self.hi.order(other.hi)? == Greater {
+            other.hi
+        } else {
+            self.hi
+        };
+        Self::new(lo, hi)
+    }
+
+    /// The smallest range holding every value given.
+    ///
+    /// The corners of an arithmetic result are what this is read with, so
+    /// the slice is a handful of values and the walk over it is as short.
+    pub fn covering(values: &[Known<'tcx>]) -> Option<Self> {
+        let (first, rest) = values.split_first()?;
+        let mut span = Self {
+            lo: *first,
+            hi: *first,
+        };
+        for value in rest {
+            span = span.hull(Self {
+                lo: *value,
+                hi: *value,
+            })?;
+        }
+        Some(span)
     }
 }
 
@@ -171,6 +261,14 @@ pub struct Fact<'tcx> {
     /// The local this one was copied from, still unwritten since. The
     /// target never carries a link itself, so chains are one step long.
     pub same: Option<mir::Local>,
+    /// How long the slice in play is.
+    ///
+    /// It is recorded against the local the slice is behind, so a guard
+    /// that proves a slice not empty still says so at the next read of its
+    /// length, which is a different local. A local holding a length is
+    /// handed the claim recorded against that slice when it is read, so
+    /// both describe the same quantity.
+    pub extent: Option<Bounds<'tcx>>,
 }
 
 impl<'tcx> Fact<'tcx> {
@@ -180,15 +278,45 @@ impl<'tcx> Fact<'tcx> {
             value: Some(value),
             order: None,
             same: None,
+            extent: None,
         }
     }
 
-    /// Keeps only what both facts agree on.
-    pub fn agreed(self, other: Self) -> Self {
+    /// Everything both facts admit.
+    ///
+    /// The two planes that hold a range are joined, so an arm that settles
+    /// a local on one and bounds it on the other still leaves a range
+    /// behind. The planes that name a local describe nothing when they name
+    /// different ones, so those survive only by agreeing.
+    pub fn joined(self, other: Self) -> Self {
         Self {
-            value: (self.value == other.value).then_some(self.value).flatten(),
+            value: match (self.value, other.value) {
+                (Some(held), Some(arriving)) => held.join(arriving),
+                _ => None,
+            },
             order: (self.order == other.order).then_some(self.order).flatten(),
             same: (self.same == other.same).then_some(self.same).flatten(),
+            extent: match (self.extent, other.extent) {
+                (Some(held), Some(arriving)) => held.hull(arriving),
+                _ => None,
+            },
+        }
+    }
+
+    /// The fact widened away from the one it replaced.
+    pub fn widened(self, from: Self) -> Self {
+        Self {
+            value: match (self.value, from.value) {
+                (Some(now), Some(was)) => now.widened(was),
+                _ => None,
+            },
+            extent: match (self.extent, from.extent) {
+                (Some(now), Some(was)) => Value::Within(now)
+                    .widened(Value::Within(was))
+                    .and_then(Value::bounds),
+                _ => None,
+            },
+            ..self
         }
     }
 }
@@ -230,6 +358,134 @@ impl<'tcx> Value<'tcx> {
             Self::Exact(_) | Self::Other(_) | Self::Within(_) => false,
             Self::Length(other) => other == local,
         }
+    }
+
+    /// The type the claim is written at, when it names one.
+    pub const fn ty(self) -> Option<Ty<'tcx>> {
+        match self.anchor() {
+            Some(known) => Some(known.ty),
+            None => None,
+        }
+    }
+
+    /// A value the claim names, read for the type it is written at.
+    pub const fn anchor(self) -> Option<Known<'tcx>> {
+        match self {
+            Self::Exact(known) | Self::Other(known) => Some(known),
+            Self::Within(bounds) => Some(bounds.lo),
+            Self::Length(_) => None,
+        }
+    }
+
+    /// The range the claim pins the value to, when it is one.
+    pub const fn bounds(self) -> Option<Bounds<'tcx>> {
+        match self {
+            Self::Exact(known) => Some(Bounds {
+                lo: known,
+                hi: known,
+            }),
+            Self::Within(bounds) => Some(bounds),
+            _ => None,
+        }
+    }
+
+    /// Whether the claim admits a value.
+    fn admits(self, value: Known<'tcx>) -> Option<bool> {
+        use std::cmp::Ordering::Equal;
+        match self {
+            Self::Exact(known) => Some(known.order(value)? == Equal),
+            Self::Other(ruled_out) => Some(ruled_out.order(value)? != Equal),
+            Self::Within(bounds) => bounds.admits(value),
+            Self::Length(_) => None,
+        }
+    }
+
+    /// Everything either claim admits.
+    ///
+    /// This is what two arms of a branch leave behind where they meet: one
+    /// that settles a divisor at one and bounds it below at the other still
+    /// proves it nonzero, which is the whole point of reading the arms
+    /// separately. `None` is the claim that admits everything, and a pair
+    /// with no common description gives it.
+    pub fn join(self, other: Self) -> Option<Self> {
+        if self == other {
+            return Some(self);
+        }
+        if let (Self::Other(ruled_out), rest) | (rest, Self::Other(ruled_out)) =
+            (self, other)
+        {
+            // Ruling one value out still describes the pair, as long as the
+            // other claim never admits it.
+            return (!rest.admits(ruled_out)?)
+                .then_some(Self::Other(ruled_out));
+        }
+        self.bounds()?.hull(other.bounds()?).map(Self::Within)
+    }
+
+    /// The claim widened away from the one it replaced.
+    ///
+    /// An end that moved goes straight to the end of its type, so a value
+    /// that a loop walks outward reaches its resting place in one step
+    /// rather than one iteration at a time. Only a range widens; any other
+    /// claim is given up instead.
+    pub fn widened(self, from: Self) -> Option<Self> {
+        let (now, was) = (self.bounds()?, from.bounds()?);
+        let lo = if now.lo == was.lo {
+            now.lo
+        } else {
+            now.lo.type_min()
+        };
+        let hi = if now.hi == was.hi {
+            now.hi
+        } else {
+            now.hi.type_max()
+        };
+        Bounds::new(lo, hi).map(Self::Within)
+    }
+
+    /// The claim narrowed by one a branch taught.
+    ///
+    /// Only a narrowing that lies wholly inside the claim already held is
+    /// taken, so a second bound on the same local adds to the first instead
+    /// of replacing it. A pair with nothing in common would mean the arm
+    /// never runs, which this pass does not claim, so what was held stands.
+    pub fn refined(self, taught: Self) -> Self {
+        self.narrowed(taught).unwrap_or(self)
+    }
+
+    /// The narrowing, when the claim taught is one.
+    fn narrowed(self, taught: Self) -> Option<Self> {
+        match (self, taught) {
+            // A settled claim cannot be improved on.
+            (Self::Exact(_) | Self::Length(_), _) => None,
+            (_, Self::Exact(known)) => {
+                self.admits(known)?.then_some(Self::Exact(known))
+            }
+            (Self::Other(ruled_out), Self::Within(bounds))
+            | (Self::Within(bounds), Self::Other(ruled_out)) => {
+                Self::without(bounds, ruled_out)
+            }
+            (Self::Within(held), Self::Within(bounds)) => {
+                held.overlap(bounds).map(Self::Within)
+            }
+            (Self::Other(_) | Self::Within(_), _) => None,
+        }
+    }
+
+    /// A range with one value taken off it, when it leaves a range.
+    fn without(range: Bounds<'tcx>, ruled_out: Known<'tcx>) -> Option<Self> {
+        if !range.admits(ruled_out)? {
+            return Some(Self::Within(range));
+        }
+        if range.lo == ruled_out {
+            return Bounds::new(ruled_out.successor()?, range.hi)
+                .map(Self::Within);
+        }
+        if range.hi == ruled_out {
+            return Bounds::new(range.lo, ruled_out.predecessor()?)
+                .map(Self::Within);
+        }
+        None
     }
 }
 
@@ -345,7 +601,20 @@ pub fn compare<'tcx>(
     if let (Some(Value::Length(_)), Some(_)) = (left.value, right.order) {
         return compare(mirrored(op), right, left);
     }
-    values_compare(op, left.value?, right.value?)
+    values_compare(op, sized(left)?, sized(right)?)
+}
+
+/// What a fact claims about its value, reading a length as the range that
+/// length was found to lie in.
+///
+/// This is what a guard on emptiness leaves behind: the check that a slice
+/// read is in range compares a constant against the length, and past
+/// `if v.is_empty()` the length is known to be at least one.
+const fn sized(fact: Fact<'_>) -> Option<Value<'_>> {
+    match (fact.value, fact.extent) {
+        (Some(Value::Length(_)), Some(bounds)) => Some(Value::Within(bounds)),
+        (value, _) => value,
+    }
 }
 
 /// Evaluates a comparison over the value plane alone.

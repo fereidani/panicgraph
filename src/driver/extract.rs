@@ -265,6 +265,13 @@ impl<'tcx> Extractor<'tcx> {
                     fn_span,
                     ..
                 } => {
+                    if reach.is_quiet(bb) {
+                        // The callee was walked with the arguments this
+                        // call makes and found unable to raise. It runs no
+                        // other body under them either, so nothing below it
+                        // is reachable through this edge.
+                        continue;
+                    }
                     let mut info = info;
                     info.span = *fn_span;
                     let at = At::new(bb, *unwind, info);

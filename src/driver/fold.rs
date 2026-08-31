@@ -8,10 +8,14 @@
 //!
 //! This pass answers the same two questions codegen does, for one body at a
 //! time: which blocks does this instantiation reach, and which of its checks
-//! cannot fail. It only ever claims to know a value it can compute exactly,
-//! so a body it cannot follow is left exactly as it was found.
-
-use std::collections::VecDeque;
+//! cannot fail. It only ever claims a value it can prove, so a body it
+//! cannot follow is left exactly as it was found.
+//!
+//! A value the body did not compute itself is followed as far as it goes.
+//! Where two arms of a branch meet, what they agree on survives as a range
+//! rather than being given up, and a call is read for what its body returns,
+//! so `right.max(1)` is known nonzero and the division below it raises
+//! nothing.
 
 use rustc_middle::{
     mir::{self, BasicBlock, BinOp, TerminatorKind, UnwindAction},
@@ -20,13 +24,33 @@ use rustc_middle::{
 
 use crate::{
     sinks::SinkTable,
-    value::{self, Against, Bounds, Fact, Known, Taught, Value, truncate},
+    state::{
+        Compared, STEPS, State, Subject, Work, escaping, forget, refined,
+        root_of, unwind_to, writes,
+    },
+    value::{self, Against, Bounds, Fact, Known, LenRel, Value, truncate},
 };
+
+/// How far a chain of calls is followed for the value it returns.
+///
+/// Each step is one more body on the stack, and the calls worth reading a
+/// value out of sit shallow: `cmp::max` is one step above `Ord::max`, which
+/// is the deepest of them.
+const DEPTH: u32 = 3;
+
+/// How many blocks folding one body may spend on the callees it reads
+/// values out of.
+///
+/// A summary is only asked for where the answer would settle a check, so
+/// the budget is rarely touched. It is what keeps a body that calls into a
+/// wide subgraph from paying for all of it.
+const BUDGET: u32 = 4096;
 
 /// What one instantiation of a body reaches.
 pub struct Reach {
     live: Vec<bool>,
     settled: Vec<bool>,
+    quiet: Vec<bool>,
 }
 
 impl Reach {
@@ -35,6 +59,7 @@ impl Reach {
         Self {
             live: vec![true; blocks],
             settled: vec![false; blocks],
+            quiet: vec![false; blocks],
         }
     }
 
@@ -47,6 +72,16 @@ impl Reach {
     pub fn is_settled(&self, bb: BasicBlock) -> bool {
         self.settled.get(bb.as_usize()).copied().unwrap_or(false)
     }
+
+    /// Whether a block's call was proved to raise nothing.
+    ///
+    /// The callee was walked with what this call site knows about its
+    /// arguments, and every block the compiler will generate for it was
+    /// found unable to raise. It says nothing about the callee anywhere
+    /// else, which is why the callee is still analysed on its own.
+    pub fn is_quiet(&self, bb: BasicBlock) -> bool {
+        self.quiet.get(bb.as_usize()).copied().unwrap_or(false)
+    }
 }
 
 /// Works out what one instantiation of a body reaches.
@@ -56,133 +91,73 @@ pub fn reachable<'tcx>(
     env: TypingEnv<'tcx>,
     mir: &mir::Body<'tcx>,
 ) -> Reach {
-    Folder {
-        tcx,
-        inst,
-        env,
-        mir,
-        escaped: escaping(mir),
-    }
-    .run()
+    let mut folder = Folder::new(tcx, inst, env, mir, 0, BUDGET);
+    let entry = vec![Fact::default(); mir.local_decls.len()];
+    folder.run(entry)
 }
 
-/// What every local is known about at one point.
-type State<'tcx> = Vec<Fact<'tcx>>;
-
-/// What a branch reads, and what its arms therefore prove.
+/// What every path out of a body was found to return.
 #[derive(Debug, Clone, Copy)]
-struct Subject<'tcx> {
-    /// The local the branch reads, which every arm settles.
-    read: mir::Local,
-    ty: Ty<'tcx>,
-    width: u32,
-    /// The comparison it stands for, when it is a boolean holding one.
-    compared: Option<Compared<'tcx>>,
+enum Returns<'tcx> {
+    /// No path that returns has been walked.
+    Never,
+    /// Every such path leaves a value this claim admits.
+    Held(Value<'tcx>),
+    /// Nothing definite.
+    Anything,
 }
 
-/// A comparison a branch turns into a fact about the local it measured.
-#[derive(Debug, Clone, Copy)]
-struct Compared<'tcx> {
-    /// The operator, read with the measured local on the left.
-    op: BinOp,
-    local: mir::Local,
-    against: Against<'tcx>,
-}
-
-/// The blocks still to visit, and what each is entered with.
-struct Work<'tcx> {
-    entry: Vec<Option<State<'tcx>>>,
-    queued: Vec<bool>,
-    queue: VecDeque<BasicBlock>,
-}
-
-impl<'tcx> Work<'tcx> {
-    /// Prepares a worklist over a body of `blocks` blocks.
-    fn new(blocks: usize) -> Self {
-        Self {
-            entry: vec![None; blocks],
-            queued: vec![false; blocks],
-            queue: VecDeque::new(),
-        }
-    }
-
-    /// Records what a block is entered with, queueing it if that changed.
-    ///
-    /// A block is first recorded with whatever its predecessor knew, and
-    /// afterwards only ever loses a local: two predecessors that disagree
-    /// leave nothing behind. That is what bounds the walk.
-    fn merge(&mut self, bb: BasicBlock, incoming: State<'tcx>) {
-        let Some(slot) = self.entry.get_mut(bb.as_usize()) else {
-            return;
-        };
-        match slot {
-            None => *slot = Some(incoming),
-            Some(existing) => {
-                let mut changed = false;
-                for (held, arriving) in existing.iter_mut().zip(&incoming) {
-                    let next = held.agreed(*arriving);
-                    if next != *held {
-                        *held = next;
-                        changed = true;
-                    }
-                }
-                if !changed {
-                    return;
-                }
+impl<'tcx> Returns<'tcx> {
+    /// Adds what one path out of the body leaves behind.
+    fn met(self, value: Option<Value<'tcx>>) -> Self {
+        match (self, value) {
+            (Self::Anything, _) | (_, None) => Self::Anything,
+            (Self::Never, Some(found)) => Self::Held(found),
+            (Self::Held(held), Some(found)) => {
+                held.join(found).map_or(Self::Anything, Self::Held)
             }
         }
-        if let Some(queued) = self.queued.get_mut(bb.as_usize())
-            && !*queued
-        {
-            *queued = true;
-            self.queue.push_back(bb);
-        }
     }
 
-    /// Whether every block has been visited with its settled state.
-    fn is_drained(&self) -> bool {
-        self.queue.is_empty()
-    }
-
-    /// Takes the next block to visit, with the state it is entered with.
+    /// The claim every path agrees on.
     ///
-    /// A block is queued only once its state is recorded, so the state is
-    /// always there; the walk simply skips a block if it ever is not, rather
-    /// than ending early and leaving the rest of the body unvisited.
-    fn pop(&mut self) -> Option<(BasicBlock, State<'tcx>)> {
-        let bb = self.queue.pop_front()?;
-        if let Some(queued) = self.queued.get_mut(bb.as_usize()) {
-            *queued = false;
+    /// A body no path returns from has none: the call never comes back, so
+    /// there is no value for the caller to read.
+    const fn claim(self) -> Option<Value<'tcx>> {
+        match self {
+            Self::Held(value) => Some(value),
+            Self::Never | Self::Anything => None,
         }
-        let state = self.entry.get(bb.as_usize())?.clone()?;
-        Some((bb, state))
     }
 }
 
-/// Locals a pointer could be aimed at.
+/// The parts of a call the walk reads.
+#[derive(Clone, Copy)]
+struct Call<'a, 'tcx> {
+    func: &'a mir::Operand<'tcx>,
+    args: &'a [rustc_span::Spanned<mir::Operand<'tcx>>],
+    destination: mir::Place<'tcx>,
+    target: Option<BasicBlock>,
+    unwind: UnwindAction,
+}
+
+/// What folding a callee at one call site found.
+#[derive(Debug, Clone, Copy, Default)]
+struct Found<'tcx> {
+    /// The value every path out of the callee leaves behind.
+    value: Option<Value<'tcx>>,
+    /// Whether the callee, walked with these arguments, can still raise.
+    quiet: bool,
+}
+
+/// The claim, when it means the same thing outside the body it was read in.
 ///
-/// A write through a pointer can reach any of these, so their value is never
-/// assumed. Every other local can only be written by naming it, which the
-/// walk sees.
-fn escaping(mir: &mir::Body<'_>) -> Vec<bool> {
-    let mut escaped = vec![false; mir.local_decls.len()];
-    for block in mir.basic_blocks.iter() {
-        for stmt in &block.statements {
-            let mir::StatementKind::Assign(pair) = &stmt.kind else {
-                continue;
-            };
-            let (mir::Rvalue::Ref(_, _, place)
-            | mir::Rvalue::RawPtr(_, place)
-            | mir::Rvalue::Reborrow(_, _, place)) = &pair.1
-            else {
-                continue;
-            };
-            if let Some(slot) = escaped.get_mut(place.local.as_usize()) {
-                *slot = true;
-            }
-        }
+/// A length names a local of that body, so it says nothing anywhere else.
+const fn portable(value: Value<'_>) -> Option<Value<'_>> {
+    match value {
+        Value::Exact(_) | Value::Other(_) | Value::Within(_) => Some(value),
+        Value::Length(_) => None,
     }
-    escaped
 }
 
 /// Folds one body against the arguments it was instantiated with.
@@ -192,9 +167,37 @@ struct Folder<'a, 'tcx> {
     env: TypingEnv<'tcx>,
     mir: &'a mir::Body<'tcx>,
     escaped: Vec<bool>,
+    /// How many callees deep this body sits below the one being analysed.
+    depth: u32,
+    /// Blocks left to spend on callees, shared with every fold below this
+    /// one so the whole chain costs what one body is allowed.
+    budget: u32,
+    /// What the walk has found the body to return.
+    returns: Returns<'tcx>,
 }
 
-impl<'tcx> Folder<'_, 'tcx> {
+impl<'a, 'tcx> Folder<'a, 'tcx> {
+    /// Prepares to fold one body.
+    fn new(
+        tcx: TyCtxt<'tcx>,
+        inst: Instance<'tcx>,
+        env: TypingEnv<'tcx>,
+        mir: &'a mir::Body<'tcx>,
+        depth: u32,
+        budget: u32,
+    ) -> Self {
+        Self {
+            tcx,
+            inst,
+            env,
+            mir,
+            escaped: escaping(mir),
+            depth,
+            budget,
+            returns: Returns::Never,
+        }
+    }
+
     /// Whether a pointer could be aimed at a local, so its value is never
     /// assumed. A local the walk has never heard of is treated as escaping.
     fn escapes(&self, local: mir::Local) -> bool {
@@ -202,40 +205,49 @@ impl<'tcx> Folder<'_, 'tcx> {
     }
 
     /// Runs the walk to a fixpoint.
-    fn run(&self) -> Reach {
+    fn run(&mut self, entry: State<'tcx>) -> Reach {
         let blocks = self.mir.basic_blocks.len();
         let locals = self.mir.local_decls.len();
         let mut reach = Reach {
             live: vec![false; blocks],
             settled: vec![false; blocks],
+            quiet: vec![false; blocks],
         };
         let mut work = Work::new(blocks);
-        work.merge(mir::START_BLOCK, vec![Fact::default(); locals]);
+        work.merge(mir::START_BLOCK, entry);
 
-        // A block is recorded once and afterwards only loses locals, so it
-        // is queued at most `locals + 1` times and the walk ends within the
+        // A block is recorded once and afterwards only widens, and one
+        // local's claim widens at most `STEPS` times, so a block is queued
+        // at most `locals * STEPS + 1` times and the walk ends within the
         // bound below.
         let bound = blocks
-            .saturating_mul(locals.saturating_add(1))
+            .saturating_mul(locals.saturating_mul(STEPS).saturating_add(1))
             .saturating_add(blocks)
             .saturating_add(1);
         for _ in 0..bound {
             if work.is_drained() {
                 return reach;
             }
+            if self.budget == 0 {
+                break;
+            }
+            self.budget = self.budget.saturating_sub(1);
             if let Some((bb, state)) = work.pop() {
                 self.visit(bb, state, &mut reach, &mut work);
             }
         }
         // The bound is a proof rather than a guess, so exhausting it means
         // the walk is not shrinking as it should. Report the body as it was
-        // found instead of a verdict that assumed away an unsettled branch.
+        // found instead of a verdict that assumed away an unsettled branch,
+        // and say nothing about what it returns: a walk cut short has not
+        // seen every path out.
+        self.returns = Returns::Anything;
         Reach::everything(blocks)
     }
 
     /// Walks one block, recording what it reaches.
     fn visit(
-        &self,
+        &mut self,
         bb: BasicBlock,
         mut state: State<'tcx>,
         reach: &mut Reach,
@@ -249,7 +261,13 @@ impl<'tcx> Folder<'_, 'tcx> {
         if let Some(slot) = reach.settled.get_mut(bb.as_usize()) {
             *slot = false;
         }
-        let block = &self.mir.basic_blocks[bb];
+        if let Some(slot) = reach.quiet.get_mut(bb.as_usize()) {
+            *slot = false;
+        }
+        // The body outlives the walk, so reading it through a copy of the
+        // reference leaves the walk free to record what it finds.
+        let mir: &'a mir::Body<'tcx> = self.mir;
+        let block = &mir.basic_blocks[bb];
         for stmt in &block.statements {
             if !self.statement(&mut state, stmt) {
                 // An assumption this build contradicts. The compiler drops
@@ -326,7 +344,7 @@ impl<'tcx> Folder<'_, 'tcx> {
 
     /// Follows a terminator into the blocks it can reach.
     fn terminator(
-        &self,
+        &mut self,
         bb: BasicBlock,
         kind: &TerminatorKind<'tcx>,
         state: State<'tcx>,
@@ -336,29 +354,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         match kind {
             TerminatorKind::Goto { target } => work.merge(*target, state),
             TerminatorKind::SwitchInt { discr, targets } => {
-                if let Some(value) = self.exact(&state, discr) {
-                    work.merge(targets.target_for_value(value.bits), state);
-                    return;
-                }
-                let subject = self.subject_of(bb, discr, &state);
-                let mut taken = Vec::new();
-                for (value, target) in targets.iter() {
-                    taken.push(value);
-                    work.merge(
-                        target,
-                        refined(&state, subject, Some(value), true),
-                    );
-                }
-                // The fallback covers every value not listed, so it settles
-                // the condition only when one value is left over.
-                let rest = match taken.as_slice() {
-                    [only] => Some(*only),
-                    _ => None,
-                };
-                work.merge(
-                    targets.otherwise(),
-                    refined(&state, subject, rest, false),
-                );
+                self.branched(bb, discr, targets, state, work);
             }
             TerminatorKind::Assert {
                 cond,
@@ -381,22 +377,19 @@ impl<'tcx> Folder<'_, 'tcx> {
                 target,
                 unwind,
                 ..
-            } => {
-                let mut after = state.clone();
-                forget(&mut after, destination.local);
-                if let Some(value) =
-                    self.call_summary(&state, func, args, *destination)
-                    && let Some(local) = destination.as_local()
-                    && !self.escapes(local)
-                    && let Some(slot) = after.get_mut(local.as_usize())
-                {
-                    *slot = Fact::of(value);
-                }
-                if let Some(target) = target {
-                    work.merge(*target, after);
-                }
-                unwind_to(*unwind, &state, work);
-            }
+            } => self.called(
+                bb,
+                Call {
+                    func,
+                    args,
+                    destination: *destination,
+                    target: *target,
+                    unwind: *unwind,
+                },
+                &state,
+                reach,
+                work,
+            ),
             TerminatorKind::Drop {
                 place,
                 target,
@@ -412,8 +405,75 @@ impl<'tcx> Folder<'_, 'tcx> {
                 }
                 unwind_to(*unwind, &state, work);
             }
+            // What a body leaves behind is read here rather than after the
+            // walk, since a local's claim only stands where it was made.
+            TerminatorKind::Return => {
+                let left = Self::known_at(&state, mir::RETURN_PLACE)
+                    .value
+                    .and_then(portable);
+                self.returns = self.returns.met(left);
+            }
             _ => Self::onward(kind, state, work),
         }
+    }
+
+    /// Follows a branch into each of its arms, carrying what taking that
+    /// arm proves.
+    fn branched(
+        &self,
+        bb: BasicBlock,
+        discr: &mir::Operand<'tcx>,
+        targets: &mir::SwitchTargets,
+        state: State<'tcx>,
+        work: &mut Work<'tcx>,
+    ) {
+        if let Some(value) = self.exact(&state, discr) {
+            work.merge(targets.target_for_value(value.bits), state);
+            return;
+        }
+        let subject = self.subject_of(bb, discr, &state);
+        let mut taken = Vec::new();
+        for (value, target) in targets.iter() {
+            taken.push(value);
+            work.merge(target, refined(&state, subject, Some(value), true));
+        }
+        // The fallback covers every value not listed, so it settles the
+        // condition only when one value is left over.
+        let rest = match taken.as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        };
+        work.merge(targets.otherwise(), refined(&state, subject, rest, false));
+    }
+
+    /// Follows a call, recording what walking the callee found.
+    fn called(
+        &mut self,
+        bb: BasicBlock,
+        call: Call<'_, 'tcx>,
+        state: &State<'tcx>,
+        reach: &mut Reach,
+        work: &mut Work<'tcx>,
+    ) {
+        let mut after = state.clone();
+        forget(&mut after, call.destination.local);
+        let found = self.inspect(state, call.func, call.args, call.destination);
+        if found.quiet
+            && let Some(slot) = reach.quiet.get_mut(bb.as_usize())
+        {
+            *slot = true;
+        }
+        if let Some(value) = found.value
+            && let Some(local) = call.destination.as_local()
+            && !self.escapes(local)
+            && let Some(slot) = after.get_mut(local.as_usize())
+        {
+            *slot = Fact::of(value);
+        }
+        if let Some(target) = call.target {
+            work.merge(target, after);
+        }
+        unwind_to(call.unwind, state, work);
     }
 
     /// Follows the terminators that write nothing this walk reads.
@@ -437,8 +497,7 @@ impl<'tcx> Folder<'_, 'tcx> {
                 work.merge(*real_target, state.clone());
                 unwind_to(*unwind, &state, work);
             }
-            TerminatorKind::Return
-            | TerminatorKind::UnwindResume
+            TerminatorKind::UnwindResume
             | TerminatorKind::UnwindTerminate(_)
             | TerminatorKind::Unreachable
             | TerminatorKind::CoroutineDrop
@@ -454,22 +513,80 @@ impl<'tcx> Folder<'_, 'tcx> {
         }
     }
 
-    /// The value the call being made is known to return.
+    /// What a call was found to do.
     ///
-    /// Only functions whose result the checks downstream consume are
-    /// summarized, and only ones whose contract guarantees the claim for
-    /// every implementation the resolution can reach: a slice's length is
-    /// its metadata, and a nonzero wrapper's validity invariant keeps what
-    /// it yields apart from zero.
-    fn call_summary(
-        &self,
+    /// A contract answers first, since it holds for every implementation
+    /// the resolution can reach and costs nothing to read. Anything else is
+    /// answered by folding the callee, which is what carries a value
+    /// through a call the caller cannot see past, and what proves that a
+    /// precondition the caller satisfies leaves the callee nothing to
+    /// raise.
+    fn inspect(
+        &mut self,
         state: &State<'tcx>,
         func: &mir::Operand<'tcx>,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
         destination: mir::Place<'tcx>,
+    ) -> Found<'tcx> {
+        let Some(ty) =
+            self.monomorphize(func.ty(&self.mir.local_decls, self.tcx))
+        else {
+            return Found::default();
+        };
+        if let Some(value) = self.contracted(state, ty, args, destination) {
+            return Found {
+                value: Some(value),
+                quiet: false,
+            };
+        }
+        if !self.worth_folding(state, args, destination) {
+            return Found::default();
+        }
+        self.folded(state, ty, args)
+    }
+
+    /// Whether folding a callee could tell this call site anything.
+    ///
+    /// A call the walk knows nothing about the arguments of folds to what
+    /// the callee does everywhere, which the graph it belongs to already
+    /// accounts for. What earns the walk is an argument carrying a fact
+    /// into the callee, or a result a check downstream can read.
+    fn worth_folding(
+        &self,
+        state: &State<'tcx>,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        destination: mir::Place<'tcx>,
+    ) -> bool {
+        let known = |arg: &rustc_span::Spanned<mir::Operand<'tcx>>| {
+            self.fact(state, &arg.node)
+                .value
+                .and_then(portable)
+                .is_some()
+        };
+        if args.iter().any(known) {
+            return true;
+        }
+        let result = destination.ty(&self.mir.local_decls, self.tcx).ty;
+        self.monomorphize(result)
+            .and_then(|ty| self.width(ty))
+            .is_some()
+    }
+
+    /// The value a call returns by the contract of what it calls.
+    ///
+    /// Only functions whose result the checks downstream consume are
+    /// listed, and only ones whose contract guarantees the claim for every
+    /// implementation the resolution can reach: a slice's length is its
+    /// metadata, and a nonzero wrapper's validity invariant keeps what it
+    /// yields apart from zero.
+    fn contracted(
+        &self,
+        state: &State<'tcx>,
+        func: Ty<'tcx>,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        destination: mir::Place<'tcx>,
     ) -> Option<Value<'tcx>> {
-        let ty = self.monomorphize(func.ty(&self.mir.local_decls, self.tcx))?;
-        let ty::FnDef(did, _) = *ty.kind() else {
+        let ty::FnDef(did, _) = *func.kind() else {
             return None;
         };
         if self.tcx.crate_name(did.krate).as_str() != "core" {
@@ -489,6 +606,14 @@ impl<'tcx> Folder<'_, 'tcx> {
                 }
                 Some(Value::Length(local))
             }
+            // Picking the larger or the smaller of two numbers is what
+            // pins a value away from the end of its range, and the two are
+            // read here rather than folded because the body compares
+            // through references the walk does not follow. A primitive
+            // cannot carry another crate's implementation of the trait, so
+            // the body reached is the one this claim describes.
+            "cmp::Ord::max" => self.picked(state, true, args),
+            "cmp::Ord::min" => self.picked(state, false, args),
             "num::nonzero::get" => {
                 let receiver = args.first()?;
                 let source = self.monomorphize(
@@ -503,6 +628,204 @@ impl<'tcx> Folder<'_, 'tcx> {
             }
             _ => None,
         }
+    }
+
+    /// What a call does, worked out by folding the callee.
+    ///
+    /// The callee is walked the way this body is, told what the call site
+    /// knows about each argument. Every path out of it has to agree on the
+    /// value it leaves, which is what settles a check written against the
+    /// result of a call: `right.max(1)` returns either the argument or a
+    /// value above it, so it is never zero and the division below it raises
+    /// nothing. Every block the compiler will generate for it has to be one
+    /// that cannot raise, which is what clears a caller whose arguments
+    /// satisfy a precondition the callee checks.
+    ///
+    /// The walk is bounded twice over. `DEPTH` caps how far a chain of
+    /// calls is followed, which bounds the stack, and the budget is spent
+    /// across every callee one body reaches, which bounds the work.
+    fn folded(
+        &mut self,
+        state: &State<'tcx>,
+        func: Ty<'tcx>,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+    ) -> Found<'tcx> {
+        let Some(callee) = self.target(func) else {
+            return Found::default();
+        };
+        let mir = self.tcx.instance_mir(callee.def);
+        // A shim rearranges what it was passed, so its parameters are not
+        // the operands at the call site.
+        if mir.arg_count != args.len() {
+            return Found::default();
+        }
+        let mut folder = Folder::new(
+            self.tcx,
+            callee,
+            TypingEnv::fully_monomorphized(),
+            mir,
+            self.depth.saturating_add(1),
+            self.budget,
+        );
+        let entry = self.carried(state, &folder, args);
+        let reach = folder.run(entry);
+        self.budget = folder.budget;
+        Found {
+            value: folder.returns.claim(),
+            quiet: Self::silent(mir, &reach),
+        }
+    }
+
+    /// The body a call runs, when this walk may read it.
+    fn target(&self, func: Ty<'tcx>) -> Option<Instance<'tcx>> {
+        if self.depth >= DEPTH || self.budget == 0 {
+            return None;
+        }
+        let ty::FnDef(did, generics) = *func.kind() else {
+            return None;
+        };
+        // A signature with a lifetime still bound names no one target.
+        let generics = generics.no_bound_vars()?;
+        if generics.has_param() {
+            return None;
+        }
+        let callee = Instance::try_resolve(self.tcx, self.env, did, generics)
+            .ok()
+            .flatten()?;
+        // A body that calls itself would be folded against the same
+        // arguments forever, and it is the depth that stops the longer
+        // cycles.
+        if callee == self.inst {
+            return None;
+        }
+        let ty::InstanceKind::Item(def) = callee.def else {
+            return None;
+        };
+        self.tcx.is_mir_available(def).then_some(callee)
+    }
+
+    /// Whether a body walked this way has nothing left that can raise.
+    ///
+    /// Every block the compiler will generate for it has to carry a
+    /// terminator with nowhere to raise from, or a check the walk settled.
+    /// A call or a drop is not one of them: what either runs is a body this
+    /// walk did not read.
+    fn silent(mir: &mir::Body<'tcx>, reach: &Reach) -> bool {
+        for (bb, data) in mir.basic_blocks.iter_enumerated() {
+            if !reach.is_live(bb) {
+                continue;
+            }
+            let Some(term) = &data.terminator else {
+                return false;
+            };
+            let silent = match &term.kind {
+                TerminatorKind::Assert { .. } => reach.is_settled(bb),
+                TerminatorKind::Goto { .. }
+                | TerminatorKind::SwitchInt { .. }
+                | TerminatorKind::Return
+                | TerminatorKind::Unreachable
+                | TerminatorKind::FalseEdge { .. }
+                | TerminatorKind::FalseUnwind { .. } => true,
+                _ => false,
+            };
+            if !silent {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The state a callee is entered with.
+    ///
+    /// A parameter is told only what the call site knows about the operand
+    /// it was passed, and only where the claim means the same thing there:
+    /// one written at another type describes a value the callee never sees.
+    fn carried(
+        &self,
+        state: &State<'tcx>,
+        callee: &Folder<'_, 'tcx>,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+    ) -> State<'tcx> {
+        let mut entry = vec![Fact::default(); callee.mir.local_decls.len()];
+        for (index, arg) in args.iter().enumerate() {
+            let local = mir::Local::from_usize(index.saturating_add(1));
+            if callee.escapes(local) {
+                continue;
+            }
+            let Some(value) =
+                self.fact(state, &arg.node).value.and_then(portable)
+            else {
+                continue;
+            };
+            let Some(decl) = callee.mir.local_decls.get(local) else {
+                continue;
+            };
+            if callee.monomorphize(decl.ty) != value.ty() {
+                continue;
+            }
+            if let Some(slot) = entry.get_mut(local.as_usize()) {
+                *slot = Fact::of(value);
+            }
+        }
+        entry
+    }
+
+    /// The range a call that picks one of two numbers leaves behind.
+    ///
+    /// Both ends move together: the larger of two values is at least the
+    /// larger of their lower ends and never above the larger of their upper
+    /// ends. That is what keeps `right.max(1)` away from zero whatever the
+    /// argument holds, and what bounds `right.min(9)` from above.
+    fn picked(
+        &self,
+        state: &State<'tcx>,
+        larger: bool,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+    ) -> Option<Value<'tcx>> {
+        let [left, right] = args else {
+            return None;
+        };
+        let left = self.spread(state, &left.node)?;
+        let right = self.spread(state, &right.node)?;
+        let pick = |a: Known<'tcx>, b: Known<'tcx>| {
+            let above = a.order(b)? == std::cmp::Ordering::Greater;
+            Some(if above == larger { a } else { b })
+        };
+        Bounds::new(pick(left.lo, right.lo)?, pick(left.hi, right.hi)?)
+            .map(Value::Within)
+    }
+
+    /// The range an operand lies in, which is its type's own range when
+    /// nothing narrower is known.
+    fn spread(
+        &self,
+        state: &State<'tcx>,
+        operand: &mir::Operand<'tcx>,
+    ) -> Option<Bounds<'tcx>> {
+        let ty =
+            self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))?;
+        if !matches!(ty.kind(), ty::Int(_) | ty::Uint(_)) {
+            return None;
+        }
+        let seed = Known {
+            bits: 0,
+            ty,
+            width: self.width(ty)?,
+        };
+        let whole = Bounds::new(seed.type_min(), seed.type_max())?;
+        let Some(value) = self.fact(state, operand).value else {
+            return Some(whole);
+        };
+        // A claim written at another type describes another value.
+        if value.ty() != Some(ty) {
+            return Some(whole);
+        }
+        Some(
+            Value::Within(whole)
+                .refined(value)
+                .bounds()
+                .unwrap_or(whole),
+        )
     }
 
     /// Whether a type is the standard library's nonzero wrapper.
@@ -583,8 +906,8 @@ impl<'tcx> Folder<'_, 'tcx> {
         ) {
             return None;
         }
-        let (op, raw, against) =
-            self.compared(state, *op, &operands.0, &operands.1)?;
+        let measured = self.compared(state, *op, &operands.0, &operands.1)?;
+        let raw = measured.local;
         let local = root_of(state, raw);
         if self.escapes(local) {
             return None;
@@ -596,7 +919,8 @@ impl<'tcx> Folder<'_, 'tcx> {
             writes(s, local)
                 || writes(s, raw)
                 || writes(s, result)
-                || match against {
+                || measured.source.is_some_and(|of| writes(s, of))
+                || match measured.against {
                     Against::Constant(_) => false,
                     Against::Length(of) => writes(s, of),
                 }
@@ -604,7 +928,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         if after.iter().any(touched) {
             return None;
         }
-        Some(Compared { op, local, against })
+        Some(Compared { local, ..measured })
     }
 
     /// Splits a comparison into the local it measures, what it is measured
@@ -615,7 +939,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         op: BinOp,
         left: &mir::Operand<'tcx>,
         right: &mir::Operand<'tcx>,
-    ) -> Option<(BinOp, mir::Local, Against<'tcx>)> {
+    ) -> Option<Compared<'tcx>> {
         let read = |operand: &mir::Operand<'tcx>| match operand {
             mir::Operand::Copy(place) | mir::Operand::Move(place) => {
                 place.as_local()
@@ -624,18 +948,37 @@ impl<'tcx> Folder<'_, 'tcx> {
         };
         let measure = |operand: &mir::Operand<'tcx>| {
             if let mir::Operand::Constant(konst) = operand {
-                return self.constant(konst).map(Against::Constant);
+                return Some((Against::Constant(self.constant(konst)?), None));
             }
-            match self.fact(state, operand).value {
-                Some(Value::Length(of)) => Some(Against::Length(of)),
+            let held = read(operand)?;
+            match self.fact(state, operand).value? {
+                Value::Length(of) => Some((Against::Length(of), Some(held))),
+                // A local the walk has settled measures the same as the
+                // constant that could have been written in its place, which
+                // is how a value the caller passed in is read.
+                Value::Exact(known) => {
+                    Some((Against::Constant(known), Some(held)))
+                }
                 _ => None,
             }
         };
-        if let (Some(local), Some(against)) = (read(left), measure(right)) {
-            return Some((op, local, against));
+        if let (Some(local), Some((against, source))) =
+            (read(left), measure(right))
+        {
+            return Some(Compared {
+                op,
+                local,
+                against,
+                source,
+            });
         }
-        let (local, against) = (read(right)?, measure(left)?);
-        Some((value::from_left(op), local, against))
+        let (local, (against, source)) = (read(right)?, measure(left)?);
+        Some(Compared {
+            op: value::from_left(op),
+            local,
+            against,
+            source,
+        })
     }
 
     /// Follows an `Assert`, recording it when its condition cannot fail.
@@ -692,6 +1035,20 @@ impl<'tcx> Folder<'_, 'tcx> {
             mir::Rvalue::BinaryOp(op, pair) => {
                 let left = self.fact(state, &pair.0);
                 let right = self.fact(state, &pair.1);
+                // The remainder of an unsigned value by the length of a
+                // slice lands below that length, which is what the slice's
+                // own bounds check asks. The length is nonzero wherever
+                // this runs, since the remainder's own check has passed to
+                // get here.
+                if *op == BinOp::Rem
+                    && let Some(Value::Length(of)) = right.value
+                    && self.unsigned(&pair.0)
+                {
+                    return Fact {
+                        order: Some((LenRel::Below, of)),
+                        ..Fact::default()
+                    };
+                }
                 self.binary(*op, left, right)
             }
             mir::Rvalue::UnaryOp(mir::UnOp::Not, operand) => {
@@ -711,9 +1068,14 @@ impl<'tcx> Folder<'_, 'tcx> {
         };
         Fact {
             value,
-            order: None,
-            same: None,
+            ..Fact::default()
         }
+    }
+
+    /// Whether an operand is read as an unsigned integer.
+    fn unsigned(&self, operand: &mir::Operand<'tcx>) -> bool {
+        self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))
+            .is_some_and(|ty| matches!(ty.kind(), ty::Uint(_)))
     }
 
     /// The length a wide pointer carries, when the pointee is a slice.
@@ -765,22 +1127,9 @@ impl<'tcx> Folder<'_, 'tcx> {
     ) -> Fact<'tcx> {
         match operand {
             mir::Operand::Copy(place) | mir::Operand::Move(place) => {
-                let Some(local) = place.as_local() else {
-                    return Fact::default();
-                };
-                let Some(own) = state.get(local.as_usize()).copied() else {
-                    return Fact::default();
-                };
-                let Some(root) = own.same else {
-                    return own;
-                };
-                let at_root =
-                    state.get(root.as_usize()).copied().unwrap_or_default();
-                Fact {
-                    value: own.value.or(at_root.value),
-                    order: own.order.or(at_root.order),
-                    same: own.same,
-                }
+                place.as_local().map_or_else(Fact::default, |local| {
+                    Self::known_at(state, local)
+                })
             }
             mir::Operand::Constant(konst) => self
                 .constant(konst)
@@ -793,6 +1142,30 @@ impl<'tcx> Folder<'_, 'tcx> {
                 .boolean(check.value(self.tcx.sess))
                 .map(Value::Exact)
                 .map_or_else(Fact::default, Fact::of),
+        }
+    }
+
+    /// Everything known about one local, read through its link of
+    /// sameness.
+    fn known_at(state: &State<'tcx>, local: mir::Local) -> Fact<'tcx> {
+        let Some(own) = state.get(local.as_usize()).copied() else {
+            return Fact::default();
+        };
+        let held = own.same.map_or(own, |root| {
+            let at_root =
+                state.get(root.as_usize()).copied().unwrap_or_default();
+            Fact {
+                value: own.value.or(at_root.value),
+                order: own.order.or(at_root.order),
+                ..own
+            }
+        });
+        let Some(Value::Length(of)) = held.value else {
+            return held;
+        };
+        Fact {
+            extent: state.get(of.as_usize()).and_then(|slot| slot.extent),
+            ..held
         }
     }
 
@@ -918,10 +1291,10 @@ impl<'tcx> Folder<'_, 'tcx> {
 
     /// Applies an operator the folder can evaluate.
     ///
-    /// General arithmetic is deliberately absent. The checks worth folding
-    /// compare a value against a bound, and every further operator is
-    /// another chance to disagree with the machine and drop a panic that is
-    /// real. The two exceptions bound their result by construction: a
+    /// Arithmetic is followed only where every end of the result lands
+    /// inside its type. Past that the machine wraps and the arithmetic does
+    /// not, and a claim drawn from the wrong one drops a panic that is
+    /// real. The remaining two bound their result by construction: a
     /// remainder by a constant and a masked value cannot leave the range the
     /// operator itself defines.
     fn binary(
@@ -940,6 +1313,9 @@ impl<'tcx> Folder<'_, 'tcx> {
             return Some(Value::Exact(known));
         }
         match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul => {
+                Self::spanned(op, left.value?.bounds()?, right.value?.bounds()?)
+            }
             // The remainder of anything by a positive constant lies below
             // it. Negative operands are signed, and a signed remainder can
             // be negative, so only unsigned types make the claim.
@@ -968,6 +1344,39 @@ impl<'tcx> Folder<'_, 'tcx> {
             }
             _ => None,
         }
+    }
+
+    /// The range an arithmetic operator leaves behind.
+    ///
+    /// Each end is worked out as arithmetic rather than as the machine does
+    /// it, and an end that would leave its type abandons the claim, so a
+    /// result that wraps is never described by a range that cannot hold it.
+    fn spanned(
+        op: BinOp,
+        left: Bounds<'tcx>,
+        right: Bounds<'tcx>,
+    ) -> Option<Value<'tcx>> {
+        match op {
+            BinOp::Add => Bounds::covering(&[
+                left.lo.arith(op, right.lo)?,
+                left.hi.arith(op, right.hi)?,
+            ]),
+            BinOp::Sub => Bounds::covering(&[
+                left.lo.arith(op, right.hi)?,
+                left.hi.arith(op, right.lo)?,
+            ]),
+            // With a sign in play the extreme can come from any pairing of
+            // ends, so every corner has to land inside the type before any
+            // of them describes the result.
+            BinOp::Mul => Bounds::covering(&[
+                left.lo.arith(op, right.lo)?,
+                left.lo.arith(op, right.hi)?,
+                left.hi.arith(op, right.lo)?,
+                left.hi.arith(op, right.hi)?,
+            ]),
+            _ => None,
+        }
+        .map(Value::Within)
     }
 
     /// Applies an operator to two settled values.
@@ -1023,149 +1432,5 @@ impl<'tcx> Folder<'_, 'tcx> {
                 ty::EarlyBinder::bind(self.tcx, ty),
             )
             .ok()
-    }
-}
-
-/// The local a local's link of sameness points at, or the local itself.
-fn root_of(state: &State<'_>, local: mir::Local) -> mir::Local {
-    state
-        .get(local.as_usize())
-        .and_then(|fact| fact.same)
-        .unwrap_or(local)
-}
-
-/// Applies what taking one arm of a branch proves.
-///
-/// `matched` says whether the arm was reached by naming `value` or by being
-/// the fallback that everything except `value` avoids. The local the branch
-/// read is settled either way, and a boolean standing for a comparison
-/// settles the local that was compared as well.
-fn refined<'tcx>(
-    state: &State<'tcx>,
-    subject: Option<Subject<'tcx>>,
-    value: Option<u128>,
-    matched: bool,
-) -> State<'tcx> {
-    let mut next = state.clone();
-    let (Some(subject), Some(value)) = (subject, value) else {
-        return next;
-    };
-    let read = Known {
-        bits: truncate(value, subject.width),
-        ty: subject.ty,
-        width: subject.width,
-    };
-    learn(
-        &mut next,
-        subject.read,
-        Taught::Value(settle(read, matched)),
-    );
-    if let Some(compared) = subject.compared {
-        // A boolean has two arms, so the fallback settles the comparison
-        // just as firmly as naming its value does.
-        let truth = if matched { value == 1 } else { value == 0 };
-        if let Some(fact) = value::fact_of(compared.op, compared.against, truth)
-        {
-            learn(&mut next, compared.local, fact);
-        }
-    }
-    next
-}
-
-/// A value a branch either confirmed or ruled out.
-fn settle(known: Known<'_>, holds: bool) -> Value<'_> {
-    if holds {
-        Value::Exact(known)
-    } else {
-        Value::other_than(known)
-    }
-}
-
-/// Records what a branch taught, leaving anything already settled alone.
-///
-/// A settled claim cannot be improved on, and disagreeing with it would
-/// mean the arm is unreachable, which this pass does not claim. The two
-/// planes fill independently: a counter that is exactly zero can still
-/// learn that it is below a length.
-fn learn<'tcx>(
-    state: &mut State<'tcx>,
-    local: mir::Local,
-    taught: Taught<'tcx>,
-) {
-    let Some(slot) = state.get_mut(local.as_usize()) else {
-        return;
-    };
-    match taught {
-        Taught::Value(value) => {
-            if slot.value.is_none() {
-                slot.value = Some(value);
-            }
-        }
-        Taught::Order(rel, of) => {
-            if slot.order.is_none() {
-                slot.order = Some((rel, of));
-            }
-        }
-    }
-}
-
-/// Whether a statement can change a local.
-///
-/// Anything not modelled is treated as able to write anywhere, so a fact
-/// never outlives the value it was drawn from.
-fn writes(stmt: &mir::Statement<'_>, local: mir::Local) -> bool {
-    match &stmt.kind {
-        mir::StatementKind::Assign(pair) => pair.0.local == local,
-        mir::StatementKind::SetDiscriminant { place, .. } => {
-            place.local == local
-        }
-        mir::StatementKind::StorageLive(other)
-        | mir::StatementKind::StorageDead(other) => *other == local,
-        mir::StatementKind::FakeRead(..)
-        | mir::StatementKind::PlaceMention(..)
-        | mir::StatementKind::AscribeUserType(..)
-        | mir::StatementKind::Coverage(..)
-        | mir::StatementKind::ConstEvalCounter
-        | mir::StatementKind::Nop
-        | mir::StatementKind::BackwardIncompatibleDropHint { .. } => false,
-        // Copying between pointers can land anywhere.
-        mir::StatementKind::Intrinsic(_) => true,
-    }
-}
-
-/// Drops what is known about one local, along with every claim that leans
-/// on it.
-///
-/// A claim of sameness or one measured against a slice is only as good as
-/// the local it names, so writing that local sweeps those claims with it.
-/// Each plane is swept on its own: an ordering against an untouched slice
-/// outlives the loss of the value it was learned beside.
-fn forget(state: &mut State<'_>, local: mir::Local) {
-    for slot in state.iter_mut() {
-        if slot.value.is_some_and(|value| value.leans_on(local)) {
-            slot.value = None;
-        }
-        if slot.order.is_some_and(|(_, of)| of == local) {
-            slot.order = None;
-        }
-        if slot.same == Some(local) {
-            // The copied value itself stands; only the claim of still
-            // being the same as the source dies with the write.
-            slot.same = None;
-        }
-    }
-    if let Some(slot) = state.get_mut(local.as_usize()) {
-        *slot = Fact::default();
-    }
-}
-
-/// Follows the cleanup path a terminator can take.
-fn unwind_to<'tcx>(
-    unwind: UnwindAction,
-    state: &State<'tcx>,
-    work: &mut Work<'tcx>,
-) {
-    if let UnwindAction::Cleanup(target) = unwind {
-        work.merge(target, state.clone());
     }
 }
