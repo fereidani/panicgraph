@@ -62,6 +62,9 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_match_panic", "explicit"),
     ("must_nonnull_of_argument", "unwrap"),
     ("must_generic_size_divide", "divide-by-zero"),
+    ("must_take_indexed", "index"),
+    ("must_pass_unguarded", "index"),
+    ("Window::must_window_of_other", "index"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -114,6 +117,8 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_match_panic",
     "clean_nonnull_of_place",
     "clean_generic_guard",
+    "clean_guard_before_call",
+    "Window::clean_window_read",
 ];
 
 /// The functions that must stay clean in a debug build as well.

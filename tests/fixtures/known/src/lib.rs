@@ -615,3 +615,37 @@ pub fn clean_generic_guard<T>(_marker: &T, a: u64, b: u64) -> u64 {
 pub fn must_generic_size_divide<T>(a: u64) -> u64 {
     a / (size_of::<T>() as u64)
 }
+
+/// Reaches `index`. Whether the index is in range is the caller's business.
+fn must_take_indexed(v: &[u8], i: usize) -> u8 {
+    v[i]
+}
+
+/// Clean. The guard proves the index in range before the call, and the
+/// callee's own check is settled for the arguments this call makes.
+pub fn clean_guard_before_call(v: &[u8], i: usize) -> u8 {
+    if i < v.len() { must_take_indexed(v, i) } else { 0 }
+}
+
+/// Reaches `index` through the call, since nothing here settles it.
+pub fn must_pass_unguarded(v: &[u8], i: usize) -> u8 {
+    must_take_indexed(v, i)
+}
+
+/// A cursor over a slice, for the two checks below.
+pub struct Window {
+    at: usize,
+    over: &'static [u8],
+}
+
+impl Window {
+    /// Clean. The guard measures the same two places the read does.
+    pub fn clean_window_read(&self) -> u8 {
+        if self.at < self.over.len() { self.over[self.at] } else { 0 }
+    }
+
+    /// Reaches `index`. The guard measures another window's slice.
+    pub fn must_window_of_other(&self, other: &Self) -> u8 {
+        if self.at < other.over.len() { self.over[self.at] } else { 0 }
+    }
+}

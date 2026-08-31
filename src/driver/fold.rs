@@ -794,47 +794,15 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             mir::Rvalue::Cast(mir::CastKind::IntToInt, operand, ty) => {
                 self.cast(state, operand, *ty)
             }
-            // An address and the value inside a nonzero wrapper are both
-            // read out at a plain type, and neither is zero when it is.
             mir::Rvalue::Cast(
                 mir::CastKind::Transmute
                 | mir::CastKind::PointerExposeProvenance
                 | mir::CastKind::PtrToPtr,
                 operand,
                 ty,
-            ) => {
-                let held = self.fact(state, operand);
-                let source = self
-                    .monomorphize(operand.ty(&self.mir.local_decls, self.tcx));
-                if held.address {
-                    return Fact {
-                        address: true,
-                        value: self.apart_from_zero(*ty),
-                        ..Fact::default()
-                    };
-                }
-                source
-                    .filter(|source| self.is_nonzero(*source))
-                    .and_then(|_| self.apart_from_zero(*ty))
-            }
+            ) => return self.reinterpreted(state, operand, *ty),
             mir::Rvalue::BinaryOp(op, pair) => {
-                let left = self.fact(state, &pair.0);
-                let right = self.fact(state, &pair.1);
-                // The remainder of an unsigned value by the length of a
-                // slice lands below that length, which is what the slice's
-                // own bounds check asks. The length is nonzero wherever
-                // this runs, since the remainder's own check has passed to
-                // get here.
-                if *op == BinOp::Rem
-                    && let Some(Value::Length(of)) = right.value
-                    && self.unsigned(&pair.0)
-                {
-                    return Fact {
-                        order: Some((LenRel::Below, of)),
-                        ..Fact::default()
-                    };
-                }
-                self.binary(*op, left, right)
+                return self.operated(state, *op, pair);
             }
             mir::Rvalue::UnaryOp(mir::UnOp::Not, operand) => {
                 self.exact(state, operand).map(|value| {
@@ -861,20 +829,74 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             // what folds the match below it.
             mir::Rvalue::Discriminant(place) => self.tag_read(state, place),
             mir::Rvalue::Aggregate(kind, _) => {
-                if let mir::AggregateKind::Adt(did, variant, args, ..) = &**kind
-                    && let Some(tag) = self.tag_of(*did, args, *variant)
-                {
-                    return Fact {
-                        tag: Some(tag),
-                        ..Fact::default()
-                    };
-                }
-                None
+                let mir::AggregateKind::Adt(did, variant, args, ..) = &**kind
+                else {
+                    return Fact::default();
+                };
+                return Fact {
+                    tag: self.tag_of(*did, args, *variant),
+                    ..Fact::default()
+                };
             }
             _ => None,
         };
         Fact {
             value,
+            ..Fact::default()
+        }
+    }
+
+    /// Reads a value out at another type without changing its bits.
+    ///
+    /// An address and the value inside a nonzero wrapper both come out this
+    /// way, and neither of them is zero.
+    fn reinterpreted(
+        &self,
+        state: &State<'tcx>,
+        operand: &mir::Operand<'tcx>,
+        ty: Ty<'tcx>,
+    ) -> Fact<'tcx> {
+        if self.fact(state, operand).address {
+            return Fact {
+                address: true,
+                value: self.apart_from_zero(ty),
+                ..Fact::default()
+            };
+        }
+        let value = self
+            .monomorphize(operand.ty(&self.mir.local_decls, self.tcx))
+            .filter(|source| self.is_nonzero(*source))
+            .and_then(|_| self.apart_from_zero(ty));
+        Fact {
+            value,
+            ..Fact::default()
+        }
+    }
+
+    /// Applies a binary operator to what its operands are known about.
+    fn operated(
+        &self,
+        state: &State<'tcx>,
+        op: BinOp,
+        pair: &(mir::Operand<'tcx>, mir::Operand<'tcx>),
+    ) -> Fact<'tcx> {
+        let left = self.fact(state, &pair.0);
+        let right = self.fact(state, &pair.1);
+        // The remainder of an unsigned value by the length of a slice lands
+        // below that length, which is what the slice's own bounds check
+        // asks. The length is nonzero wherever this runs, since the
+        // remainder's own check has passed to get here.
+        if op == BinOp::Rem
+            && let Some(Value::Length(of)) = right.value
+            && self.unsigned(&pair.0)
+        {
+            return Fact {
+                order: Some((LenRel::Below, of)),
+                ..Fact::default()
+            };
+        }
+        Fact {
+            value: self.binary(op, left, right),
             ..Fact::default()
         }
     }

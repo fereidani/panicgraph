@@ -77,6 +77,17 @@ pub struct Found<'tcx> {
     pub quiet: bool,
 }
 
+/// What one argument of a call tells the parameter it becomes.
+struct Carried<'tcx> {
+    /// Where the argument's claims live in the caller, so a claim naming it
+    /// can be rewritten to name the parameter.
+    slot: Option<mir::Local>,
+    /// Whether the argument arrives at the type the parameter is declared
+    /// with, which is what makes a claim about it describe the same value.
+    alike: bool,
+    fact: Fact<'tcx>,
+}
+
 /// The claim, when it means the same thing outside the body it was read in.
 ///
 /// A length names a local of that body, so it says nothing anywhere else.
@@ -309,42 +320,79 @@ impl<'tcx> Folder<'_, 'tcx> {
     /// A parameter is told only what the call site knows about the operand
     /// it was passed, and only where the claim means the same thing there:
     /// one written at another type describes a value the callee never sees.
-    fn carried(
+    /// A claim that names another argument is rewritten to name the
+    /// parameter that argument becomes, which is how `i < v.len()` reaches
+    /// the bounds check inside the body that does the indexing.
+    pub fn carried(
         &self,
         state: &State<'tcx>,
         callee: &Folder<'_, 'tcx>,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
     ) -> State<'tcx> {
         let mut entry = callee.blank();
-        for (index, arg) in args.iter().enumerate() {
+        let carried: Vec<Carried<'tcx>> = args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| self.about(state, callee, index, arg))
+            .collect();
+        for (index, held) in carried.iter().enumerate() {
             let local = mir::Local::from_usize(index.saturating_add(1));
-            if callee.escapes(local) {
+            if callee.escapes(local) || !held.alike {
                 continue;
             }
-            let held = self.fact(state, &arg.node);
-            let Some(decl) = callee.mir.local_decls.get(local) else {
-                continue;
-            };
-            let param = callee.monomorphize(decl.ty);
-            let value = held.value.and_then(portable).filter(|value| {
-                // A claim written at another type describes another value.
-                param == value.ty()
+            let order = held.fact.order.and_then(|(rel, of)| {
+                let at = carried
+                    .iter()
+                    .position(|other| other.alike && other.slot == Some(of))?;
+                Some((rel, mir::Local::from_usize(at.saturating_add(1))))
             });
-            let passed =
-                self.monomorphize(arg.node.ty(&self.mir.local_decls, self.tcx));
-            let tag = held.tag.filter(|_| param.is_some() && param == passed);
-            if value.is_none() && tag.is_none() {
+            let fact = Fact { order, ..held.fact };
+            if fact == Fact::default() {
                 continue;
             }
             if let Some(slot) = entry.get_mut(local.as_usize()) {
-                *slot = Fact {
-                    value,
-                    tag,
-                    ..Fact::default()
-                };
+                *slot = fact;
             }
         }
         entry
+    }
+
+    /// What one argument tells the parameter it becomes.
+    fn about(
+        &self,
+        state: &State<'tcx>,
+        callee: &Folder<'_, 'tcx>,
+        index: usize,
+        arg: &rustc_span::Spanned<mir::Operand<'tcx>>,
+    ) -> Carried<'tcx> {
+        let local = mir::Local::from_usize(index.saturating_add(1));
+        let slot = match &arg.node {
+            mir::Operand::Copy(place) | mir::Operand::Move(place) => {
+                self.slot_of(place).map(|slot| root_of(state, slot))
+            }
+            _ => None,
+        };
+        let param = callee
+            .mir
+            .local_decls
+            .get(local)
+            .and_then(|decl| callee.monomorphize(decl.ty));
+        let passed =
+            self.monomorphize(arg.node.ty(&self.mir.local_decls, self.tcx));
+        let alike = param.is_some() && param == passed;
+        let held = self.fact(state, &arg.node);
+        let fact = Fact {
+            value: held.value.and_then(portable).filter(|value| {
+                // A claim written at another type describes another value.
+                param == value.ty()
+            }),
+            order: held.order,
+            same: None,
+            extent: held.extent,
+            address: held.address,
+            tag: held.tag,
+        };
+        Carried { slot, alike, fact }
     }
 
     /// The range a call that picks one of two numbers leaves behind.
