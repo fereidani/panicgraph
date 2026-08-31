@@ -108,7 +108,10 @@ fn listen(args: &Args) -> Result<()> {
 fn analyze(args: &Args, out: &mut String) -> Result<u8> {
     let (graph, solution) = solve(args)?;
     let verdicts = if args.verify {
-        Some(panicgraph::verify::sweep(&run::build_tree(args)?)?)
+        Some(panicgraph::verify::sweep(
+            &run::build_tree(args)?,
+            &args.profile,
+        )?)
     } else {
         None
     };

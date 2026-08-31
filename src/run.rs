@@ -423,6 +423,14 @@ fn rustc_output(args: &[&str]) -> Result<String> {
     String::from_utf8(out.stdout).context("rustc printed invalid utf-8")
 }
 
+/// The directory cargo writes a profile's output to.
+///
+/// Cargo names the `dev` profile's directory `debug` and every other
+/// profile's directory after the profile itself.
+pub(crate) fn profile_dir(profile: &str) -> &str {
+    if profile == "dev" { "debug" } else { profile }
+}
+
 /// Maps a profile name onto the one cargo expects.
 fn cargo_profile(profile: &str) -> &str {
     if profile == "debug" { "dev" } else { profile }

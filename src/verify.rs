@@ -141,11 +141,12 @@ fn entry_categories(demangled: &str) -> Option<CategorySet> {
 /// # Errors
 ///
 /// Returns an error when no library is found or a tool cannot run.
-pub fn sweep(tree: &Path) -> Result<Verdicts> {
-    let objects = libraries_in(tree);
+pub fn sweep(tree: &Path, profile: &str) -> Result<Verdicts> {
+    let objects = libraries_in(tree, run::profile_dir(profile));
     if objects.is_empty() {
         bail!(
-            "no compiled library found under {}; run the analysis first",
+            "no compiled library found under {} for the {profile} profile; \
+             run the analysis first",
             tree.display()
         );
     }
@@ -290,7 +291,7 @@ fn relocation_target(line: &str) -> Option<String> {
 ///
 /// Dependencies are skipped: a finding is about a local function, whose
 /// compiled body sits in the crate's own library.
-fn libraries_in(tree: &Path) -> Vec<PathBuf> {
+fn libraries_in(tree: &Path, profile_dir: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![tree.to_path_buf()];
     // Each directory is visited once, so the walk is bounded by the size of
@@ -317,11 +318,14 @@ fn libraries_in(tree: &Path) -> Vec<PathBuf> {
                             .extension()
                             .is_some_and(|ext| ext == "rlib")
                 });
-            let under_release = path
+            // Only the profile's own output. An artifact left by another
+            // profile was built under other settings, and one under a build
+            // script's directory is not what the report describes.
+            let under_profile = path
                 .parent()
                 .and_then(Path::file_name)
-                .is_some_and(|name| name == "release" || name == "debug");
-            if named_lib && under_release {
+                .is_some_and(|name| name == profile_dir);
+            if named_lib && under_profile {
                 out.push(path);
             }
         }
