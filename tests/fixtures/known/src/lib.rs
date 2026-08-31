@@ -369,3 +369,105 @@ impl<T> Wrap<'_, T> {
 pub fn must_zeroed_chain<P, Q, T>(_p: &P, _q: &Q, w: &Wrap<'_, T>) -> T {
     w.make()
 }
+
+/// Clean. The divisor is at least one whatever the argument holds, which is
+/// a fact about what `max` returns rather than anything written here.
+pub fn clean_divide_by_max(a: u64, b: u64) -> u64 {
+    a / b.max(1)
+}
+
+/// Reaches `divide-by-zero`. Raising a floor to zero raises nothing, so the
+/// divisor is still whatever was passed in.
+pub fn must_divide_by_max_zero(a: u64, b: u64) -> u64 {
+    a / b.max(0)
+}
+
+/// Clean. The remainder's divisor is held away from zero the same way.
+pub fn clean_remainder_by_max(a: u64, b: u64) -> u64 {
+    a % b.max(1)
+}
+
+/// Clean. A ceiling of nine leaves a divisor between one and ten.
+pub fn clean_divide_by_min_plus_one(a: u64, b: u64) -> u64 {
+    a / (b.min(9) + 1)
+}
+
+/// Reaches `divide-by-zero`. A ceiling says nothing about the floor.
+pub fn must_divide_by_min(a: u64, b: u64) -> u64 {
+    a / b.min(9)
+}
+
+/// Clean. Clamping pins the divisor inside a range that excludes zero.
+pub fn clean_divide_by_clamp(a: u64, b: u64) -> u64 {
+    a / b.clamp(1, 100)
+}
+
+/// Raises the floor of a value to one.
+fn at_least_one(x: u64) -> u64 {
+    if x == 0 { 1 } else { x }
+}
+
+/// Clean. What a function returns is read from its body, so a divisor a
+/// call holds away from zero settles the check a guard would have settled.
+pub fn clean_divide_by_helper(a: u64, b: u64) -> u64 {
+    a / at_least_one(b)
+}
+
+/// Clean. Each arm of the branch leaves a divisor of at least one, and the
+/// range where they meet holds both.
+pub fn clean_divide_by_either_arm(a: u64, b: u64) -> u64 {
+    let divisor = if b > 10 { b } else { 1 };
+    a / divisor
+}
+
+/// Clean. The guard proves the slice is not empty, and the length carries
+/// that to the read below, which measures it again.
+pub fn clean_index_after_empty_guard(v: &[u8]) -> u8 {
+    if v.is_empty() { 0 } else { v[0] }
+}
+
+/// Clean. A length of at least four admits every index below four.
+pub fn clean_index_after_length_guard(v: &[u8]) -> u8 {
+    if v.len() >= 4 { v[3] } else { 0 }
+}
+
+/// Reaches `index`. A length of at least three does not admit a fourth
+/// element.
+pub fn must_index_past_length_guard(v: &[u8]) -> u8 {
+    if v.len() >= 3 { v[3] } else { 0 }
+}
+
+/// Reaches `remainder-by-zero` but not `index`: a remainder by a length
+/// lands inside the slice, and an empty one is caught by the remainder's
+/// own check.
+pub fn must_modulo_length(v: &[u8], i: usize) -> u8 {
+    v[i % v.len()]
+}
+
+/// Clean. A masked index raised by four stays inside eight elements.
+pub fn clean_masked_index_offset(v: &[u8; 8], i: usize) -> u8 {
+    v[(i & 3) + 4]
+}
+
+/// Reaches `index`. The same mask raised one further leaves the slice.
+pub fn must_masked_index_offset(v: &[u8; 8], i: usize) -> u8 {
+    v[(i & 3) + 5]
+}
+
+/// Reaches `explicit`. Refuses anything at or above the limit.
+fn must_be_below(x: u64, limit: u64) -> u64 {
+    assert!(x < limit, "x must be below the limit");
+    x
+}
+
+/// Clean. The callee's own check holds for the arguments this call makes,
+/// so nothing it could raise is reachable from here.
+pub fn clean_precondition_met() -> u64 {
+    must_be_below(3, 10)
+}
+
+/// Reaches `explicit`. Which way the callee's check goes is decided by
+/// values this caller does not settle.
+pub fn must_pass_unchecked_limit(x: u64, limit: u64) -> u64 {
+    must_be_below(x, limit)
+}

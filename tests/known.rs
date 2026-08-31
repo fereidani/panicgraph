@@ -46,6 +46,13 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_zeroed_ref", "explicit"),
     ("must_panic_literal", "explicit"),
     ("must_zeroed_chain", "generic-bound"),
+    ("must_divide_by_max_zero", "divide-by-zero"),
+    ("must_divide_by_min", "divide-by-zero"),
+    ("must_index_past_length_guard", "index"),
+    ("must_modulo_length", "remainder-by-zero"),
+    ("must_masked_index_offset", "index"),
+    ("must_be_below", "explicit"),
+    ("must_pass_unchecked_limit", "explicit"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -58,6 +65,7 @@ const MUST_NOT_PANIC: &[(&str, &str)] = &[
     ("must_write", "unwrap"),
     ("must_not_catch_explicit", "explicit"),
     ("must_dyn_speak", "explicit"),
+    ("must_modulo_length", "index"),
 ];
 
 /// The functions that must be reported with nothing at all.
@@ -78,6 +86,16 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_while_index",
     "clean_nonzero_divide",
     "clean_zeroed_int",
+    "clean_divide_by_max",
+    "clean_remainder_by_max",
+    "clean_divide_by_min_plus_one",
+    "clean_divide_by_clamp",
+    "clean_divide_by_helper",
+    "clean_divide_by_either_arm",
+    "clean_index_after_empty_guard",
+    "clean_index_after_length_guard",
+    "clean_masked_index_offset",
+    "clean_precondition_met",
 ];
 
 /// The functions that must stay clean in a debug build as well.
@@ -98,6 +116,12 @@ const MUST_BE_CLEAN_IN_DEBUG: &[&str] = &[
     "clean_guarded_index_flipped",
     "clean_while_index",
     "clean_nonzero_divide",
+    "clean_divide_by_max",
+    "clean_remainder_by_max",
+    "clean_divide_by_clamp",
+    "clean_divide_by_helper",
+    "clean_divide_by_either_arm",
+    "clean_precondition_met",
 ];
 
 #[test]
