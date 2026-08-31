@@ -275,6 +275,14 @@ front of it, the way codegen resolves them, so a branch neither can take is
 not walked. A test carries into the arm it guards, so a division below
 `if divisor != 0` raises nothing.
 
+Folding reads across a call rather than stopping at one. A callee is walked
+with what the call site knows about its arguments, so a value it returns
+carries a range with it and a precondition it checks can be settled by the
+caller that satisfies it: `left / right.max(1)` divides by something that
+cannot be zero, and `v[i]` under `if v.len() >= 4` is in range for `i` below
+four. Where two arms of a branch meet, what both leave behind survives as a
+range instead of being given up.
+
 The driver injects `-Zalways-encode-mir`. Without it, a dependency keeps MIR
 only for generic and small items, so its concrete functions are opaque and
 the panics inside them cannot be seen.
@@ -309,9 +317,10 @@ Read these before trusting a clean result.
   refuses them all.
 - **This is a may-panic analysis.** A panic that is unreachable for reasons
   the compiler cannot see is still reported. It answers "could this panic",
-  not "will it". Folding settles a check against constants and against what a
-  branch above it proves, and nothing more: an invariant that holds for
-  reasons spread across several functions is still reported.
+  not "will it". Folding settles a check against constants, against what a
+  branch above it proves, and against what walking a callee shows it
+  returns. An invariant that holds for reasons spread further than that, or
+  one carried through a value the walk does not model, is still reported.
 - **The toolchain is pinned.** The driver links against compiler internals,
   which have no stable interface, so it is built for one nightly at a time.
   Updating the toolchain means reinstalling; the tool says so rather than
