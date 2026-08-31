@@ -53,6 +53,10 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_masked_index_offset", "index"),
     ("must_be_below", "explicit"),
     ("must_pass_unchecked_limit", "explicit"),
+    ("Cursor::must_field_written", "index"),
+    ("Cursor::must_field_after_call", "index"),
+    ("Cursor::must_field_of_other", "index"),
+    ("must_wide_index", "index"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -96,6 +100,9 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_index_after_length_guard",
     "clean_masked_index_offset",
     "clean_precondition_met",
+    "Cursor::clean_field_index",
+    "Cursor::clean_field_divide",
+    "clean_byte_index",
 ];
 
 /// The functions that must stay clean in a debug build as well.
@@ -122,6 +129,9 @@ const MUST_BE_CLEAN_IN_DEBUG: &[&str] = &[
     "clean_divide_by_helper",
     "clean_divide_by_either_arm",
     "clean_precondition_met",
+    "Cursor::clean_field_index",
+    "Cursor::clean_field_divide",
+    "clean_byte_index",
 ];
 
 #[test]

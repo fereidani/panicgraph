@@ -25,8 +25,8 @@ use rustc_middle::{
 use crate::{
     sinks::SinkTable,
     state::{
-        Compared, STEPS, State, Subject, Work, escaping, forget, refined,
-        root_of, unwind_to, writes,
+        Compared, Path, Places, STEPS, State, Subject, Work, escaping, forget,
+        refined, root_of, sweep_aliased, sweep_base, unwind_to, writes,
     },
     value::{self, Against, Bounds, Fact, Known, LenRel, Value, truncate},
 };
@@ -92,7 +92,7 @@ pub fn reachable<'tcx>(
     mir: &mir::Body<'tcx>,
 ) -> Reach {
     let mut folder = Folder::new(tcx, inst, env, mir, 0, BUDGET);
-    let entry = vec![Fact::default(); mir.local_decls.len()];
+    let entry = folder.blank();
     folder.run(entry)
 }
 
@@ -167,6 +167,8 @@ struct Folder<'a, 'tcx> {
     env: TypingEnv<'tcx>,
     mir: &'a mir::Body<'tcx>,
     escaped: Vec<bool>,
+    /// The places this body is tracked at, past its locals.
+    places: Places,
     /// How many callees deep this body sits below the one being analysed.
     depth: u32,
     /// Blocks left to spend on callees, shared with every fold below this
@@ -186,15 +188,70 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         depth: u32,
         budget: u32,
     ) -> Self {
+        let places = Places::of(mir);
+        let mut escaped = escaping(mir);
+        // A place is tracked whatever its base does, since what a pointer
+        // could reach is swept where the write happens instead.
+        escaped
+            .resize(mir.local_decls.len().saturating_add(places.len()), false);
         Self {
             tcx,
             inst,
             env,
             mir,
-            escaped: escaping(mir),
+            escaped,
+            places,
             depth,
             budget,
             returns: Returns::Never,
+        }
+    }
+
+    /// A state with nothing known, one claim wide for every local and every
+    /// place the body is tracked at.
+    fn blank(&self) -> State<'tcx> {
+        let width =
+            self.mir.local_decls.len().saturating_add(self.places.len());
+        vec![Fact::default(); width]
+    }
+
+    /// Where a place's claim is recorded, when the walk records one.
+    fn slot_of(&self, place: &mir::Place<'tcx>) -> Option<mir::Local> {
+        let slot = match place.as_local() {
+            Some(local) => local,
+            None => self.places.slot(place)?,
+        };
+        (!self.escapes(slot)).then_some(slot)
+    }
+
+    /// Whether a write through a pointer could land on a place.
+    fn aliased(&self, path: Path) -> bool {
+        path.behind_pointer()
+            || self
+                .escaped
+                .get(path.base.as_usize())
+                .copied()
+                .unwrap_or(true)
+    }
+
+    /// Whether a statement can change what a slot holds.
+    fn touches(&self, stmt: &mir::Statement<'tcx>, slot: mir::Local) -> bool {
+        let Some(path) = self.places.path(slot) else {
+            return writes(stmt, slot);
+        };
+        match &stmt.kind {
+            mir::StatementKind::Assign(pair) => {
+                pair.0.local == path.base
+                    || (pair.0.is_indirect() && self.aliased(path))
+            }
+            mir::StatementKind::SetDiscriminant { place, .. } => {
+                place.local == path.base
+                    || (place.is_indirect() && self.aliased(path))
+            }
+            mir::StatementKind::StorageLive(other)
+            | mir::StatementKind::StorageDead(other) => *other == path.base,
+            mir::StatementKind::Intrinsic(_) => true,
+            _ => false,
         }
     }
 
@@ -207,7 +264,8 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     /// Runs the walk to a fixpoint.
     fn run(&mut self, entry: State<'tcx>) -> Reach {
         let blocks = self.mir.basic_blocks.len();
-        let locals = self.mir.local_decls.len();
+        let locals =
+            self.mir.local_decls.len().saturating_add(self.places.len());
         let mut reach = Reach {
             live: vec![false; blocks],
             settled: vec![false; blocks],
@@ -293,33 +351,29 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         match &stmt.kind {
             mir::StatementKind::Assign(pair) => {
                 let (place, rvalue) = &**pair;
-                match place.as_local() {
-                    Some(local) if !self.escapes(local) => {
-                        // The value is read before the write is applied, so
-                        // an rvalue naming the target reads its old value.
-                        let mut fact = self.rvalue(state, rvalue);
-                        forget(state, local);
-                        if fact.same == Some(local) {
-                            // A link to the local being written says
-                            // nothing.
-                            fact.same = None;
-                        }
-                        if let Some(slot) = state.get_mut(local.as_usize()) {
-                            *slot = fact;
-                        }
-                    }
-                    // A write into part of a place, or through a pointer.
-                    // Only the base can change, since a local whose address
-                    // escaped is never tracked in the first place.
-                    _ => forget(state, place.local),
+                // The value is read before the write is applied, so an
+                // rvalue naming the target reads its old value, and the
+                // slot is found before the write sweeps it.
+                let mut fact = self.rvalue(state, rvalue);
+                let target = self.slot_of(place);
+                self.overwrite(state, place);
+                if fact.same == target {
+                    // A link to the place being written says nothing.
+                    fact.same = None;
+                }
+                if let Some(slot) = target
+                    && let Some(cell) = state.get_mut(slot.as_usize())
+                {
+                    *cell = fact;
                 }
             }
             mir::StatementKind::SetDiscriminant { place, .. } => {
-                forget(state, place.local);
+                self.overwrite(state, place);
             }
             mir::StatementKind::StorageLive(local)
             | mir::StatementKind::StorageDead(local) => {
                 forget(state, *local);
+                sweep_base(state, &self.places, *local);
             }
             mir::StatementKind::Intrinsic(intrinsic) => {
                 if let mir::NonDivergingIntrinsic::Assume(operand) =
@@ -330,6 +384,8 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 {
                     return false;
                 }
+                // Copying between pointers lands wherever one is aimed.
+                sweep_aliased(state, &self.places, &self.escaped);
             }
             mir::StatementKind::FakeRead(..)
             | mir::StatementKind::PlaceMention(..)
@@ -340,6 +396,19 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             | mir::StatementKind::BackwardIncompatibleDropHint { .. } => {}
         }
         true
+    }
+
+    /// Applies a write to a place, forgetting whatever it could reach.
+    ///
+    /// A write into part of a place can land anywhere inside it, so every
+    /// place reached from the same local goes with it; a write through a
+    /// pointer can land wherever a pointer could be aimed, so those go too.
+    fn overwrite(&self, state: &mut State<'tcx>, place: &mir::Place<'tcx>) {
+        forget(state, place.local);
+        sweep_base(state, &self.places, place.local);
+        if place.is_indirect() {
+            sweep_aliased(state, &self.places, &self.escaped);
+        }
     }
 
     /// Follows a terminator into the blocks it can reach.
@@ -398,7 +467,10 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 ..
             } => {
                 let mut after = state.clone();
-                forget(&mut after, place.local);
+                self.overwrite(&mut after, place);
+                // Glue runs a body this walk did not read, and it holds a
+                // pointer to what it drops.
+                sweep_aliased(&mut after, &self.places, &self.escaped);
                 work.merge(*target, after.clone());
                 if let Some(drop) = *drop {
                     work.merge(drop, after);
@@ -456,7 +528,10 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         work: &mut Work<'tcx>,
     ) {
         let mut after = state.clone();
-        forget(&mut after, call.destination.local);
+        let target = self.slot_of(&call.destination);
+        self.overwrite(&mut after, &call.destination);
+        // What the callee was handed a pointer to is not read by this walk.
+        sweep_aliased(&mut after, &self.places, &self.escaped);
         let found = self.inspect(state, call.func, call.args, call.destination);
         if found.quiet
             && let Some(slot) = reach.quiet.get_mut(bb.as_usize())
@@ -464,11 +539,10 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             *slot = true;
         }
         if let Some(value) = found.value
-            && let Some(local) = call.destination.as_local()
-            && !self.escapes(local)
-            && let Some(slot) = after.get_mut(local.as_usize())
+            && let Some(slot) = target
+            && let Some(cell) = after.get_mut(slot.as_usize())
         {
-            *slot = Fact::of(value);
+            *cell = Fact::of(value);
         }
         if let Some(target) = call.target {
             work.merge(target, after);
@@ -600,11 +674,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 else {
                     return None;
                 };
-                let local = root_of(state, place.as_local()?);
-                if self.escapes(local) {
-                    return None;
-                }
-                Some(Value::Length(local))
+                Some(Value::Length(root_of(state, self.slot_of(place)?)))
             }
             // Picking the larger or the smaller of two numbers is what
             // pins a value away from the end of its range, and the two are
@@ -746,7 +816,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         callee: &Folder<'_, 'tcx>,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
     ) -> State<'tcx> {
-        let mut entry = vec![Fact::default(); callee.mir.local_decls.len()];
+        let mut entry = callee.blank();
         for (index, arg) in args.iter().enumerate() {
             let local = mir::Local::from_usize(index.saturating_add(1));
             if callee.escapes(local) {
@@ -804,15 +874,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     ) -> Option<Bounds<'tcx>> {
         let ty =
             self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))?;
-        if !matches!(ty.kind(), ty::Int(_) | ty::Uint(_)) {
-            return None;
-        }
-        let seed = Known {
-            bits: 0,
-            ty,
-            width: self.width(ty)?,
-        };
-        let whole = Bounds::new(seed.type_min(), seed.type_max())?;
+        let whole = self.whole(ty)?;
         let Some(value) = self.fact(state, operand).value else {
             return Some(whole);
         };
@@ -826,6 +888,19 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 .bounds()
                 .unwrap_or(whole),
         )
+    }
+
+    /// Every value a type admits.
+    fn whole(&self, ty: Ty<'tcx>) -> Option<Bounds<'tcx>> {
+        if !matches!(ty.kind(), ty::Int(_) | ty::Uint(_)) {
+            return None;
+        }
+        let seed = Known {
+            bits: 0,
+            ty,
+            width: self.width(ty)?,
+        };
+        Bounds::new(seed.type_min(), seed.type_max())
     }
 
     /// Whether a type is the standard library's nonzero wrapper.
@@ -859,10 +934,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         else {
             return None;
         };
-        let read = place.as_local()?;
-        if self.escapes(read) {
-            return None;
-        }
+        let read = root_of(state, self.slot_of(place)?);
         let ty =
             self.monomorphize(discr.ty(&self.mir.local_decls, self.tcx))?;
         Some(Subject {
@@ -915,14 +987,14 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         // The facts read at the branch have to be the ones that stood when
         // the comparison ran, so nothing it involved may change in between.
         let after = &block.statements[at.saturating_add(1)..];
-        let touched = |s: &mir::Statement<'_>| {
-            writes(s, local)
-                || writes(s, raw)
-                || writes(s, result)
-                || measured.source.is_some_and(|of| writes(s, of))
+        let touched = |s: &mir::Statement<'tcx>| {
+            self.touches(s, local)
+                || self.touches(s, raw)
+                || self.touches(s, result)
+                || measured.source.is_some_and(|of| self.touches(s, of))
                 || match measured.against {
                     Against::Constant(_) => false,
-                    Against::Length(of) => writes(s, of),
+                    Against::Length(of) => self.touches(s, of),
                 }
         };
         if after.iter().any(touched) {
@@ -942,7 +1014,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     ) -> Option<Compared<'tcx>> {
         let read = |operand: &mir::Operand<'tcx>| match operand {
             mir::Operand::Copy(place) | mir::Operand::Move(place) => {
-                place.as_local()
+                self.slot_of(place)
             }
             _ => None,
         };
@@ -1088,10 +1160,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         else {
             return None;
         };
-        let local = root_of(state, place.as_local()?);
-        if self.escapes(local) {
-            return None;
-        }
+        let local = root_of(state, self.slot_of(place)?);
         let ty =
             self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))?;
         let pointee = match ty.kind() {
@@ -1126,11 +1195,9 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         operand: &mir::Operand<'tcx>,
     ) -> Fact<'tcx> {
         match operand {
-            mir::Operand::Copy(place) | mir::Operand::Move(place) => {
-                place.as_local().map_or_else(Fact::default, |local| {
-                    Self::known_at(state, local)
-                })
-            }
+            mir::Operand::Copy(place) | mir::Operand::Move(place) => self
+                .slot_of(place)
+                .map_or_else(Fact::default, |slot| Self::known_at(state, slot)),
             mir::Operand::Constant(konst) => self
                 .constant(konst)
                 .map(Value::Exact)
@@ -1185,12 +1252,9 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         else {
             return fact;
         };
-        let Some(local) = place.as_local() else {
+        let Some(local) = self.slot_of(place) else {
             return fact;
         };
-        if self.escapes(local) {
-            return fact;
-        }
         let root = root_of(state, local);
         if !self.escapes(root) {
             fact.same = Some(root);
@@ -1226,13 +1290,26 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     }
 
     /// Widens or narrows a value to another integer type.
+    ///
+    /// A value nothing is known about still lies inside its own type, and
+    /// that is the whole claim where the source is narrow: a byte read into
+    /// an index is below two hundred and fifty six wherever it came from.
     fn cast(
         &self,
         state: &State<'tcx>,
         operand: &mir::Operand<'tcx>,
         ty: Ty<'tcx>,
     ) -> Option<Value<'tcx>> {
-        let value = self.fact(state, operand).value?;
+        let source =
+            self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))?;
+        let held = self.fact(state, operand).value;
+        if matches!(held, Some(Value::Length(_))) {
+            return None;
+        }
+        let value = match held {
+            Some(value) if value.ty() == Some(source) => value,
+            _ => Value::Within(self.whole(source)?),
+        };
         let ty = self.monomorphize(ty)?;
         let width = self.width(ty)?;
         match value {

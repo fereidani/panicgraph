@@ -471,3 +471,69 @@ pub fn clean_precondition_met() -> u64 {
 pub fn must_pass_unchecked_limit(x: u64, limit: u64) -> u64 {
     must_be_below(x, limit)
 }
+
+/// A structure whose fields the checks below are written against.
+pub struct Cursor {
+    at: usize,
+    step: u64,
+    room: [u8; 16],
+}
+
+impl Cursor {
+    /// Clean. The guard proves the field is in range, and the read measures
+    /// the same place rather than a fresh copy of it.
+    pub fn clean_field_index(&self) -> u8 {
+        if self.at < 16 { self.room[self.at] } else { 0 }
+    }
+
+    /// Clean. The divisor is guarded once and read twice.
+    pub fn clean_field_divide(&self, a: u64) -> u64 {
+        if self.step == 0 {
+            0
+        } else {
+            (a / self.step).wrapping_add(a % self.step)
+        }
+    }
+
+    /// Reaches `index`. The field is written between the guard and the
+    /// read, so what the guard proved is about the earlier value.
+    pub fn must_field_written(&mut self) -> u8 {
+        if self.at < 16 {
+            self.at = self.at.wrapping_add(1);
+            self.room[self.at]
+        } else {
+            0
+        }
+    }
+
+    /// Reaches `index`. A call in between could change the field, and what
+    /// it runs is a body this walk did not read.
+    pub fn must_field_after_call(&mut self) -> u8 {
+        if self.at < 16 {
+            self.bump();
+            self.room[self.at]
+        } else {
+            0
+        }
+    }
+
+    #[inline(never)]
+    fn bump(&mut self) {
+        self.at = self.at.wrapping_add(1);
+    }
+
+    /// Reaches `index`. The guard measures another object's field.
+    pub fn must_field_of_other(&self, other: &Self) -> u8 {
+        if other.at < 16 { self.room[self.at] } else { 0 }
+    }
+}
+
+/// Clean. Every byte is an index into a table with a place for each.
+pub fn clean_byte_index(table: &[u8; 256], byte: u8) -> u8 {
+    table[usize::from(byte)]
+}
+
+/// Reaches `index`. A wider value has more values than the table has room.
+pub fn must_wide_index(table: &[u8; 256], word: u16) -> u8 {
+    table[usize::from(word)]
+}

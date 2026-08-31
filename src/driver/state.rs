@@ -347,3 +347,172 @@ pub fn unwind_to<'tcx>(
         work.merge(target, state.clone());
     }
 }
+
+/// One step from a local to a place inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Through a pointer.
+    Deref,
+    /// Into a field.
+    Field(u32),
+    /// Into the payload of one variant.
+    Variant(u32),
+}
+
+/// How far from a local a tracked place may sit.
+const REACH: usize = 3;
+
+/// How many places one body may be tracked at.
+///
+/// Every slot costs a claim in every block's entry state, so the table is
+/// capped rather than following a body wherever it goes.
+const TRACKED: usize = 32;
+
+/// A place the walk records claims against.
+///
+/// A field read twice is two locals and one place, and it is the place the
+/// claim belongs to: what a guard proves about the first read has to be
+/// there for the second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Path {
+    /// The local the place is reached from.
+    pub base: mir::Local,
+    steps: [Option<Step>; REACH],
+}
+
+impl Path {
+    /// The place, when it is one this walk can name.
+    fn of(place: &mir::Place<'_>) -> Option<Self> {
+        if place.projection.is_empty() {
+            return None;
+        }
+        let mut steps = [None; REACH];
+        for (slot, element) in steps.iter_mut().zip(place.projection) {
+            *slot = Some(match element {
+                mir::ProjectionElem::Deref => Step::Deref,
+                mir::ProjectionElem::Field(field, _) => {
+                    Step::Field(field.as_u32())
+                }
+                mir::ProjectionElem::Downcast(_, variant) => {
+                    Step::Variant(variant.as_u32())
+                }
+                // An index is a value in its own right, and a subslice or a
+                // cast is not a place this walk can tell apart from another.
+                _ => return None,
+            });
+        }
+        if place.projection.len() > REACH {
+            return None;
+        }
+        Some(Self {
+            base: place.local,
+            steps,
+        })
+    }
+
+    /// Whether the place is reached through a pointer, so a write through
+    /// any pointer could land on it.
+    pub fn behind_pointer(self) -> bool {
+        self.steps.iter().flatten().any(|step| *step == Step::Deref)
+    }
+}
+
+/// The places one body is tracked at, and where each sits in the state.
+///
+/// Slots are laid out past the locals, so a place is named by a local index
+/// like any other claim and every rule about forgetting and merging applies
+/// to it unchanged.
+pub struct Places {
+    paths: Vec<Path>,
+    first: usize,
+}
+
+impl Places {
+    /// Collects the places a body reads or writes.
+    pub fn of(mir: &mir::Body<'_>) -> Self {
+        let mut collect = Collect { found: Vec::new() };
+        mir::visit::Visitor::visit_body(&mut collect, mir);
+        Self {
+            paths: collect.found,
+            first: mir.local_decls.len(),
+        }
+    }
+
+    /// How many places are tracked.
+    pub const fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    /// The slot a place is recorded at.
+    pub fn slot(&self, place: &mir::Place<'_>) -> Option<mir::Local> {
+        let path = Path::of(place)?;
+        let at = self.paths.iter().position(|held| *held == path)?;
+        Some(mir::Local::from_usize(self.first.saturating_add(at)))
+    }
+
+    /// The place a slot records, when the slot is one.
+    pub fn path(&self, slot: mir::Local) -> Option<Path> {
+        self.paths
+            .get(slot.as_usize().checked_sub(self.first)?)
+            .copied()
+    }
+
+    /// Every slot with the place it records.
+    pub fn each(&self) -> impl Iterator<Item = (mir::Local, Path)> + '_ {
+        self.paths.iter().enumerate().map(|(at, path)| {
+            (mir::Local::from_usize(self.first.saturating_add(at)), *path)
+        })
+    }
+}
+
+/// Gathers the places of a body as the visitor walks it.
+struct Collect {
+    found: Vec<Path>,
+}
+
+impl<'tcx> mir::visit::Visitor<'tcx> for Collect {
+    fn visit_place(
+        &mut self,
+        place: &mir::Place<'tcx>,
+        _: mir::visit::PlaceContext,
+        _: mir::Location,
+    ) {
+        if self.found.len() >= TRACKED {
+            return;
+        }
+        let Some(path) = Path::of(place) else {
+            return;
+        };
+        if !self.found.contains(&path) {
+            self.found.push(path);
+        }
+    }
+}
+
+/// Forgets every place reached from a local.
+///
+/// A write to the local puts a different value there, and a write into part
+/// of it can land anywhere inside, so neither leaves a claim about what it
+/// holds standing.
+pub fn sweep_base(state: &mut State<'_>, places: &Places, base: mir::Local) {
+    for (slot, path) in places.each() {
+        if path.base == base {
+            forget(state, slot);
+        }
+    }
+}
+
+/// Forgets every place a write through a pointer could reach.
+///
+/// That is every place read through a pointer, and every place inside a
+/// local whose address was taken, since a pointer can only be aimed at one
+/// of those.
+pub fn sweep_aliased(state: &mut State<'_>, places: &Places, escaped: &[bool]) {
+    for (slot, path) in places.each() {
+        if path.behind_pointer()
+            || escaped.get(path.base.as_usize()).copied().unwrap_or(true)
+        {
+            forget(state, slot);
+        }
+    }
+}
