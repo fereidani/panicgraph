@@ -377,11 +377,12 @@ impl<'g> Solver<'g> {
         let mut queue: VecDeque<FuncId> =
             (0..n).map(FuncId::from_index).collect();
 
-        // Termination: a node's state only ever grows, since categories are
-        // added and never removed and `unwinds` only moves from false to
-        // true. Each accepted update therefore consumes at least one of the
-        // finitely many bits, giving the bound below.
-        let bound = n.saturating_mul(ALL.len() + 1).saturating_add(1);
+        // Termination: a node's state only ever grows, since a category is
+        // added to a plane and never taken out of it. Each accepted update
+        // therefore sets at least one bit that was clear, and a node holds
+        // one bit per category in each of the two termination planes, so
+        // that is how many the graph has to give.
+        let bound = n.saturating_mul(2 * ALL.len()).saturating_add(1);
         let mut updates = 0usize;
 
         while let Some(id) = queue.pop_front() {
