@@ -414,6 +414,12 @@ fn rustc_output(args: &[&str]) -> Result<String> {
         cmd.env("RUSTUP_TOOLCHAIN", toolchain);
     }
     let out = cmd.args(args).output().context("could not run rustc")?;
+    ensure!(
+        out.status.success(),
+        "rustc {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
     String::from_utf8(out.stdout).context("rustc printed invalid utf-8")
 }
 

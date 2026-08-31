@@ -91,6 +91,13 @@ fn run(args: &[&str]) -> Result<String, String> {
         .args(args)
         .output()
         .map_err(|err| format!("could not run {rustc}: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{rustc} {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
     String::from_utf8(output.stdout)
         .map_err(|_| format!("{rustc} printed invalid utf-8"))
 }

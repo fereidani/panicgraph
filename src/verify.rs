@@ -18,7 +18,7 @@ use std::{
     process::Command,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::{
     Category, CategorySet, FuncKey, run,
@@ -161,6 +161,15 @@ pub fn sweep(tree: &Path) -> Result<Verdicts> {
             .with_context(|| {
                 format!("could not disassemble {}", object.display())
             })?;
+        // A listing cut short reads as a function that calls nothing, which
+        // is the shape of a panic the optimizer removed. Refuse the sweep
+        // rather than report an absence the tool never established.
+        ensure!(
+            listing.status.success(),
+            "disassembling {} failed: {}",
+            object.display(),
+            String::from_utf8_lossy(&listing.stderr).trim()
+        );
         graph.read(&String::from_utf8_lossy(&listing.stdout));
     }
     Ok(graph.resolve())

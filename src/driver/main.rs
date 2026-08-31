@@ -110,6 +110,9 @@ fn build_config(tcx: TyCtxt<'_>) -> BuildConfig {
 /// Asks the real compiler where its sysroot is.
 fn sysroot() -> Option<String> {
     let out = Command::new("rustc").arg("--print=sysroot").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
     let text = String::from_utf8(out.stdout).ok()?;
     Some(text.trim().to_owned())
 }
