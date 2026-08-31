@@ -269,6 +269,13 @@ pub struct Fact<'tcx> {
     /// handed the claim recorded against that slice when it is read, so
     /// both describe the same quantity.
     pub extent: Option<Bounds<'tcx>>,
+    /// The tag the enum at this place carries, which is the value its
+    /// discriminant reads as rather than the index of the variant.
+    ///
+    /// It is what makes a match fold: an option built as `Some` never takes
+    /// the arm that panics, and the body holding that arm is then a body
+    /// that raises nothing.
+    pub tag: Option<u128>,
 }
 
 impl<'tcx> Fact<'tcx> {
@@ -279,6 +286,7 @@ impl<'tcx> Fact<'tcx> {
             order: None,
             same: None,
             extent: None,
+            tag: None,
         }
     }
 
@@ -300,6 +308,7 @@ impl<'tcx> Fact<'tcx> {
                 (Some(held), Some(arriving)) => held.hull(arriving),
                 _ => None,
             },
+            tag: (self.tag == other.tag).then_some(self.tag).flatten(),
         }
     }
 

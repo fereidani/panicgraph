@@ -6,6 +6,7 @@
 
 #![feature(rustc_private)]
 
+extern crate rustc_abi;
 extern crate rustc_driver;
 extern crate rustc_hir;
 extern crate rustc_interface;
@@ -17,6 +18,7 @@ mod extract;
 mod fold;
 mod sinks;
 mod state;
+mod summary;
 mod value;
 
 use std::{path::PathBuf, process::Command};

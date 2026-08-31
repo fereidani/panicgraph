@@ -57,6 +57,9 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("Cursor::must_field_after_call", "index"),
     ("Cursor::must_field_of_other", "index"),
     ("must_wide_index", "index"),
+    ("must_unwrap_argument", "unwrap"),
+    ("must_unwrap_wrong_arm", "unwrap"),
+    ("must_match_panic", "explicit"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -103,6 +106,10 @@ const MUST_BE_CLEAN: &[&str] = &[
     "Cursor::clean_field_index",
     "Cursor::clean_field_divide",
     "clean_byte_index",
+    "clean_unwrap_built",
+    "clean_unwrap_matched",
+    "clean_unwrap_ok",
+    "clean_match_panic",
 ];
 
 /// The functions that must stay clean in a debug build as well.
@@ -132,6 +139,10 @@ const MUST_BE_CLEAN_IN_DEBUG: &[&str] = &[
     "Cursor::clean_field_index",
     "Cursor::clean_field_divide",
     "clean_byte_index",
+    "clean_unwrap_built",
+    "clean_unwrap_matched",
+    "clean_unwrap_ok",
+    "clean_match_panic",
 ];
 
 #[test]

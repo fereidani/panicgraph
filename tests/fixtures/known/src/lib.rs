@@ -537,3 +537,58 @@ pub fn clean_byte_index(table: &[u8; 256], byte: u8) -> u8 {
 pub fn must_wide_index(table: &[u8; 256], word: u16) -> u8 {
     table[usize::from(word)]
 }
+
+/// Clean. The value was built here, so the arm that panics is not one this
+/// call can take.
+pub fn clean_unwrap_built(x: u8) -> u8 {
+    Some(x).unwrap()
+}
+
+/// Clean. The arm proves which variant the value holds.
+pub fn clean_unwrap_matched(o: Option<u8>) -> u8 {
+    match o {
+        Some(_) => o.unwrap(),
+        None => 0,
+    }
+}
+
+/// Clean. The same for a result built here.
+pub fn clean_unwrap_ok(x: u8) -> u8 {
+    let r: Result<u8, ()> = Ok(x);
+    r.unwrap()
+}
+
+/// Reaches `unwrap`. Which variant arrives is the caller's choice.
+pub fn must_unwrap_argument(o: Option<u8>) -> u8 {
+    o.unwrap()
+}
+
+/// Reaches `unwrap`. The arm it is written in proves the empty variant.
+pub fn must_unwrap_wrong_arm(o: Option<u8>) -> u8 {
+    match o {
+        Some(v) => v,
+        None => o.unwrap(),
+    }
+}
+
+/// Two variants, one of which the function below refuses.
+pub enum Shape {
+    Round,
+    Flat,
+}
+
+/// Reaches `explicit`. Which variant arrives is the caller's choice.
+pub fn must_match_panic(shape: Shape) -> u8 {
+    match shape {
+        Shape::Round => 1,
+        Shape::Flat => panic!("flat"),
+    }
+}
+
+/// Clean. The variant is fixed here, so the arm that panics is dead.
+pub fn clean_match_panic() -> u8 {
+    match Shape::Round {
+        Shape::Round => 1,
+        Shape::Flat => panic!("flat"),
+    }
+}

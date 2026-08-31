@@ -23,28 +23,13 @@ use rustc_middle::{
 };
 
 use crate::{
-    sinks::SinkTable,
     state::{
         Compared, Path, Places, STEPS, State, Subject, Work, escaping, forget,
         refined, root_of, sweep_aliased, sweep_base, unwind_to, writes,
     },
+    summary::{BUDGET, Returns, portable},
     value::{self, Against, Bounds, Fact, Known, LenRel, Value, truncate},
 };
-
-/// How far a chain of calls is followed for the value it returns.
-///
-/// Each step is one more body on the stack, and the calls worth reading a
-/// value out of sit shallow: `cmp::max` is one step above `Ord::max`, which
-/// is the deepest of them.
-const DEPTH: u32 = 3;
-
-/// How many blocks folding one body may spend on the callees it reads
-/// values out of.
-///
-/// A summary is only asked for where the answer would settle a check, so
-/// the budget is rarely touched. It is what keeps a body that calls into a
-/// wide subgraph from paying for all of it.
-const BUDGET: u32 = 4096;
 
 /// What one instantiation of a body reaches.
 pub struct Reach {
@@ -96,41 +81,6 @@ pub fn reachable<'tcx>(
     folder.run(entry)
 }
 
-/// What every path out of a body was found to return.
-#[derive(Debug, Clone, Copy)]
-enum Returns<'tcx> {
-    /// No path that returns has been walked.
-    Never,
-    /// Every such path leaves a value this claim admits.
-    Held(Value<'tcx>),
-    /// Nothing definite.
-    Anything,
-}
-
-impl<'tcx> Returns<'tcx> {
-    /// Adds what one path out of the body leaves behind.
-    fn met(self, value: Option<Value<'tcx>>) -> Self {
-        match (self, value) {
-            (Self::Anything, _) | (_, None) => Self::Anything,
-            (Self::Never, Some(found)) => Self::Held(found),
-            (Self::Held(held), Some(found)) => {
-                held.join(found).map_or(Self::Anything, Self::Held)
-            }
-        }
-    }
-
-    /// The claim every path agrees on.
-    ///
-    /// A body no path returns from has none: the call never comes back, so
-    /// there is no value for the caller to read.
-    const fn claim(self) -> Option<Value<'tcx>> {
-        match self {
-            Self::Held(value) => Some(value),
-            Self::Never | Self::Anything => None,
-        }
-    }
-}
-
 /// The parts of a call the walk reads.
 #[derive(Clone, Copy)]
 struct Call<'a, 'tcx> {
@@ -141,46 +91,27 @@ struct Call<'a, 'tcx> {
     unwind: UnwindAction,
 }
 
-/// What folding a callee at one call site found.
-#[derive(Debug, Clone, Copy, Default)]
-struct Found<'tcx> {
-    /// The value every path out of the callee leaves behind.
-    value: Option<Value<'tcx>>,
-    /// Whether the callee, walked with these arguments, can still raise.
-    quiet: bool,
-}
-
-/// The claim, when it means the same thing outside the body it was read in.
-///
-/// A length names a local of that body, so it says nothing anywhere else.
-const fn portable(value: Value<'_>) -> Option<Value<'_>> {
-    match value {
-        Value::Exact(_) | Value::Other(_) | Value::Within(_) => Some(value),
-        Value::Length(_) => None,
-    }
-}
-
 /// Folds one body against the arguments it was instantiated with.
-struct Folder<'a, 'tcx> {
-    tcx: TyCtxt<'tcx>,
-    inst: Instance<'tcx>,
-    env: TypingEnv<'tcx>,
-    mir: &'a mir::Body<'tcx>,
-    escaped: Vec<bool>,
+pub struct Folder<'a, 'tcx> {
+    pub tcx: TyCtxt<'tcx>,
+    pub inst: Instance<'tcx>,
+    pub env: TypingEnv<'tcx>,
+    pub mir: &'a mir::Body<'tcx>,
+    pub escaped: Vec<bool>,
     /// The places this body is tracked at, past its locals.
-    places: Places,
+    pub places: Places,
     /// How many callees deep this body sits below the one being analysed.
-    depth: u32,
+    pub depth: u32,
     /// Blocks left to spend on callees, shared with every fold below this
     /// one so the whole chain costs what one body is allowed.
-    budget: u32,
+    pub budget: u32,
     /// What the walk has found the body to return.
-    returns: Returns<'tcx>,
+    pub returns: Returns<'tcx>,
 }
 
 impl<'a, 'tcx> Folder<'a, 'tcx> {
     /// Prepares to fold one body.
-    fn new(
+    pub fn new(
         tcx: TyCtxt<'tcx>,
         inst: Instance<'tcx>,
         env: TypingEnv<'tcx>,
@@ -209,14 +140,14 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
 
     /// A state with nothing known, one claim wide for every local and every
     /// place the body is tracked at.
-    fn blank(&self) -> State<'tcx> {
+    pub fn blank(&self) -> State<'tcx> {
         let width =
             self.mir.local_decls.len().saturating_add(self.places.len());
         vec![Fact::default(); width]
     }
 
     /// Where a place's claim is recorded, when the walk records one.
-    fn slot_of(&self, place: &mir::Place<'tcx>) -> Option<mir::Local> {
+    pub fn slot_of(&self, place: &mir::Place<'tcx>) -> Option<mir::Local> {
         let slot = match place.as_local() {
             Some(local) => local,
             None => self.places.slot(place)?,
@@ -257,12 +188,12 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
 
     /// Whether a pointer could be aimed at a local, so its value is never
     /// assumed. A local the walk has never heard of is treated as escaping.
-    fn escapes(&self, local: mir::Local) -> bool {
+    pub fn escapes(&self, local: mir::Local) -> bool {
         self.escaped.get(local.as_usize()).copied().unwrap_or(true)
     }
 
     /// Runs the walk to a fixpoint.
-    fn run(&mut self, entry: State<'tcx>) -> Reach {
+    pub fn run(&mut self, entry: State<'tcx>) -> Reach {
         let blocks = self.mir.basic_blocks.len();
         let locals =
             self.mir.local_decls.len().saturating_add(self.places.len());
@@ -367,8 +298,24 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                     *cell = fact;
                 }
             }
-            mir::StatementKind::SetDiscriminant { place, .. } => {
+            mir::StatementKind::SetDiscriminant {
+                place,
+                variant_index,
+            } => {
+                let tag = self.enum_at(place).and_then(|ty| match ty.kind() {
+                    ty::Adt(def, _) => Some(
+                        def.discriminant_for_variant(self.tcx, *variant_index)
+                            .val,
+                    ),
+                    _ => None,
+                });
+                let slot = self.slot_of(place);
                 self.overwrite(state, place);
+                if let Some(slot) = slot
+                    && let Some(cell) = state.get_mut(slot.as_usize())
+                {
+                    cell.tag = tag;
+                }
             }
             mir::StatementKind::StorageLive(local)
             | mir::StatementKind::StorageDead(local) => {
@@ -504,10 +451,13 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             return;
         }
         let subject = self.subject_of(bb, discr, &state);
+        let tagged = self.tagged(bb, discr, &state);
         let mut taken = Vec::new();
         for (value, target) in targets.iter() {
             taken.push(value);
-            work.merge(target, refined(&state, subject, Some(value), true));
+            let mut arm = refined(&state, subject, Some(value), true);
+            Self::teach_tag(&mut arm, tagged, Some(value));
+            work.merge(target, arm);
         }
         // The fallback covers every value not listed, so it settles the
         // condition only when one value is left over.
@@ -515,7 +465,86 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             [only] => Some(*only),
             _ => None,
         };
-        work.merge(targets.otherwise(), refined(&state, subject, rest, false));
+        let mut arm = refined(&state, subject, rest, false);
+        Self::teach_tag(&mut arm, tagged, self.leftover(tagged, &taken));
+        work.merge(targets.otherwise(), arm);
+    }
+
+    /// The place a branch's discriminant was read from.
+    ///
+    /// Only this block is read, and the reading may not be undone before
+    /// the branch, so what the arm proves is about the value it branched
+    /// on.
+    fn tagged(
+        &self,
+        bb: BasicBlock,
+        discr: &mir::Operand<'tcx>,
+        state: &State<'tcx>,
+    ) -> Option<(mir::Local, Ty<'tcx>)> {
+        let (mir::Operand::Copy(place) | mir::Operand::Move(place)) = discr
+        else {
+            return None;
+        };
+        let read = place.as_local()?;
+        let block = &self.mir.basic_blocks[bb];
+        let at = block.statements.iter().rposition(|s| writes(s, read))?;
+        let mir::StatementKind::Assign(pair) = &block.statements[at].kind
+        else {
+            return None;
+        };
+        if pair.0.as_local() != Some(read) {
+            return None;
+        }
+        let mir::Rvalue::Discriminant(of) = &pair.1 else {
+            return None;
+        };
+        let slot = self.slot_of(of)?;
+        let ty = self.enum_at(of)?;
+        let after = &block.statements[at.saturating_add(1)..];
+        if after
+            .iter()
+            .any(|s| self.touches(s, read) || self.touches(s, slot))
+        {
+            return None;
+        }
+        Some((root_of(state, slot), ty))
+    }
+
+    /// The one tag a fallback arm proves, when every other is named.
+    fn leftover(
+        &self,
+        tagged: Option<(mir::Local, Ty<'tcx>)>,
+        taken: &[u128],
+    ) -> Option<u128> {
+        let ty::Adt(def, _) = tagged?.1.kind() else {
+            return None;
+        };
+        let mut left = None;
+        for variant in def.variants().indices() {
+            let tag = def.discriminant_for_variant(self.tcx, variant).val;
+            if taken.contains(&tag) {
+                continue;
+            }
+            if left.is_some() {
+                return None;
+            }
+            left = Some(tag);
+        }
+        left
+    }
+
+    /// Records the tag an arm proves the enum carries.
+    fn teach_tag(
+        state: &mut State<'tcx>,
+        tagged: Option<(mir::Local, Ty<'tcx>)>,
+        tag: Option<u128>,
+    ) {
+        let (Some((slot, _)), Some(tag)) = (tagged, tag) else {
+            return;
+        };
+        if let Some(cell) = state.get_mut(slot.as_usize()) {
+            cell.tag = Some(tag);
+        }
     }
 
     /// Follows a call, recording what walking the callee found.
@@ -585,338 +614,6 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 }
             }
         }
-    }
-
-    /// What a call was found to do.
-    ///
-    /// A contract answers first, since it holds for every implementation
-    /// the resolution can reach and costs nothing to read. Anything else is
-    /// answered by folding the callee, which is what carries a value
-    /// through a call the caller cannot see past, and what proves that a
-    /// precondition the caller satisfies leaves the callee nothing to
-    /// raise.
-    fn inspect(
-        &mut self,
-        state: &State<'tcx>,
-        func: &mir::Operand<'tcx>,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
-        destination: mir::Place<'tcx>,
-    ) -> Found<'tcx> {
-        let Some(ty) =
-            self.monomorphize(func.ty(&self.mir.local_decls, self.tcx))
-        else {
-            return Found::default();
-        };
-        if let Some(value) = self.contracted(state, ty, args, destination) {
-            return Found {
-                value: Some(value),
-                quiet: false,
-            };
-        }
-        if !self.worth_folding(state, args, destination) {
-            return Found::default();
-        }
-        self.folded(state, ty, args)
-    }
-
-    /// Whether folding a callee could tell this call site anything.
-    ///
-    /// A call the walk knows nothing about the arguments of folds to what
-    /// the callee does everywhere, which the graph it belongs to already
-    /// accounts for. What earns the walk is an argument carrying a fact
-    /// into the callee, or a result a check downstream can read.
-    fn worth_folding(
-        &self,
-        state: &State<'tcx>,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
-        destination: mir::Place<'tcx>,
-    ) -> bool {
-        let known = |arg: &rustc_span::Spanned<mir::Operand<'tcx>>| {
-            self.fact(state, &arg.node)
-                .value
-                .and_then(portable)
-                .is_some()
-        };
-        if args.iter().any(known) {
-            return true;
-        }
-        let result = destination.ty(&self.mir.local_decls, self.tcx).ty;
-        self.monomorphize(result)
-            .and_then(|ty| self.width(ty))
-            .is_some()
-    }
-
-    /// The value a call returns by the contract of what it calls.
-    ///
-    /// Only functions whose result the checks downstream consume are
-    /// listed, and only ones whose contract guarantees the claim for every
-    /// implementation the resolution can reach: a slice's length is its
-    /// metadata, and a nonzero wrapper's validity invariant keeps what it
-    /// yields apart from zero.
-    fn contracted(
-        &self,
-        state: &State<'tcx>,
-        func: Ty<'tcx>,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
-        destination: mir::Place<'tcx>,
-    ) -> Option<Value<'tcx>> {
-        let ty::FnDef(did, _) = *func.kind() else {
-            return None;
-        };
-        if self.tcx.crate_name(did.krate).as_str() != "core" {
-            return None;
-        }
-        match SinkTable::def_path(self.tcx, did).as_str() {
-            "slice::len" => {
-                let receiver = args.first()?;
-                let (mir::Operand::Copy(place) | mir::Operand::Move(place)) =
-                    &receiver.node
-                else {
-                    return None;
-                };
-                Some(Value::Length(root_of(state, self.slot_of(place)?)))
-            }
-            // Picking the larger or the smaller of two numbers is what
-            // pins a value away from the end of its range, and the two are
-            // read here rather than folded because the body compares
-            // through references the walk does not follow. A primitive
-            // cannot carry another crate's implementation of the trait, so
-            // the body reached is the one this claim describes.
-            "cmp::Ord::max" => self.picked(state, true, args),
-            "cmp::Ord::min" => self.picked(state, false, args),
-            "num::nonzero::get" => {
-                let receiver = args.first()?;
-                let source = self.monomorphize(
-                    receiver.node.ty(&self.mir.local_decls, self.tcx),
-                )?;
-                if !self.is_nonzero(source) {
-                    return None;
-                }
-                self.apart_from_zero(
-                    destination.ty(&self.mir.local_decls, self.tcx).ty,
-                )
-            }
-            _ => None,
-        }
-    }
-
-    /// What a call does, worked out by folding the callee.
-    ///
-    /// The callee is walked the way this body is, told what the call site
-    /// knows about each argument. Every path out of it has to agree on the
-    /// value it leaves, which is what settles a check written against the
-    /// result of a call: `right.max(1)` returns either the argument or a
-    /// value above it, so it is never zero and the division below it raises
-    /// nothing. Every block the compiler will generate for it has to be one
-    /// that cannot raise, which is what clears a caller whose arguments
-    /// satisfy a precondition the callee checks.
-    ///
-    /// The walk is bounded twice over. `DEPTH` caps how far a chain of
-    /// calls is followed, which bounds the stack, and the budget is spent
-    /// across every callee one body reaches, which bounds the work.
-    fn folded(
-        &mut self,
-        state: &State<'tcx>,
-        func: Ty<'tcx>,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
-    ) -> Found<'tcx> {
-        let Some(callee) = self.target(func) else {
-            return Found::default();
-        };
-        let mir = self.tcx.instance_mir(callee.def);
-        // A shim rearranges what it was passed, so its parameters are not
-        // the operands at the call site.
-        if mir.arg_count != args.len() {
-            return Found::default();
-        }
-        let mut folder = Folder::new(
-            self.tcx,
-            callee,
-            TypingEnv::fully_monomorphized(),
-            mir,
-            self.depth.saturating_add(1),
-            self.budget,
-        );
-        let entry = self.carried(state, &folder, args);
-        let reach = folder.run(entry);
-        self.budget = folder.budget;
-        Found {
-            value: folder.returns.claim(),
-            quiet: Self::silent(mir, &reach),
-        }
-    }
-
-    /// The body a call runs, when this walk may read it.
-    fn target(&self, func: Ty<'tcx>) -> Option<Instance<'tcx>> {
-        if self.depth >= DEPTH || self.budget == 0 {
-            return None;
-        }
-        let ty::FnDef(did, generics) = *func.kind() else {
-            return None;
-        };
-        // A signature with a lifetime still bound names no one target.
-        let generics = generics.no_bound_vars()?;
-        if generics.has_param() {
-            return None;
-        }
-        let callee = Instance::try_resolve(self.tcx, self.env, did, generics)
-            .ok()
-            .flatten()?;
-        // A body that calls itself would be folded against the same
-        // arguments forever, and it is the depth that stops the longer
-        // cycles.
-        if callee == self.inst {
-            return None;
-        }
-        let ty::InstanceKind::Item(def) = callee.def else {
-            return None;
-        };
-        self.tcx.is_mir_available(def).then_some(callee)
-    }
-
-    /// Whether a body walked this way has nothing left that can raise.
-    ///
-    /// Every block the compiler will generate for it has to carry a
-    /// terminator with nowhere to raise from, or a check the walk settled.
-    /// A call or a drop is not one of them: what either runs is a body this
-    /// walk did not read.
-    fn silent(mir: &mir::Body<'tcx>, reach: &Reach) -> bool {
-        for (bb, data) in mir.basic_blocks.iter_enumerated() {
-            if !reach.is_live(bb) {
-                continue;
-            }
-            let Some(term) = &data.terminator else {
-                return false;
-            };
-            let silent = match &term.kind {
-                TerminatorKind::Assert { .. } => reach.is_settled(bb),
-                TerminatorKind::Goto { .. }
-                | TerminatorKind::SwitchInt { .. }
-                | TerminatorKind::Return
-                | TerminatorKind::Unreachable
-                | TerminatorKind::FalseEdge { .. }
-                | TerminatorKind::FalseUnwind { .. } => true,
-                _ => false,
-            };
-            if !silent {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// The state a callee is entered with.
-    ///
-    /// A parameter is told only what the call site knows about the operand
-    /// it was passed, and only where the claim means the same thing there:
-    /// one written at another type describes a value the callee never sees.
-    fn carried(
-        &self,
-        state: &State<'tcx>,
-        callee: &Folder<'_, 'tcx>,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
-    ) -> State<'tcx> {
-        let mut entry = callee.blank();
-        for (index, arg) in args.iter().enumerate() {
-            let local = mir::Local::from_usize(index.saturating_add(1));
-            if callee.escapes(local) {
-                continue;
-            }
-            let Some(value) =
-                self.fact(state, &arg.node).value.and_then(portable)
-            else {
-                continue;
-            };
-            let Some(decl) = callee.mir.local_decls.get(local) else {
-                continue;
-            };
-            if callee.monomorphize(decl.ty) != value.ty() {
-                continue;
-            }
-            if let Some(slot) = entry.get_mut(local.as_usize()) {
-                *slot = Fact::of(value);
-            }
-        }
-        entry
-    }
-
-    /// The range a call that picks one of two numbers leaves behind.
-    ///
-    /// Both ends move together: the larger of two values is at least the
-    /// larger of their lower ends and never above the larger of their upper
-    /// ends. That is what keeps `right.max(1)` away from zero whatever the
-    /// argument holds, and what bounds `right.min(9)` from above.
-    fn picked(
-        &self,
-        state: &State<'tcx>,
-        larger: bool,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
-    ) -> Option<Value<'tcx>> {
-        let [left, right] = args else {
-            return None;
-        };
-        let left = self.spread(state, &left.node)?;
-        let right = self.spread(state, &right.node)?;
-        let pick = |a: Known<'tcx>, b: Known<'tcx>| {
-            let above = a.order(b)? == std::cmp::Ordering::Greater;
-            Some(if above == larger { a } else { b })
-        };
-        Bounds::new(pick(left.lo, right.lo)?, pick(left.hi, right.hi)?)
-            .map(Value::Within)
-    }
-
-    /// The range an operand lies in, which is its type's own range when
-    /// nothing narrower is known.
-    fn spread(
-        &self,
-        state: &State<'tcx>,
-        operand: &mir::Operand<'tcx>,
-    ) -> Option<Bounds<'tcx>> {
-        let ty =
-            self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))?;
-        let whole = self.whole(ty)?;
-        let Some(value) = self.fact(state, operand).value else {
-            return Some(whole);
-        };
-        // A claim written at another type describes another value.
-        if value.ty() != Some(ty) {
-            return Some(whole);
-        }
-        Some(
-            Value::Within(whole)
-                .refined(value)
-                .bounds()
-                .unwrap_or(whole),
-        )
-    }
-
-    /// Every value a type admits.
-    fn whole(&self, ty: Ty<'tcx>) -> Option<Bounds<'tcx>> {
-        if !matches!(ty.kind(), ty::Int(_) | ty::Uint(_)) {
-            return None;
-        }
-        let seed = Known {
-            bits: 0,
-            ty,
-            width: self.width(ty)?,
-        };
-        Bounds::new(seed.type_min(), seed.type_max())
-    }
-
-    /// Whether a type is the standard library's nonzero wrapper.
-    fn is_nonzero(&self, ty: Ty<'tcx>) -> bool {
-        let ty::Adt(def, _) = ty.kind() else {
-            return false;
-        };
-        self.tcx.get_diagnostic_item(rustc_span::sym::NonZero)
-            == Some(def.did())
-    }
-
-    /// A value of an integer type that is known not to be zero.
-    fn apart_from_zero(&self, ty: Ty<'tcx>) -> Option<Value<'tcx>> {
-        let ty = self.monomorphize(ty)?;
-        let width = self.width(ty)?;
-        Some(Value::other_than(Known { bits: 0, ty, width }))
     }
 
     /// What a branch reads, when an arm of it proves something.
@@ -1136,6 +833,20 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             mir::Rvalue::UnaryOp(mir::UnOp::PtrMetadata, operand) => {
                 self.length_of(state, operand)
             }
+            // Reading the discriminant of an enum the walk has settled is
+            // what folds the match below it.
+            mir::Rvalue::Discriminant(place) => self.tag_read(state, place),
+            mir::Rvalue::Aggregate(kind, _) => {
+                if let mir::AggregateKind::Adt(did, variant, args, ..) = &**kind
+                    && let Some(tag) = self.tag_of(*did, args, *variant)
+                {
+                    return Fact {
+                        tag: Some(tag),
+                        ..Fact::default()
+                    };
+                }
+                None
+            }
             _ => None,
         };
         Fact {
@@ -1148,6 +859,61 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     fn unsigned(&self, operand: &mir::Operand<'tcx>) -> bool {
         self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))
             .is_some_and(|ty| matches!(ty.kind(), ty::Uint(_)))
+    }
+
+    /// The value the discriminant of a settled place reads as.
+    fn tag_read(
+        &self,
+        state: &State<'tcx>,
+        place: &mir::Place<'tcx>,
+    ) -> Option<Value<'tcx>> {
+        let slot = self.slot_of(place)?;
+        let tag = Self::known_at(state, slot).tag?;
+        let ty = self.enum_at(place)?;
+        let ty::Adt(def, _) = ty.kind() else {
+            return None;
+        };
+        for variant in def.variants().indices() {
+            let discr = def.discriminant_for_variant(self.tcx, variant);
+            if discr.val != tag {
+                continue;
+            }
+            let width = self.width(discr.ty)?;
+            return Some(Value::Exact(Known {
+                bits: truncate(discr.val, width),
+                ty: discr.ty,
+                width,
+            }));
+        }
+        None
+    }
+
+    /// The tag one variant of an enum carries.
+    fn tag_of(
+        &self,
+        did: rustc_span::def_id::DefId,
+        args: ty::GenericArgsRef<'tcx>,
+        variant: rustc_abi::VariantIdx,
+    ) -> Option<u128> {
+        let ty = self.monomorphize(Ty::new_adt(
+            self.tcx,
+            self.tcx.adt_def(did),
+            args,
+        ))?;
+        let ty::Adt(def, _) = ty.kind() else {
+            return None;
+        };
+        if !def.is_enum() {
+            return None;
+        }
+        Some(def.discriminant_for_variant(self.tcx, variant).val)
+    }
+
+    /// The enum type of a place, when it is one.
+    fn enum_at(&self, place: &mir::Place<'tcx>) -> Option<Ty<'tcx>> {
+        let ty =
+            self.monomorphize(place.ty(&self.mir.local_decls, self.tcx).ty)?;
+        matches!(ty.kind(), ty::Adt(def, _) if def.is_enum()).then_some(ty)
     }
 
     /// The length a wide pointer carries, when the pointee is a slice.
@@ -1189,7 +955,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     /// step is all there ever is. A claim held locally and one held at the
     /// source were both true when made and neither has been swept, so
     /// whichever exists is usable.
-    fn fact(
+    pub fn fact(
         &self,
         state: &State<'tcx>,
         operand: &mir::Operand<'tcx>,
@@ -1214,7 +980,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
 
     /// Everything known about one local, read through its link of
     /// sameness.
-    fn known_at(state: &State<'tcx>, local: mir::Local) -> Fact<'tcx> {
+    pub fn known_at(state: &State<'tcx>, local: mir::Local) -> Fact<'tcx> {
         let Some(own) = state.get(local.as_usize()).copied() else {
             return Fact::default();
         };
@@ -1491,7 +1257,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     ///
     /// Anything else is refused, so a float or a pointer never reaches the
     /// comparisons, where its bits would not mean what they say.
-    fn width(&self, ty: Ty<'tcx>) -> Option<u32> {
+    pub fn width(&self, ty: Ty<'tcx>) -> Option<u32> {
         if !matches!(ty.kind(), ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_))
         {
             return None;
@@ -1501,7 +1267,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     }
 
     /// Resolves a type written in the body against this instantiation.
-    fn monomorphize(&self, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
+    pub fn monomorphize(&self, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
         self.inst
             .try_instantiate_mir_and_normalize_erasing_regions(
                 self.tcx,
