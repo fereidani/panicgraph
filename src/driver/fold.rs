@@ -794,13 +794,29 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             mir::Rvalue::Cast(mir::CastKind::IntToInt, operand, ty) => {
                 self.cast(state, operand, *ty)
             }
-            // Reading a nonzero wrapper at its plain type is how its value
-            // gets out, and the validity invariant keeps it apart from
-            // zero.
-            mir::Rvalue::Cast(mir::CastKind::Transmute, operand, ty) => self
-                .monomorphize(operand.ty(&self.mir.local_decls, self.tcx))
-                .filter(|source| self.is_nonzero(*source))
-                .and_then(|_| self.apart_from_zero(*ty)),
+            // An address and the value inside a nonzero wrapper are both
+            // read out at a plain type, and neither is zero when it is.
+            mir::Rvalue::Cast(
+                mir::CastKind::Transmute
+                | mir::CastKind::PointerExposeProvenance
+                | mir::CastKind::PtrToPtr,
+                operand,
+                ty,
+            ) => {
+                let held = self.fact(state, operand);
+                let source = self
+                    .monomorphize(operand.ty(&self.mir.local_decls, self.tcx));
+                if held.address {
+                    return Fact {
+                        address: true,
+                        value: self.apart_from_zero(*ty),
+                        ..Fact::default()
+                    };
+                }
+                source
+                    .filter(|source| self.is_nonzero(*source))
+                    .and_then(|_| self.apart_from_zero(*ty))
+            }
             mir::Rvalue::BinaryOp(op, pair) => {
                 let left = self.fact(state, &pair.0);
                 let right = self.fact(state, &pair.1);
@@ -832,6 +848,14 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             }
             mir::Rvalue::UnaryOp(mir::UnOp::PtrMetadata, operand) => {
                 self.length_of(state, operand)
+            }
+            // A place has an address, so a pointer taken of one is never
+            // null however the place was reached.
+            mir::Rvalue::Ref(..) | mir::Rvalue::RawPtr(..) => {
+                return Fact {
+                    address: true,
+                    ..Fact::default()
+                };
             }
             // Reading the discriminant of an enum the walk has settled is
             // what folds the match below it.
@@ -961,9 +985,19 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         operand: &mir::Operand<'tcx>,
     ) -> Fact<'tcx> {
         match operand {
-            mir::Operand::Copy(place) | mir::Operand::Move(place) => self
-                .slot_of(place)
-                .map_or_else(Fact::default, |slot| Self::known_at(state, slot)),
+            mir::Operand::Copy(place) | mir::Operand::Move(place) => {
+                let mut held =
+                    self.slot_of(place).map_or_else(Fact::default, |slot| {
+                        Self::known_at(state, slot)
+                    });
+                if matches!(
+                    operand.ty(&self.mir.local_decls, self.tcx).kind(),
+                    ty::Ref(..)
+                ) {
+                    held.address = true;
+                }
+                held
+            }
             mir::Operand::Constant(konst) => self
                 .constant(konst)
                 .map(Value::Exact)
@@ -990,6 +1024,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             Fact {
                 value: own.value.or(at_root.value),
                 order: own.order.or(at_root.order),
+                address: own.address || at_root.address,
                 ..own
             }
         });
@@ -1029,22 +1064,27 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     }
 
     /// Evaluates a constant for the arguments this body was reached with.
+    ///
+    /// A body still carrying parameters has no value for a constant written
+    /// against one: `<T as SizedTypeProperties>::SIZE` is exactly what the
+    /// interesting checks compare against, and it has none until `T` has
+    /// one. A constant that names no parameter is the same in every
+    /// instantiation, so it is read where it stands.
     fn constant(&self, konst: &mir::ConstOperand<'tcx>) -> Option<Known<'tcx>> {
-        if self.inst.args.has_param() {
-            // Only a monomorphic body has definite values. An associated
-            // constant such as `<T as SizedTypeProperties>::SIZE` is exactly
-            // what the interesting checks compare against, and it has no
-            // value until `T` has one.
-            return None;
-        }
-        let konst = self
-            .inst
-            .try_instantiate_mir_and_normalize_erasing_regions(
-                self.tcx,
-                self.env,
-                ty::EarlyBinder::bind(self.tcx, konst.const_),
-            )
-            .ok()?;
+        let konst = if self.inst.args.has_param() {
+            if konst.const_.has_param() {
+                return None;
+            }
+            konst.const_
+        } else {
+            self.inst
+                .try_instantiate_mir_and_normalize_erasing_regions(
+                    self.tcx,
+                    self.env,
+                    ty::EarlyBinder::bind(self.tcx, konst.const_),
+                )
+                .ok()?
+        };
         let ty = konst.ty();
         let width = self.width(ty)?;
         let bits = konst.try_eval_bits(self.tcx, self.env)?;

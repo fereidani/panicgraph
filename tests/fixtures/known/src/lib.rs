@@ -592,3 +592,26 @@ pub fn clean_match_panic() -> u8 {
         Shape::Flat => panic!("flat"),
     }
 }
+
+/// Clean. A pointer taken of a place holds an address, so the null check
+/// inside the wrapper cannot fail.
+pub fn clean_nonnull_of_place(x: &mut u8) -> std::ptr::NonNull<u8> {
+    std::ptr::NonNull::new(x as *mut u8).unwrap()
+}
+
+/// Reaches `unwrap`. A raw pointer handed in can be null.
+pub fn must_nonnull_of_argument(p: *mut u8) -> std::ptr::NonNull<u8> {
+    std::ptr::NonNull::new(p).unwrap()
+}
+
+/// Clean. The guard is written against a literal, which reads the same in
+/// every instantiation, so a generic body does not hide it.
+pub fn clean_generic_guard<T>(_marker: &T, a: u64, b: u64) -> u64 {
+    if b == 0 { 0 } else { a / b }
+}
+
+/// Reaches `divide-by-zero`. What the divisor is worth has no value until
+/// the type does, and a type with no size is one of them.
+pub fn must_generic_size_divide<T>(a: u64) -> u64 {
+    a / (size_of::<T>() as u64)
+}

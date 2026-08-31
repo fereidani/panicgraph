@@ -60,6 +60,8 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_unwrap_argument", "unwrap"),
     ("must_unwrap_wrong_arm", "unwrap"),
     ("must_match_panic", "explicit"),
+    ("must_nonnull_of_argument", "unwrap"),
+    ("must_generic_size_divide", "divide-by-zero"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -110,6 +112,8 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_unwrap_matched",
     "clean_unwrap_ok",
     "clean_match_panic",
+    "clean_nonnull_of_place",
+    "clean_generic_guard",
 ];
 
 /// The functions that must stay clean in a debug build as well.
@@ -143,6 +147,7 @@ const MUST_BE_CLEAN_IN_DEBUG: &[&str] = &[
     "clean_unwrap_matched",
     "clean_unwrap_ok",
     "clean_match_panic",
+    "clean_generic_guard",
 ];
 
 #[test]
