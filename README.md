@@ -45,6 +45,13 @@ explanation rather than a linker error when either piece is missing.
 ## Install
 
 ```
+cargo +nightly install panicgraph
+```
+
+Or from a checkout of this repository, where `rust-toolchain.toml` selects the
+toolchain for you:
+
+```
 cargo install --path .
 ```
 
@@ -57,10 +64,16 @@ The interactive view and the drawing exist for a person looking at a result.
 A build that only needs a verdict can leave them out:
 
 ```
-cargo install --path . --no-default-features            # report and check only
-cargo install --path . --no-default-features -F svg     # keep the drawing
-cargo install --path . --no-default-features -F serve   # keep the view
+# report and check only
+cargo install panicgraph --version VERSION --no-default-features
+
+# keep the drawing, or keep the view
+cargo install panicgraph --version VERSION --no-default-features -F svg
+cargo install panicgraph --version VERSION --no-default-features -F serve
 ```
+
+Use `--path .` in place of `panicgraph --version VERSION` to build the same
+thing from a checkout.
 
 Dropping both removes the compression dependency and the scripts the view is
 built from, which is most of a megabyte of binary. `-l` and `--format svg`
@@ -197,12 +210,28 @@ refreshed rather than drifting.
 ### In a workflow
 
 ```yaml
-- uses: dtolnay/rust-toolchain@nightly
+- uses: dtolnay/rust-toolchain@master
   with:
+    toolchain: nightly-DATE
     components: rustc-dev, llvm-tools
-- run: cargo install --git https://github.com/fereidani/panicgraph
+- run: cargo install panicgraph --version VERSION --locked
 - run: panicgraph check --baseline panicgraph.json --format github
 ```
+
+Pin the version. A release can change what the analysis reads, so a function
+no earlier version could explain may be reported by the next one, and a check
+that passed yesterday fails today on code nobody touched. Naming `VERSION`
+keeps a red build about the commit that caused it, and `--locked` does the
+same for the tool's own dependencies.
+
+Pin the toolchain for the same reason. The analysis reads MIR, so a newer
+nightly changes which checks exist before panicgraph ever sees them, and the
+driver links compiler internals that have no stable interface, so a floating
+nightly can stop building altogether.
+
+Upgrade either one deliberately, and write the record again in the same commit
+with `panicgraph baseline panicgraph.json`, so the baseline and the tool that
+reads it move together.
 
 `--format github` writes workflow commands, so a failure lands on the line of
 the function it is about instead of at the bottom of a log:
