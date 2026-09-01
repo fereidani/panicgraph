@@ -4,7 +4,7 @@
 //! solver the command line uses, so there is exactly one implementation of
 //! the suppression semantics.
 
-use std::path::Path;
+use std::{fs::File, io::Read};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -577,13 +577,19 @@ pub fn source(allowed: &Set<String>, file: &str) -> Result<Value> {
     if !allowed.contains(file) {
         bail!("`{file}` is not referenced by this analysis");
     }
-    let path = Path::new(file);
-    let meta = std::fs::metadata(path)
-        .with_context(|| format!("could not stat {file}"))?;
-    if meta.len() > MAX_SOURCE_BYTES {
+    // Read through one handle and stop a byte past the limit. Asking the
+    // filesystem for a size and reading afterwards measures a file that
+    // need not be the one that arrives.
+    let mut raw = Vec::new();
+    File::open(file)
+        .with_context(|| format!("could not read {file}"))?
+        .take(MAX_SOURCE_BYTES + 1)
+        .read_to_end(&mut raw)
+        .with_context(|| format!("could not read {file}"))?;
+    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > MAX_SOURCE_BYTES {
         bail!("`{file}` is larger than this view will load");
     }
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("could not read {file}"))?;
+    let text = String::from_utf8(raw)
+        .with_context(|| format!("`{file}` is not valid utf-8"))?;
     Ok(json!({ "file": file, "text": text }))
 }
