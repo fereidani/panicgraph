@@ -1001,32 +1001,76 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 self.length_of(state, operand)
             }
             // A place has an address, so a pointer taken of one is never
-            // null however the place was reached.
-            mir::Rvalue::Ref(..) | mir::Rvalue::RawPtr(..) => {
+            // null however the place was reached. Taking one of everything
+            // another points at leaves a slice as long as that one was.
+            mir::Rvalue::Ref(_, _, place)
+            | mir::Rvalue::RawPtr(_, place)
+            | mir::Rvalue::Reborrow(_, _, place) => {
                 return Fact {
                     address: true,
+                    extent: self.reborrowed(state, place),
                     ..Fact::default()
                 };
             }
             // Reading the discriminant of an enum the walk has settled is
             // what folds the match below it.
             mir::Rvalue::Discriminant(place) => self.tag_read(state, place),
-            mir::Rvalue::Aggregate(kind, _) => {
-                let mir::AggregateKind::Adt(did, variant, args, ..) = &**kind
-                else {
-                    return Fact::default();
-                };
-                return Fact {
-                    tag: self.tag_of(*did, args, *variant),
-                    ..Fact::default()
-                };
-            }
+            mir::Rvalue::Aggregate(kind, fields) => match &**kind {
+                mir::AggregateKind::Adt(did, variant, args, ..) => {
+                    return Fact {
+                        tag: self.tag_of(*did, args, *variant),
+                        ..Fact::default()
+                    };
+                }
+                // A fat pointer is built from a thin one and what it points
+                // at, and for a slice that is how many elements it holds.
+                mir::AggregateKind::RawPtr(..) => {
+                    let extent = fields
+                        .iter()
+                        .nth(1)
+                        .map(|meta| self.fact(state, meta))
+                        .and_then(|fact| fact.value)
+                        .and_then(Value::bounds);
+                    return Fact {
+                        extent,
+                        ..Fact::default()
+                    };
+                }
+                _ => return Fact::default(),
+            },
             _ => None,
         };
         Fact {
             value,
             ..Fact::default()
         }
+    }
+
+    /// How long a slice a reborrow of a whole pointee is.
+    ///
+    /// Taking a reference to everything a pointer points at leaves a slice
+    /// as long as the one it was taken of, which is what carries the length
+    /// of a subslice built from its parts to the call that reads it.
+    fn reborrowed(
+        &self,
+        state: &State<'tcx>,
+        place: &mir::Place<'tcx>,
+    ) -> Option<Bounds<'tcx>> {
+        let [mir::ProjectionElem::Deref] = place.projection.as_slice() else {
+            return None;
+        };
+        if self.escapes(place.local) {
+            return None;
+        }
+        let decl = self.mir.local_decls.get(place.local)?;
+        let ty = self.monomorphize(decl.ty)?;
+        let (ty::Ref(_, inner, _) | ty::RawPtr(inner, _)) = ty.kind() else {
+            return None;
+        };
+        if !matches!(inner.kind(), ty::Slice(_) | ty::Str) {
+            return None;
+        }
+        Self::known_at(state, place.local).extent
     }
 
     /// How long the slice an array was unsized into is.

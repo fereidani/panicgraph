@@ -924,3 +924,16 @@ pub fn must_convert_runtime(x: u16, scale: i32) -> u16 {
 pub fn clean_chunk_count(v: &[u8]) -> usize {
     v.chunks_exact(4).count()
 }
+
+/// Reaches `index`, since a slice may be shorter than the prefix asked
+/// for. The copy's own length check goes all the same: the prefix is
+/// exactly as long as the array being written into it.
+pub fn must_copy_into_prefix(buf: &mut [u8], n: u128) {
+    buf[..16].copy_from_slice(&n.to_be_bytes());
+}
+
+/// Clean. The array has room for the prefix, and the prefix is as long as
+/// what is copied into it.
+pub fn clean_copy_into_array(buf: &mut [u8; 32], n: u128) {
+    buf[..16].copy_from_slice(&n.to_be_bytes());
+}

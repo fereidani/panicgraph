@@ -87,6 +87,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_step_by_a_size", "explicit"),
     ("must_split_unguarded", "explicit"),
     ("must_convert_runtime", "remainder-by-zero"),
+    ("must_copy_into_prefix", "index"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -100,6 +101,7 @@ const MUST_NOT_PANIC: &[(&str, &str)] = &[
     ("must_not_catch_explicit", "explicit"),
     ("must_dyn_speak", "explicit"),
     ("must_modulo_length", "index"),
+    ("must_copy_into_prefix", "explicit"),
 ];
 
 /// The functions that must be reported with nothing at all.
@@ -162,6 +164,7 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_split_after_guard",
     "clean_convert_constant",
     "clean_chunk_count",
+    "clean_copy_into_array",
 ];
 
 /// The functions that must stay clean in a debug build as well.
