@@ -1033,7 +1033,9 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 })
             }
             mir::Rvalue::UnaryOp(mir::UnOp::PtrMetadata, operand) => {
-                self.length_of(state, operand)
+                return self
+                    .length_of(state, operand)
+                    .map_or_else(Fact::default, Self::measuring);
             }
             // A place has an address, so a pointer taken of one is never
             // null however the place was reached. Taking one of everything
@@ -1272,6 +1274,24 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 ..Fact::default()
             };
         }
+        // A value already measured against a length is still measured
+        // against it once a constant is taken off, and strictly below it
+        // once anything at all is. The value has to be at least what is
+        // taken off, or a build with the check turned off wraps it round
+        // to the top of the type instead.
+        if op == BinOp::Sub
+            && let Some((rel, of)) = left.order
+            && let Some(taken) = right.value.and_then(Value::exact)
+            && !taken.is_signed()
+            && let Some(span) = self.spread(state, &pair.0)
+            && span.lo.order(taken).is_some_and(|by| by != Less)
+        {
+            let rel = if taken.bits == 0 { rel } else { LenRel::Below };
+            return Fact {
+                order: Some((rel, of)),
+                ..Fact::default()
+            };
+        }
         // A length with a constant taken off it lands below that length,
         // which is what the read at the end of a slice asks. The slice has
         // to be long enough for the subtraction to mean what it says: a
@@ -1378,6 +1398,23 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             return None;
         }
         Some(Value::Length(local))
+    }
+
+    /// The claim a reading of a slice's length carries.
+    ///
+    /// A length is at most itself. Saying so outright is what lets a value
+    /// that started as one keep an ordering where a loop's arms meet: the
+    /// turn that walks back carries a bound, and the two agree on the
+    /// weaker of them rather than on nothing.
+    pub const fn measuring(value: Value<'tcx>) -> Fact<'tcx> {
+        let order = match value {
+            Value::Length(of) => Some((LenRel::AtMost, of)),
+            _ => None,
+        };
+        Fact {
+            order,
+            ..Fact::of(value)
+        }
     }
 
     /// Reads an operand, when its value is settled.

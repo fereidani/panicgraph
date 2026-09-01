@@ -14,7 +14,7 @@ use rustc_middle::{
 };
 
 use crate::value::{
-    self, Against, Bounds, Fact, Known, Taught, Value, truncate,
+    self, Against, Bounds, Fact, Known, LenRel, Taught, Value, truncate,
 };
 
 /// How many times a block's entry is joined exactly before what arrives is
@@ -310,7 +310,14 @@ pub fn learn<'tcx>(
                 Some(slot.value.map_or(value, |held| held.refined(value)));
         }
         Taught::Order(rel, of) => {
-            if slot.order.is_none() {
+            // The ordering a length carries against its own slice is the
+            // one every reading of it starts with, and a guard says more.
+            let trivial = matches!(
+                (slot.value, slot.order),
+                (Some(Value::Length(mine)), Some((LenRel::AtMost, held)))
+                    if mine == held
+            );
+            if slot.order.is_none() || trivial {
                 slot.order = Some((rel, of));
             }
         }
@@ -337,7 +344,17 @@ pub fn stretch<'tcx>(
     let Some(held) = slot.extent.or(whole) else {
         return;
     };
-    slot.extent = Value::Within(held).refined(taught).bounds();
+    let narrowed = Value::Within(held).refined(taught).bounds();
+    slot.extent = narrowed;
+    // A local holding that length describes the same quantity, so it is
+    // handed the claim here rather than only where it is read. That is what
+    // carries the range through the merge a loop's arms meet at, where the
+    // link to the slice does not survive.
+    for slot in state.iter_mut() {
+        if slot.value == Some(Value::Length(of)) {
+            slot.extent = narrowed;
+        }
+    }
 }
 
 /// Whether a statement can change a local.

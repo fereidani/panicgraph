@@ -429,11 +429,30 @@ impl<'tcx> Fact<'tcx> {
     /// different ones, so those survive only by agreeing.
     pub fn joined(self, other: Self) -> Self {
         Self {
+            // Two claims with nothing in common as they stand may still
+            // agree once a length is read as the range it was found to lie
+            // in, which is what a loop counting down from one leaves where
+            // its arms meet.
             value: match (self.value, other.value) {
-                (Some(held), Some(arriving)) => held.join(arriving),
+                (Some(held), Some(arriving)) => held
+                    .join(arriving)
+                    .or_else(|| sized(self)?.join(sized(other)?)),
                 _ => None,
             },
-            order: (self.order == other.order).then_some(self.order).flatten(),
+            // Two arms that measure a value against the same slice meet at
+            // the weaker of the two claims rather than at nothing, which is
+            // what carries a bound round a loop whose first turn proved
+            // more than the rest.
+            order: match (self.order, other.order) {
+                (Some((mine, here)), Some((theirs, there)))
+                    if here == there =>
+                {
+                    let rel =
+                        if mine == theirs { mine } else { LenRel::AtMost };
+                    Some((rel, here))
+                }
+                _ => None,
+            },
             same: (self.same == other.same).then_some(self.same).flatten(),
             extent: match (self.extent, other.extent) {
                 (Some(held), Some(arriving)) => held.hull(arriving),
@@ -747,7 +766,7 @@ pub fn compare<'tcx>(
 /// The claim is recorded against the slices, so it reads the same way from
 /// either side, and a slice is trivially as long as itself.
 fn alike(op: mir::BinOp, left: Fact<'_>, right: Fact<'_>) -> Option<bool> {
-    use mir::BinOp::{Eq, Ge, Le, Ne};
+    use mir::BinOp::{Eq, Ge, Gt, Le, Lt, Ne};
     let (Some(Value::Length(here)), Some(Value::Length(there))) =
         (left.value, right.value)
     else {
@@ -759,7 +778,7 @@ fn alike(op: mir::BinOp, left: Fact<'_>, right: Fact<'_>) -> Option<bool> {
     }
     match op {
         Eq | Le | Ge => Some(true),
-        Ne => Some(false),
+        Ne | Lt | Gt => Some(false),
         _ => None,
     }
 }
@@ -794,7 +813,7 @@ fn measured_against(
 /// This is what a guard on emptiness leaves behind: the check that a slice
 /// read is in range compares a constant against the length, and past
 /// `if v.is_empty()` the length is known to be at least one.
-const fn sized(fact: Fact<'_>) -> Option<Value<'_>> {
+pub const fn sized(fact: Fact<'_>) -> Option<Value<'_>> {
     match (fact.value, fact.extent) {
         (Some(Value::Length(_)), Some(bounds)) => Some(Value::Within(bounds)),
         (value, _) => value,

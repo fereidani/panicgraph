@@ -1020,3 +1020,26 @@ pub fn must_guard_within_a_guard_of_other(
 ) -> u8 {
     if i < w.len() && j < i { v[j] } else { 0 }
 }
+
+/// Clean. The counter starts at the length, and the guard above the
+/// subtraction keeps it there through every turn of the loop.
+pub fn clean_countdown_loop(v: &[u8]) -> u32 {
+    let mut total = 0u32;
+    let mut i = v.len();
+    while i > 0 {
+        i -= 1;
+        total = total.wrapping_add(u32::from(v[i]));
+    }
+    total
+}
+
+/// Reaches `index`. The counter starts one past the end.
+pub fn must_countdown_from_the_length(v: &[u8]) -> u32 {
+    let mut total = 0u32;
+    let mut i = v.len();
+    while i > 0 {
+        total = total.wrapping_add(u32::from(v[i]));
+        i -= 1;
+    }
+    total
+}

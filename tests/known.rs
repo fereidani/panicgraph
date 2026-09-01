@@ -95,6 +95,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_prefix_unguarded", "index"),
     ("must_guard_within_a_loose_guard", "index"),
     ("must_guard_within_a_guard_of_other", "index"),
+    ("must_countdown_from_the_length", "index"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -178,6 +179,7 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_clamped_to_last",
     "clean_prefix_under_guard",
     "clean_guard_within_a_guard",
+    "clean_countdown_loop",
 ];
 
 /// The functions that must stay clean in a debug build as well.

@@ -177,7 +177,7 @@ impl<'tcx> Folder<'_, 'tcx> {
                 else {
                     return None;
                 };
-                Some(Fact::of(Value::Length(root_of(
+                Some(Folder::measuring(Value::Length(root_of(
                     state,
                     self.slot_of(place)?,
                 ))))
@@ -665,7 +665,9 @@ impl<'tcx> Folder<'_, 'tcx> {
         let ty =
             self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))?;
         let whole = self.whole(ty)?;
-        let Some(value) = self.fact(state, operand).value else {
+        // A length is read through the range that length was found to lie
+        // in, so a guard on a slice bounds every number drawn from it.
+        let Some(value) = crate::value::sized(self.fact(state, operand)) else {
             return Some(whole);
         };
         // A claim written at another type describes another value.
