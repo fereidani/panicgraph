@@ -300,6 +300,12 @@ impl CategorySet {
     pub fn iter(self) -> impl Iterator<Item = Category> {
         ALL.into_iter().filter(move |c| self.contains(*c))
     }
+
+    /// The categories in the set, by name, in discriminant order.
+    #[must_use]
+    pub fn names(self) -> Vec<&'static str> {
+        self.iter().map(Category::name).collect()
+    }
 }
 
 impl FromIterator<Category> for CategorySet {

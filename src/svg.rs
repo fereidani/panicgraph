@@ -25,7 +25,7 @@ use std::fmt::Write as _;
 use anyhow::Result;
 
 use crate::{
-    Category, CategorySet, Graph,
+    CategorySet, Graph,
     api::{FlameRow, children_of},
     solve::Edges,
 };
@@ -162,7 +162,7 @@ pub fn render(
 
 /// The assumptions the picture was drawn under, written out.
 fn policy(suppressed: CategorySet) -> String {
-    let names: Vec<&str> = suppressed.iter().map(Category::name).collect();
+    let names = suppressed.names();
     if names.is_empty() {
         return "assuming nothing impossible".to_owned();
     }

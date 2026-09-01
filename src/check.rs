@@ -246,8 +246,7 @@ pub fn write_baseline(
         "version": BASELINE_VERSION,
         "profile": args.profile,
         "std_mode": args.std_mode.name(),
-        "suppressed": args.suppress.iter()
-            .map(Category::name).collect::<Vec<_>>(),
+        "suppressed": args.suppress.names(),
         "findings": findings.iter().map(|f| json!({
             "function": f.function,
             "categories": f.categories,
@@ -431,13 +430,10 @@ fn human(outcome: &Outcome, check: &Check, out: &mut String) {
     if !outcome.fixed.is_empty() {
         let _ = writeln!(
             out,
-            "{} in the baseline no longer panics. Refresh it with \
-             `panicgraph baseline`.",
-            if outcome.fixed.len() == 1 {
-                "1 function".to_owned()
-            } else {
-                format!("{} functions", outcome.fixed.len())
-            }
+            "{} function{} in the baseline no longer panics. Refresh it \
+             with `panicgraph baseline`.",
+            outcome.fixed.len(),
+            plural(outcome.fixed.len())
         );
         for name in outcome.fixed.iter().take(10) {
             let _ = writeln!(out, "    {name}");

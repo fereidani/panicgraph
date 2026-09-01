@@ -291,10 +291,7 @@ fn json(
                 "crate": body.krate,
                 "location": body.loc.as_ref().map(ToString::to_string),
                 "categories": f
-                    .categories
-                    .iter()
-                    .map(crate::Category::name)
-                    .collect::<Vec<_>>(),
+                    .categories.names(),
             });
             if let Some(verdicts) = verdicts {
                 let verified: serde_json::Map<String, serde_json::Value> = f
@@ -354,12 +351,7 @@ fn github(
             "::warning {where_at}title=Function can panic::{} can panic \
              with {}",
             reported_name(body, args),
-            finding
-                .categories
-                .iter()
-                .map(Category::name)
-                .collect::<Vec<_>>()
-                .join(", ")
+            finding.categories.names().join(", ")
         );
     }
 }

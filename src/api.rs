@@ -121,10 +121,7 @@ pub fn solve(
             json!({
                 "id": id.index(),
                 "categories": solution
-                    .enabled(id)
-                    .iter()
-                    .map(Category::name)
-                    .collect::<Vec<_>>(),
+                    .enabled(id).names(),
                 "unwinds": solution.unwinds(id),
             })
         })
@@ -132,7 +129,7 @@ pub fn solve(
 
     let dirty = local_dirty(g, &solution);
     Ok(json!({
-        "suppressed": suppressed.iter().map(Category::name).collect::<Vec<_>>(),
+        "suppressed": suppressed.names(),
         "nodes": nodes,
         "summary": {
             "analysed": g.len(),
