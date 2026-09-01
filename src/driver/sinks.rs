@@ -176,6 +176,16 @@ impl SinkTable {
             .or_insert_with(|| Self::classify(tcx, did))
     }
 
+    /// Whether a function is a panic entry point, without keeping the
+    /// answer.
+    ///
+    /// The folder asks about a handful of calls rather than every one, so
+    /// it reads the classification where it stands instead of holding the
+    /// table the extraction builds.
+    pub fn is_sink(tcx: TyCtxt<'_>, did: DefId) -> bool {
+        Self::classify(tcx, did).is_some()
+    }
+
     /// Works out whether a function raises a panic, and of what kind.
     fn classify(tcx: TyCtxt<'_>, did: DefId) -> Option<Sink> {
         let krate = tcx.crate_name(did.krate);

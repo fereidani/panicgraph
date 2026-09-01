@@ -327,8 +327,11 @@ impl<'tcx> Folder<'_, 'tcx> {
                 // A call the walk read for these arguments and found
                 // unable to raise leaves this body nothing to raise
                 // either. The depth the reading is bounded by is what
-                // stops the chain.
-                TerminatorKind::Call { .. } => reach.is_quiet(bb),
+                // stops the chain. An operation the compiler defines
+                // rather than a body raises nothing at all.
+                TerminatorKind::Call { func, .. } => {
+                    reach.is_quiet(bb) || self.defined(callee, func)
+                }
                 // Dropping a value of a type with nothing to run is the
                 // compiler writing down that the value ends here.
                 // Dropping a value of a type with nothing to run is the
@@ -363,6 +366,52 @@ impl<'tcx> Folder<'_, 'tcx> {
             }
         }
         true
+    }
+
+    /// Whether a call runs an operation the compiler defines rather than a
+    /// body of its own.
+    ///
+    /// Extraction adds nothing to the graph for such a call, for the same
+    /// reason: it cannot call back into the program. What it does record is
+    /// excluded here in the same terms, so the two halves agree: a panic
+    /// entry point, a check on a type's validity, the barrier around a
+    /// caught unwind, and the pair of bodies a const selection chooses
+    /// between.
+    fn defined(
+        &self,
+        callee: &Folder<'_, 'tcx>,
+        func: &mir::Operand<'tcx>,
+    ) -> bool {
+        let Some(ty) =
+            callee.monomorphize(func.ty(&callee.mir.local_decls, self.tcx))
+        else {
+            return false;
+        };
+        let ty::FnDef(did, generics) = *ty.kind() else {
+            return false;
+        };
+        let Some(generics) = generics.no_bound_vars() else {
+            return false;
+        };
+        let Ok(Some(inst)) =
+            Instance::try_resolve(self.tcx, callee.env, did, generics)
+        else {
+            return false;
+        };
+        if !matches!(
+            inst.def,
+            ty::InstanceKind::Intrinsic(..)
+                | ty::InstanceKind::LlvmIntrinsic(..)
+        ) {
+            return false;
+        }
+        let did = inst.def_id();
+        if SinkTable::is_sink(self.tcx, did) {
+            return false;
+        }
+        let name = self.tcx.item_name(did);
+        ty::layout::ValidityRequirement::from_intrinsic(name).is_none()
+            && !matches!(name.as_str(), "catch_unwind" | "const_eval_select")
     }
 
     /// The state a callee is entered with.

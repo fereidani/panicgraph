@@ -1307,3 +1307,39 @@ pub fn clean_deque_walk(q: &std::collections::VecDeque<u8>) -> usize {
 pub fn must_deque_range(q: &std::collections::VecDeque<u8>, at: usize) -> usize {
     q.range(at..).count()
 }
+
+/// Clean. The ordering is written at the call, so the arm rejecting a
+/// releasing load folds away and what is left is an operation the compiler
+/// defines rather than a body that could raise.
+pub fn clean_atomic_load(a: &core::sync::atomic::AtomicUsize) -> usize {
+    a.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Clean. A fence names its ordering the same way, and the barrier it
+/// lowers to is not a body either.
+pub fn clean_atomic_fence() {
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Clean. Both orderings a compare and exchange takes are written here, so
+/// neither of the arms rejecting a pairing survives.
+pub fn clean_atomic_compare_exchange(
+    a: &core::sync::atomic::AtomicUsize,
+) -> bool {
+    a.compare_exchange(
+        0,
+        1,
+        core::sync::atomic::Ordering::AcqRel,
+        core::sync::atomic::Ordering::Acquire,
+    )
+    .is_ok()
+}
+
+/// Reaches `explicit`. An ordering the caller chooses can be the one a load
+/// rejects.
+pub fn must_atomic_load(
+    a: &core::sync::atomic::AtomicUsize,
+    order: core::sync::atomic::Ordering,
+) -> usize {
+    a.load(order)
+}
