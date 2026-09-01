@@ -250,11 +250,30 @@ pub fn learn<'tcx>(
     // A local holding the length of a slice teaches the slice rather than
     // itself, so a guard on emptiness still stands at the next reading of
     // that length, which is a local of its own.
-    if let Taught::Value(value) = taught
-        && let Some(Value::Length(of)) =
-            state.get(local.as_usize()).and_then(|slot| slot.value)
-    {
+    let behind = match state.get(local.as_usize()).and_then(|slot| slot.value) {
+        Some(Value::Length(of)) => Some(of),
+        _ => None,
+    };
+    if let (Taught::Value(value), Some(of)) = (taught, behind) {
         stretch(state, of, value);
+        return;
+    }
+    // Two lengths measured against each other say nothing about either on
+    // its own, so the pair is recorded against the slices, from both ends
+    // so that a reading from either settles the comparison.
+    if let Taught::Alike(other) = taught {
+        let Some(mine) = behind else {
+            return;
+        };
+        if mine == other {
+            return;
+        }
+        if let Some(slot) = state.get_mut(mine.as_usize()) {
+            slot.paired = Some(other);
+        }
+        if let Some(slot) = state.get_mut(other.as_usize()) {
+            slot.paired = Some(mine);
+        }
         return;
     }
     let Some(slot) = state.get_mut(local.as_usize()) else {
@@ -270,6 +289,8 @@ pub fn learn<'tcx>(
                 slot.order = Some((rel, of));
             }
         }
+        // A slice this local merely holds the length of was handled above.
+        Taught::Alike(_) => {}
     }
 }
 
@@ -337,6 +358,9 @@ pub fn forget(state: &mut State<'_>, local: mir::Local) {
             // The copied value itself stands; only the claim of still
             // being the same as the source dies with the write.
             slot.same = None;
+        }
+        if slot.paired == Some(local) {
+            slot.paired = None;
         }
     }
     if let Some(slot) = state.get_mut(local.as_usize()) {

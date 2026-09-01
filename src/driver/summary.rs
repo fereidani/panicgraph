@@ -339,13 +339,22 @@ impl<'tcx> Folder<'_, 'tcx> {
             if callee.escapes(local) || !held.alike {
                 continue;
             }
-            let order = held.fact.order.and_then(|(rel, of)| {
+            let named = |of: mir::Local| {
                 let at = carried
                     .iter()
                     .position(|other| other.alike && other.slot == Some(of))?;
-                Some((rel, mir::Local::from_usize(at.saturating_add(1))))
-            });
-            let fact = Fact { order, ..held.fact };
+                Some(mir::Local::from_usize(at.saturating_add(1)))
+            };
+            let order = held
+                .fact
+                .order
+                .and_then(|(rel, of)| Some((rel, named(of)?)));
+            let paired = held.fact.paired.and_then(named);
+            let fact = Fact {
+                order,
+                paired,
+                ..held.fact
+            };
             if fact == Fact::default() {
                 continue;
             }

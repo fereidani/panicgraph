@@ -384,6 +384,14 @@ pub struct Fact<'tcx> {
     /// the arm that panics, and the body holding that arm is then a body
     /// that raises nothing.
     pub tag: Option<u128>,
+    /// The slice the one behind this local is as long as.
+    ///
+    /// A guard measuring two lengths against each other says nothing about
+    /// either on its own and everything about the pair, so the claim is
+    /// recorded against the slices rather than against the two locals that
+    /// happened to hold their lengths. It is what settles the check a copy
+    /// between two slices writes over them.
+    pub paired: Option<mir::Local>,
 }
 
 impl<'tcx> Fact<'tcx> {
@@ -396,6 +404,7 @@ impl<'tcx> Fact<'tcx> {
             extent: None,
             address: false,
             tag: None,
+            paired: None,
         }
     }
 
@@ -419,6 +428,9 @@ impl<'tcx> Fact<'tcx> {
             },
             address: self.address && other.address,
             tag: (self.tag == other.tag).then_some(self.tag).flatten(),
+            paired: (self.paired == other.paired)
+                .then_some(self.paired)
+                .flatten(),
         }
     }
 
@@ -447,6 +459,8 @@ pub enum Taught<'tcx> {
     Value(Value<'tcx>),
     /// A claim about its order against a slice length.
     Order(LenRel, mir::Local),
+    /// The slice measured is exactly as long as another.
+    Alike(mir::Local),
 }
 
 impl<'tcx> Value<'tcx> {
@@ -685,6 +699,7 @@ const fn length_fact<'tcx>(
     match op {
         mir::BinOp::Lt => Some(Taught::Order(LenRel::Below, of)),
         mir::BinOp::Le => Some(Taught::Order(LenRel::AtMost, of)),
+        mir::BinOp::Eq => Some(Taught::Alike(of)),
         _ => None,
     }
 }
@@ -708,7 +723,32 @@ pub fn compare<'tcx>(
     if let Some(settled) = measured_against(mirrored(op), right, left) {
         return Some(settled);
     }
+    if let Some(settled) = alike(op, left, right) {
+        return Some(settled);
+    }
     values_compare(op, sized(left)?, sized(right)?)
+}
+
+/// What two lengths known to describe slices of one length prove.
+///
+/// The claim is recorded against the slices, so it reads the same way from
+/// either side, and a slice is trivially as long as itself.
+fn alike(op: mir::BinOp, left: Fact<'_>, right: Fact<'_>) -> Option<bool> {
+    use mir::BinOp::{Eq, Ge, Le, Ne};
+    let (Some(Value::Length(here)), Some(Value::Length(there))) =
+        (left.value, right.value)
+    else {
+        return None;
+    };
+    if here != there && left.paired != Some(there) && right.paired != Some(here)
+    {
+        return None;
+    }
+    match op {
+        Eq | Le | Ge => Some(true),
+        Ne => Some(false),
+        _ => None,
+    }
 }
 
 /// What an index measured against a length proves about a comparison.

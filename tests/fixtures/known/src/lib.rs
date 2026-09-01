@@ -937,3 +937,25 @@ pub fn must_copy_into_prefix(buf: &mut [u8], n: u128) {
 pub fn clean_copy_into_array(buf: &mut [u8; 32], n: u128) {
     buf[..16].copy_from_slice(&n.to_be_bytes());
 }
+
+/// Clean. The guard measures the two slices the copy compares, so the
+/// check the copy writes over them cannot fail.
+pub fn clean_copy_after_guard(dst: &mut [u8], src: &[u8]) {
+    if dst.len() == src.len() {
+        dst.copy_from_slice(src);
+    }
+}
+
+/// Reaches `explicit`. The guard measures a third slice, which says
+/// nothing about the two being copied between.
+pub fn must_copy_guarded_on_other(dst: &mut [u8], src: &[u8], other: &[u8]) {
+    if dst.len() == other.len() {
+        dst.copy_from_slice(src);
+    }
+}
+
+/// Reaches `index`. Two slices of one length still say nothing about an
+/// index into either.
+pub fn must_index_of_equal_lengths(a: &[u8], b: &[u8], i: usize) -> u8 {
+    if a.len() == b.len() { a[i] } else { 0 }
+}

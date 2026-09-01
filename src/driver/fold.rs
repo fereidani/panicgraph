@@ -534,6 +534,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             value: held.value.and_then(portable),
             order: None,
             same: None,
+            paired: None,
             ..held
         }
     }
@@ -1337,8 +1338,10 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         let Some(Value::Length(of)) = held.value else {
             return Self::ranged(state, held);
         };
+        let behind = state.get(of.as_usize()).copied().unwrap_or_default();
         Fact {
-            extent: state.get(of.as_usize()).and_then(|slot| slot.extent),
+            extent: behind.extent,
+            paired: behind.paired,
             ..held
         }
     }
