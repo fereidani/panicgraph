@@ -734,7 +734,10 @@ createApp({
   },
   template: `
 <header>
-  <h1>panicgraph</h1>
+  <h1><img
+    :src="theme === 'dark' ? '/panicgraph-lockup-dark.svg'
+                           : '/panicgraph-lockup.svg'"
+    alt="panicgraph" width="122" height="26"></h1>
   <span class="meta" v-if="config.rustc">
     <span><b>{{ config.rustc }}</b></span>
     <span class="sep">|</span>

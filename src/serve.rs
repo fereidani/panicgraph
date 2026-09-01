@@ -32,6 +32,8 @@ const HTML: &str = "text/html; charset=utf-8";
 const JS: &str = "application/javascript; charset=utf-8";
 /// Content type used for every JSON response.
 const JSON: &str = "application/json; charset=utf-8";
+/// Content type used for the wordmark.
+const SVG: &str = "image/svg+xml; charset=utf-8";
 
 /// The page shell.
 const INDEX_HTML: &str = include_str!("../assets/index.html");
@@ -41,6 +43,11 @@ const APP_JS: &str = include_str!("../assets/app.js");
 const D3_JS: &str = include_str!("../assets/d3.min.js");
 /// Vendored so the view works without network access.
 const VUE_JS: &str = include_str!("../assets/vue.global.prod.js");
+/// The wordmark, in the two themes the view offers.
+const LOCKUP_SVG: &str = include_str!("../assets/panicgraph-lockup.svg");
+/// The wordmark, in the two themes the view offers.
+const LOCKUP_DARK_SVG: &str =
+    include_str!("../assets/panicgraph-lockup-dark.svg");
 
 /// Everything a request handler needs.
 struct State {
@@ -263,12 +270,18 @@ fn route(
     static D3: OnceLock<Vec<u8>> = OnceLock::new();
     static VUE: OnceLock<Vec<u8>> = OnceLock::new();
     static INDEX: OnceLock<Vec<u8>> = OnceLock::new();
+    static LOCKUP: OnceLock<Vec<u8>> = OnceLock::new();
+    static LOCKUP_DARK: OnceLock<Vec<u8>> = OnceLock::new();
 
     match path {
         "/" | "/index.html" => out.asset(HTML, &INDEX, INDEX_HTML),
         "/app.js" => out.asset(JS, &APP, APP_JS),
         "/d3.min.js" => out.asset(JS, &D3, D3_JS),
         "/vue.global.prod.js" => out.asset(JS, &VUE, VUE_JS),
+        "/panicgraph-lockup.svg" => out.asset(SVG, &LOCKUP, LOCKUP_SVG),
+        "/panicgraph-lockup-dark.svg" => {
+            out.asset(SVG, &LOCKUP_DARK, LOCKUP_DARK_SVG)
+        }
         "/api/graph" => out.json(&api::graph(&state.graph)),
         "/api/solve" => out.result(
             suppressed_from(query)
