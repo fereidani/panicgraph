@@ -85,11 +85,19 @@ fn emit(tcx: TyCtxt<'_>) -> std::io::Result<()> {
     if let Err(err) = std::fs::write(&path, json) {
         // A write that failed must not leave the previous build's answer
         // where the analysis will read it as though it described this one.
-        if let Err(stuck) = std::fs::remove_file(&path) {
-            eprintln!(
-                "panicgraph: could not remove the stale artifact {}: {stuck}",
-                path.display()
-            );
+        // A write that never opened the file left nothing behind, and
+        // reporting the absence of what it was trying to remove would bury
+        // the error that actually stopped it.
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(stuck) if stuck.kind() == std::io::ErrorKind::NotFound => {}
+            Err(stuck) => {
+                eprintln!(
+                    "panicgraph: could not remove the stale artifact {}: \
+                     {stuck}",
+                    path.display()
+                );
+            }
         }
         return Err(err);
     }
