@@ -72,6 +72,8 @@ cargo install panicgraph --version VERSION --no-default-features -F svg
 cargo install panicgraph --version VERSION --no-default-features -F serve
 ```
 
+`VERSION` stands for the release you want, which `cargo search panicgraph`
+prints and `panicgraph --version` reports for a machine that already has one.
 Use `--path .` in place of `panicgraph --version VERSION` to build the same
 thing from a checkout.
 
@@ -217,6 +219,9 @@ refreshed rather than drifting.
 - run: cargo install panicgraph --version VERSION --locked
 - run: panicgraph check --baseline panicgraph.json --format github
 ```
+
+`VERSION` and `DATE` are placeholders for values you write into the file: a
+released version of this tool, and a nightly spelled `nightly-YYYY-MM-DD`.
 
 Pin the version. A release can change what the analysis reads, so a function
 no earlier version could explain may be reported by the next one, and a check
