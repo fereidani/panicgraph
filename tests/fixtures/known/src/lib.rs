@@ -1200,3 +1200,22 @@ pub fn must_char_high_bits(c: char, table: &[u8; 135]) -> u8 {
 pub fn clean_bool_index(b: bool, table: &[u8; 2]) -> u8 {
     table[usize::from(b)]
 }
+
+/// Clean. The guard measures the two lengths the prefix and the copy read,
+/// whichever way round it is written, and the prefix is exactly as long as
+/// the slice being copied into.
+pub fn clean_copy_prefix_under_guard(src: &[u8], dst: &mut [u8]) {
+    if src.len() < dst.len() {
+        return;
+    }
+    dst.copy_from_slice(&src[..dst.len()]);
+}
+
+/// Reaches `explicit`. The prefix is as long as a third slice, which says
+/// nothing about the one being copied into.
+pub fn must_copy_prefix_of_other(src: &[u8], dst: &mut [u8], other: &[u8]) {
+    if src.len() < other.len() {
+        return;
+    }
+    dst.copy_from_slice(&src[..other.len()]);
+}

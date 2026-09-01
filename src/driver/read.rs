@@ -76,8 +76,7 @@ impl<'tcx> Folder<'_, 'tcx> {
             | mir::Rvalue::Reborrow(_, _, place) => {
                 return Fact {
                     address: true,
-                    extent: self.reborrowed(state, place),
-                    ..Fact::default()
+                    ..self.reborrowed(state, place)
                 };
             }
             // Reading the discriminant of an enum the walk has settled is
@@ -93,14 +92,20 @@ impl<'tcx> Folder<'_, 'tcx> {
                 // A fat pointer is built from a thin one and what it points
                 // at, and for a slice that is how many elements it holds.
                 mir::AggregateKind::RawPtr(..) => {
-                    let extent = fields
-                        .iter()
-                        .nth(1)
-                        .map(|meta| self.fact(state, meta))
-                        .and_then(|fact| fact.value)
-                        .and_then(Value::bounds);
+                    let Some(meta) = fields.iter().nth(1) else {
+                        return Fact::default();
+                    };
+                    let held = self.fact(state, meta).value;
+                    // A slice as long as the length of another is as long
+                    // as that other, which is what settles the check a copy
+                    // between the two writes.
+                    let paired = match held {
+                        Some(Value::Length(of)) => Some(of),
+                        _ => None,
+                    };
                     return Fact {
-                        extent,
+                        extent: held.and_then(Value::bounds),
+                        paired,
                         ..Fact::default()
                     };
                 }
@@ -123,22 +128,32 @@ impl<'tcx> Folder<'_, 'tcx> {
         &self,
         state: &State<'tcx>,
         place: &mir::Place<'tcx>,
-    ) -> Option<Bounds<'tcx>> {
+    ) -> Fact<'tcx> {
+        let blank = Fact::default();
         let [mir::ProjectionElem::Deref] = place.projection.as_slice() else {
-            return None;
+            return blank;
         };
         if self.escapes(place.local) {
-            return None;
+            return blank;
         }
-        let decl = self.mir.local_decls.get(place.local)?;
-        let ty = self.monomorphize(decl.ty)?;
+        let Some(decl) = self.mir.local_decls.get(place.local) else {
+            return blank;
+        };
+        let Some(ty) = self.monomorphize(decl.ty) else {
+            return blank;
+        };
         let (ty::Ref(_, inner, _) | ty::RawPtr(inner, _)) = ty.kind() else {
-            return None;
+            return blank;
         };
         if !matches!(inner.kind(), ty::Slice(_) | ty::Str) {
-            return None;
+            return blank;
         }
-        Self::known_at(state, place.local).extent
+        let held = Self::known_at(state, place.local);
+        Fact {
+            extent: held.extent,
+            paired: held.paired,
+            ..blank
+        }
     }
 
     /// How long the slice an array was unsized into is.

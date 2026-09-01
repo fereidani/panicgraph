@@ -996,36 +996,43 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             Some((Against::Length(of), Some(held)))
         };
         let mirrored = value::mirrored(op);
-        let pick =
+        let orient =
             |what: &dyn Fn(&mir::Operand<'tcx>, BinOp) -> Measured<'tcx>| {
-                if let (Some(local), Some((against, source))) =
-                    (read(left), what(right, op))
-                {
-                    return Some(Compared {
-                        op,
-                        local,
-                        against,
-                        source,
-                    });
-                }
-                let (local, (against, source)) =
-                    (read(right)?, what(left, mirrored)?);
-                Some(Compared {
-                    op: mirrored,
-                    local,
-                    against,
-                    source,
-                })
+                [
+                    read(left).zip(what(right, op)).map(
+                        |(local, (against, source))| Compared {
+                            op,
+                            local,
+                            against,
+                            source,
+                        },
+                    ),
+                    read(right).zip(what(left, mirrored)).map(
+                        |(local, (against, source))| Compared {
+                            op: mirrored,
+                            local,
+                            against,
+                            source,
+                        },
+                    ),
+                ]
             };
-        let held = pick(&|operand, _| measure(operand));
-        let mut chained = pick(&inherited);
-        // The same place twice teaches nothing the first reading did not.
-        if let (Some(first), Some(second)) = (held, chained)
-            && first.local == second.local
-        {
-            chained = None;
+        let measured = orient(&|operand, _| measure(operand));
+        let chained = orient(&inherited);
+        // A comparison names two operands and either can be the one a claim
+        // is recorded against, so both readings are kept. The same place
+        // twice teaches nothing the first reading did not.
+        let mut found: [Option<Compared<'tcx>>; 2] = [None, None];
+        for candidate in measured.into_iter().chain(chained).flatten() {
+            match found {
+                [None, _] => found[0] = Some(candidate),
+                [Some(first), None] if first.local != candidate.local => {
+                    found[1] = Some(candidate);
+                }
+                _ => {}
+            }
         }
-        [held, chained]
+        found
     }
 
     /// Follows an `Assert`, recording it when its condition cannot fail.
