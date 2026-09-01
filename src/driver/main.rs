@@ -82,7 +82,18 @@ fn emit(tcx: TyCtxt<'_>) -> std::io::Result<()> {
     let stamp = tcx.stable_crate_id(LOCAL_CRATE).as_u64();
     let path = dir.join(format!("{krate}-{stamp:016x}.json"));
     let json = serde_json::to_vec(&artifact).map_err(std::io::Error::other)?;
-    std::fs::write(path, json)
+    if let Err(err) = std::fs::write(&path, json) {
+        // A write that failed must not leave the previous build's answer
+        // where the analysis will read it as though it described this one.
+        if let Err(stuck) = std::fs::remove_file(&path) {
+            eprintln!(
+                "panicgraph: could not remove the stale artifact {}: {stuck}",
+                path.display()
+            );
+        }
+        return Err(err);
+    }
+    Ok(())
 }
 
 /// Records the settings that change which panics exist.
