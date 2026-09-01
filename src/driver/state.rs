@@ -405,8 +405,12 @@ pub fn writes(stmt: &mir::Statement<'_>, local: mir::Local) -> bool {
         | mir::StatementKind::ConstEvalCounter
         | mir::StatementKind::Nop
         | mir::StatementKind::BackwardIncompatibleDropHint { .. } => false,
-        // Copying between pointers can land anywhere.
-        mir::StatementKind::Intrinsic(_) => true,
+        // Copying between pointers can land anywhere. An assumption is
+        // not a write at all: it states what already holds, so what the
+        // walk knows about the local survives it.
+        mir::StatementKind::Intrinsic(intrinsic) => {
+            !matches!(&**intrinsic, mir::NonDivergingIntrinsic::Assume(..))
+        }
     }
 }
 
