@@ -1233,3 +1233,15 @@ pub fn must_copy_two_lengths(src: &[u8], dst: &mut [u8], n: usize, m: usize) {
         dst[..m].copy_from_slice(&src[..n]);
     }
 }
+
+/// Clean. An unsigned value below another leaves that other above zero, so
+/// the remainder written under the guard cannot fail.
+pub fn clean_modulo_above_guard(lo: u32, n: u32) -> u32 {
+    if lo < n { lo % n } else { 0 }
+}
+
+/// Reaches `remainder-by-zero`. Two values merely not above each other can
+/// both be zero.
+pub fn must_modulo_at_most_guard(lo: u32, n: u32) -> u32 {
+    if lo <= n { lo % n } else { 0 }
+}

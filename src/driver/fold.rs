@@ -1041,6 +1041,20 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             let (_, of) = self.fact(state, operand).order.first()?;
             Some((Against::Length(of), Some(held)))
         };
+        // A value compared against one that lies in a range is compared
+        // against whichever end of that range the operator reads: past
+        // `lo < n`, `n` is above everything `lo` could be, which for an
+        // unsigned pair is above zero. That is what clears the division
+        // written under such a guard.
+        let bounded = |operand: &mir::Operand<'tcx>, op: BinOp| {
+            let span = self.spread(state, operand)?;
+            let end = match op {
+                BinOp::Lt | BinOp::Le => span.hi,
+                BinOp::Gt | BinOp::Ge => span.lo,
+                _ => return None,
+            };
+            Some((Against::Constant(end), read(operand)))
+        };
         let mirrored = value::mirrored(op);
         let orient =
             |what: &dyn Fn(&mir::Operand<'tcx>, BinOp) -> Measured<'tcx>| {
@@ -1065,11 +1079,13 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             };
         let measured = orient(&|operand, _| measure(operand));
         let chained = orient(&inherited);
+        let spanned = orient(&bounded);
         // A comparison names two operands and either can be the one a claim
         // is recorded against, so both readings are kept. The same place
         // twice teaches nothing the first reading did not.
         let mut found: [Option<Compared<'tcx>>; 2] = [None, None];
-        for candidate in measured.into_iter().chain(chained).flatten() {
+        let all = measured.into_iter().chain(chained).chain(spanned);
+        for candidate in all.flatten() {
             match &mut found {
                 [slot @ None, _] => *slot = Some(candidate),
                 [Some(first), slot @ None]
