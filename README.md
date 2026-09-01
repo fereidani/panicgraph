@@ -358,7 +358,14 @@ check a copy between those two slices writes. An ordering against a length
 survives the arithmetic done to it: `len - 1` and `at + 1` are still
 measured against the same slice, `i.min(len - 1)` keeps the tighter of the
 two bounds it was handed, and a value below one that is itself below a
-length is below that length too.
+length is below that length too. Two slices cut to one length are as long
+as each other, whether the length was named or worked out.
+
+A comparison is read from both sides and for what each side's range says
+about the other, so `lo < n` leaves `n` above zero for an unsigned pair and
+the division written under that guard cannot fail. A value is also compared
+with the one it was reached from, which is what settles the order check
+`&v[at..at + 4]` writes over its two ends.
 
 Where two arms of a branch meet, what both leave behind survives as a range
 instead of being given up, and a claim still moving after they have met is
@@ -369,12 +376,14 @@ keeps that bound.
 A claim belongs to the place it was read from rather than to whichever local
 happened to hold it, so a guard on `self.pos` still stands at the next read
 of that field, and a write to it, a call, or a pointer that could be aimed
-at it takes the claim away again. A shared reference is not such a pointer,
-since nothing is written through one, and neither is a pointer taken through
-another: storing into `v[i]` cannot change how long `v` is. Values carry
-what their own type says: a byte is an index every table of two hundred and
-fifty six has room for, and a pointer taken of a place holds an address, so
-the null check written under `NonNull::new` cannot fail. An enum carries
+at it takes the claim away again. The element an index names is such a
+place, and a write to the index names a different one. A shared reference is
+not such a pointer, since nothing is written through one, and neither is a
+pointer taken through another: storing into `v[i]` cannot change how long
+`v` is. Values carry what their own type says: a byte is an index every
+table of two hundred and fifty six has room for, a character reaches no
+further than the last code point, and a pointer taken of a place holds an
+address, so the null check written under `NonNull::new` cannot fail. An enum carries
 which variant it holds, which is what folds a `match` and what makes
 `unwrap` of a value built as `Some` reach nothing at all; one written as a
 niche has no tag of its own, so a value proved apart from the pattern that
