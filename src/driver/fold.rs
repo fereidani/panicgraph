@@ -507,10 +507,16 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             // What a body leaves behind is read here rather than after the
             // walk, since a local's claim only stands where it was made.
             TerminatorKind::Return => {
-                let left = Self::known_at(&state, mir::RETURN_PLACE)
-                    .value
-                    .and_then(portable);
-                self.returns = self.returns.met(left);
+                // The planes that name a local of this body describe
+                // nothing outside it, so they are dropped rather than
+                // handed to a caller that would read them as its own.
+                let held = Self::known_at(&state, mir::RETURN_PLACE);
+                self.returns = self.returns.met(Fact {
+                    value: held.value.and_then(portable),
+                    order: None,
+                    same: None,
+                    ..held
+                });
             }
             _ => Self::onward(kind, state, work),
         }
@@ -654,16 +660,20 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         {
             *slot = true;
         }
-        if let Some(value) = found.value
+        if found.left != Fact::default()
             && let Some(slot) = target
             && let Some(cell) = after.get_mut(slot.as_usize())
         {
-            *cell = Fact::of(value);
+            *cell = found.left;
         }
         if let Some(target) = call.target {
             work.merge(target, after);
         }
-        if let UnwindAction::Cleanup(cleanup) = call.unwind {
+        // A callee that cannot raise cannot unwind, so nothing reaches the
+        // cleanup path through it.
+        if let UnwindAction::Cleanup(cleanup) = call.unwind
+            && !found.quiet
+        {
             // The callee can write through a pointer it was handed and
             // unwind afterwards, so what escaped cannot be read in the
             // cleanup block either. The destination is left alone: a call

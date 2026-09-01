@@ -18,11 +18,13 @@ use crate::{
     value::{Bounds, Fact, Known, Value},
 };
 
-/// How far a chain of calls is followed for the value it returns.
+/// How far a chain of calls is followed for what it does.
 ///
-/// Each step is one more body on the stack, and the calls worth reading a
-/// value out of sit shallow: `cmp::max` is one step above `Ord::max`, which
-/// is the deepest of them.
+/// Each step is one more body on the stack. A value worth reading out of a
+/// call sits shallow, but showing that a call raises nothing means reading
+/// every call it makes in turn, and the standard library reaches an unsafe
+/// primitive several wrappers down: `chunks_exact` calls a constructor
+/// which calls a split which calls the pointer arithmetic under it.
 pub const DEPTH: u32 = 3;
 
 /// How many blocks folding one body may spend on the callees it reads
@@ -33,37 +35,35 @@ pub const DEPTH: u32 = 3;
 /// wide subgraph from paying for all of it.
 pub const BUDGET: u32 = 4096;
 
-/// What every path out of a body was found to return.
+/// What every path out of a body was found to leave in the return place.
 #[derive(Debug, Clone, Copy)]
 pub enum Returns<'tcx> {
     /// No path that returns has been walked.
     Never,
-    /// Every such path leaves a value this claim admits.
-    Held(Value<'tcx>),
+    /// Every such path leaves something these claims admit.
+    Held(Fact<'tcx>),
     /// Nothing definite.
     Anything,
 }
 
 impl<'tcx> Returns<'tcx> {
     /// Adds what one path out of the body leaves behind.
-    pub fn met(self, value: Option<Value<'tcx>>) -> Self {
-        match (self, value) {
-            (Self::Anything, _) | (_, None) => Self::Anything,
-            (Self::Never, Some(found)) => Self::Held(found),
-            (Self::Held(held), Some(found)) => {
-                held.join(found).map_or(Self::Anything, Self::Held)
-            }
+    pub fn met(self, left: Fact<'tcx>) -> Self {
+        match self {
+            Self::Anything => Self::Anything,
+            Self::Never => Self::Held(left),
+            Self::Held(held) => Self::Held(held.joined(left)),
         }
     }
 
     /// The claim every path agrees on.
     ///
     /// A body no path returns from has none: the call never comes back, so
-    /// there is no value for the caller to read.
-    pub const fn claim(self) -> Option<Value<'tcx>> {
+    /// there is nothing for the caller to read.
+    pub fn claim(self) -> Fact<'tcx> {
         match self {
-            Self::Held(value) => Some(value),
-            Self::Never | Self::Anything => None,
+            Self::Held(fact) => fact,
+            Self::Never | Self::Anything => Fact::default(),
         }
     }
 }
@@ -71,8 +71,8 @@ impl<'tcx> Returns<'tcx> {
 /// What folding a callee at one call site found.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Found<'tcx> {
-    /// The value every path out of the callee leaves behind.
-    pub value: Option<Value<'tcx>>,
+    /// What every path out of the callee leaves behind.
+    pub left: Fact<'tcx>,
     /// Whether the callee, walked with these arguments, can still raise.
     pub quiet: bool,
 }
@@ -121,41 +121,11 @@ impl<'tcx> Folder<'_, 'tcx> {
         };
         if let Some(value) = self.contracted(state, ty, args, destination) {
             return Found {
-                value: Some(value),
+                left: Fact::of(value),
                 quiet: false,
             };
         }
-        if !self.worth_folding(state, args, destination) {
-            return Found::default();
-        }
         self.folded(state, ty, args)
-    }
-
-    /// Whether folding a callee could tell this call site anything.
-    ///
-    /// A call the walk knows nothing about the arguments of folds to what
-    /// the callee does everywhere, which the graph it belongs to already
-    /// accounts for. What earns the walk is an argument carrying a fact
-    /// into the callee, or a result a check downstream can read.
-    fn worth_folding(
-        &self,
-        state: &State<'tcx>,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
-        destination: mir::Place<'tcx>,
-    ) -> bool {
-        let known = |arg: &rustc_span::Spanned<mir::Operand<'tcx>>| {
-            let fact = self.fact(state, &arg.node);
-            fact.tag.is_some()
-                || fact.extent.is_some()
-                || fact.value.and_then(portable).is_some()
-        };
-        if args.iter().any(known) {
-            return true;
-        }
-        let result = destination.ty(&self.mir.local_decls, self.tcx).ty;
-        self.monomorphize(result)
-            .and_then(|ty| self.width(ty))
-            .is_some()
     }
 
     /// The value a call returns by the contract of what it calls.
@@ -262,8 +232,8 @@ impl<'tcx> Folder<'_, 'tcx> {
         let reach = folder.run(entry);
         self.budget = folder.budget;
         Found {
-            value: folder.returns.claim(),
-            quiet: Self::silent(mir, &reach),
+            left: folder.returns.claim(),
+            quiet: self.silent(mir, &reach),
         }
     }
 
@@ -301,7 +271,7 @@ impl<'tcx> Folder<'_, 'tcx> {
     /// terminator with nowhere to raise from, or a check the walk settled.
     /// A call or a drop is not one of them: what either runs is a body this
     /// walk did not read.
-    fn silent(mir: &mir::Body<'tcx>, reach: &Reach) -> bool {
+    fn silent(&self, mir: &mir::Body<'tcx>, reach: &Reach) -> bool {
         for (bb, data) in mir.basic_blocks.iter_enumerated() {
             if !reach.is_live(bb) {
                 continue;
@@ -311,6 +281,17 @@ impl<'tcx> Folder<'_, 'tcx> {
             };
             let silent = match &term.kind {
                 TerminatorKind::Assert { .. } => reach.is_settled(bb),
+                // A call the walk read for these arguments and found
+                // unable to raise leaves this body nothing to raise
+                // either. The depth the reading is bounded by is what
+                // stops the chain.
+                TerminatorKind::Call { .. } => reach.is_quiet(bb),
+                // Dropping a value of a type with nothing to run is the
+                // compiler writing down that the value ends here.
+                TerminatorKind::Drop { place, .. } => {
+                    let ty = place.ty(&mir.local_decls, self.tcx).ty;
+                    !ty.needs_drop(self.tcx, TypingEnv::fully_monomorphized())
+                }
                 TerminatorKind::Goto { .. }
                 | TerminatorKind::SwitchInt { .. }
                 | TerminatorKind::Return

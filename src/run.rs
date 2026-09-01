@@ -241,15 +241,38 @@ fn discard_if_stale(layout: &Layout, marker: &str) -> Result<()> {
 
 /// Removes a directory and everything under it, if it is there at all.
 ///
-/// A directory that has already gone is the result this asks for, however it
-/// went: two runs against the same crate can each decide to discard the same
-/// stale tree, and the one that arrives second has nothing left to do.
+/// The tree is moved aside before it is taken apart. Two runs against the
+/// same crate can each decide to discard the same stale results, and pulling
+/// a tree apart while another process walks it fails part way through. The
+/// rename is atomic, so exactly one run owns the old tree and the other
+/// finds nothing to move; a directory that has already gone is the result
+/// this asks for, however it went.
 fn clear(dir: &Path) -> Result<()> {
-    match fs::remove_dir_all(dir) {
+    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
+        return Ok(());
+    };
+    let aside = parent.join(format!(
+        "{}.discarded-{}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    match fs::rename(dir, &aside) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(());
+        }
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("could not clear {}", dir.display()));
+        }
+    }
+    // The tree carries this run's own name now, so nothing else is walking
+    // it and only the housekeeping sweep can have taken it first.
+    match fs::remove_dir_all(&aside) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err)
-            .with_context(|| format!("could not clear {}", dir.display())),
+            .with_context(|| format!("could not remove {}", aside.display())),
     }
 }
 

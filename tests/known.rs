@@ -83,6 +83,9 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_take_four", "explicit"),
     ("must_index_after_shrink", "index"),
     ("must_loop_past_the_end", "index"),
+    ("must_chunks_of_a_size", "explicit"),
+    ("must_step_by_a_size", "explicit"),
+    ("must_split_unguarded", "explicit"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -153,6 +156,9 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_copy_two_arrays",
     "clean_last_of_guarded",
     "clean_pass_array_of_four",
+    "clean_chunks_of_a_constant",
+    "clean_step_by_a_constant",
+    "clean_split_after_guard",
 ];
 
 /// The functions that must stay clean in a debug build as well.

@@ -871,3 +871,36 @@ pub fn must_loop_past_the_end(table: &[u8; 16]) -> u32 {
     }
     total
 }
+
+/// Clean. The chunk size is a constant the library's own check settles, and
+/// every call it makes below that is read the same way.
+pub fn clean_chunks_of_a_constant(v: &[u8]) -> &[u8] {
+    v.chunks_exact(4).remainder()
+}
+
+/// Reaches `explicit`. A chunk size the caller does not settle is one the
+/// library refuses.
+pub fn must_chunks_of_a_size(v: &[u8], size: usize) -> &[u8] {
+    v.chunks_exact(size).remainder()
+}
+
+/// Clean. The step is a constant, so the check the adapter writes over it
+/// cannot fail.
+pub fn clean_step_by_a_constant(n: usize) -> usize {
+    (0..n).step_by(2).count()
+}
+
+/// Reaches `explicit`. A step of zero is one the adapter refuses.
+pub fn must_step_by_a_size(n: usize, step: usize) -> usize {
+    (0..n).step_by(step).count()
+}
+
+/// Clean. The guard measures the same length the split is checked against.
+pub fn clean_split_after_guard(v: &[u8]) -> (&[u8], &[u8]) {
+    if v.len() >= 2 { v.split_at(2) } else { (v, v) }
+}
+
+/// Reaches `explicit`. Nothing here says the slice is long enough.
+pub fn must_split_unguarded(v: &[u8]) -> (&[u8], &[u8]) {
+    v.split_at(2)
+}
