@@ -689,16 +689,25 @@ impl<'tcx> Folder<'_, 'tcx> {
     }
 
     /// Every value a type admits.
+    ///
+    /// A `char` and a `bool` hold fewer values than their width allows, and
+    /// saying so is what settles the table lookup a code point is used for.
     pub fn whole(&self, ty: Ty<'tcx>) -> Option<Bounds<'tcx>> {
-        if !matches!(ty.kind(), ty::Int(_) | ty::Uint(_)) {
-            return None;
-        }
         let seed = Known {
             bits: 0,
             ty,
             width: self.width(ty)?,
         };
-        Bounds::new(seed.type_min(), seed.type_max())
+        let top = match ty.kind() {
+            ty::Int(_) | ty::Uint(_) => seed.type_max(),
+            ty::Char => Known {
+                bits: u128::from(char::MAX as u32),
+                ..seed
+            },
+            ty::Bool => Known { bits: 1, ..seed },
+            _ => return None,
+        };
+        Bounds::new(seed.type_min(), top)
     }
 
     /// Whether a type is the standard library's nonzero wrapper.

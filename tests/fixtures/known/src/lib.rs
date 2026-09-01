@@ -1184,3 +1184,19 @@ pub fn must_inner_after_move(v: &[&[u8]], mut i: usize) -> u8 {
         0
     }
 }
+
+/// Clean. A character holds fewer values than its width allows, so the top
+/// bits of one are an index the table has room for.
+pub fn clean_char_high_bits(c: char, table: &[u8; 136]) -> u8 {
+    table[(c as usize) >> 13]
+}
+
+/// Reaches `index`. One entry short of what a character can reach.
+pub fn must_char_high_bits(c: char, table: &[u8; 135]) -> u8 {
+    table[(c as usize) >> 13]
+}
+
+/// Clean. A boolean is one of two values, and the table has both.
+pub fn clean_bool_index(b: bool, table: &[u8; 2]) -> u8 {
+    table[usize::from(b)]
+}
