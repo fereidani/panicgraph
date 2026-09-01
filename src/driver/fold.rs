@@ -25,8 +25,8 @@ use rustc_middle::{
 use crate::{
     state::{
         Compared, Path, Places, READINGS, STEPS, State, Subject, Work,
-        escaping, forget, refined, retire, root_of, sweep_aliased, sweep_base,
-        sweep_indexed, unwind_to, writes,
+        escaping, forget, put, refined, retire, root_of, sweep_aliased,
+        sweep_base, sweep_indexed, unwind_to, writes,
     },
     summary::{BUDGET, Returns, portable},
     value::{self, Against, Fact, Known, Ranks, Thresholds, Value},
@@ -37,6 +37,14 @@ pub struct Reach {
     live: Vec<bool>,
     settled: Vec<bool>,
     quiet: Vec<bool>,
+}
+
+/// Records a flag against one block, ignoring a block the walk does not
+/// track.
+fn mark(flags: &mut [bool], bb: BasicBlock, value: bool) {
+    if let Some(slot) = flags.get_mut(bb.as_usize()) {
+        *slot = value;
+    }
 }
 
 impl Reach {
@@ -302,12 +310,8 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         // verdict about the block's own check is therefore replaced rather
         // than added to: settling it on one path says nothing about the
         // block once another path reaches it with a different value.
-        if let Some(slot) = reach.settled.get_mut(bb.as_usize()) {
-            *slot = false;
-        }
-        if let Some(slot) = reach.quiet.get_mut(bb.as_usize()) {
-            *slot = false;
-        }
+        mark(&mut reach.settled, bb, false);
+        mark(&mut reach.quiet, bb, false);
         // The body outlives the walk, so reading it through a copy of the
         // reference leaves the walk free to record what it finds.
         let mir: &'a mir::Body<'tcx> = self.mir;
@@ -319,9 +323,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 return;
             }
         }
-        if let Some(slot) = reach.live.get_mut(bb.as_usize()) {
-            *slot = true;
-        }
+        mark(&mut reach.live, bb, true);
         let Some(term) = &block.terminator else {
             return;
         };
@@ -347,10 +349,8 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                     // A link to the place being written says nothing.
                     fact.same = None;
                 }
-                if let Some(slot) = target
-                    && let Some(cell) = state.get_mut(slot.as_usize())
-                {
-                    *cell = fact;
+                if let Some(slot) = target {
+                    put(state, slot, fact);
                 }
                 self.constructed(state, place, rvalue);
                 self.sized_by(state, place, rvalue);
@@ -445,7 +445,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 if def.is_union() {
                     return;
                 }
-                def.is_enum().then_some(*variant)
+                def.is_enum().then(|| variant.as_u32())
             }
             _ => return,
         };
@@ -462,21 +462,15 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             if fact == Fact::default() {
                 continue;
             }
-            let ty = operand.ty(&self.mir.local_decls, self.tcx);
-            let step = mir::ProjectionElem::Field(index, ty);
-            let field = variant.map_or_else(
-                || place.project_deeper(&[step], self.tcx),
-                |at| {
-                    place.project_deeper(
-                        &[mir::ProjectionElem::Downcast(None, at), step],
-                        self.tcx,
-                    )
-                },
-            );
-            if let Some(slot) = self.slot_of(&field)
-                && let Some(cell) = state.get_mut(slot.as_usize())
-            {
-                *cell = fact;
+            // The path is built the way the collector built it rather
+            // than by rebuilding the place: projecting deeper allocates and
+            // interns, and this runs for every field of every constructor
+            // the walk reads.
+            let slot = Path::under(place, variant, index.as_u32())
+                .and_then(|path| self.places.at(path))
+                .filter(|slot| !self.escapes(*slot));
+            if let Some(slot) = slot {
+                put(state, slot, fact);
             }
         }
     }
@@ -589,7 +583,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                     target: *target,
                     unwind: *unwind,
                 },
-                &state,
+                state,
                 reach,
                 work,
             ),
@@ -600,7 +594,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 drop,
                 ..
             } => {
-                let mut after = state.clone();
+                let mut after = state;
                 self.overwrite(&mut after, place);
                 // Glue runs a body this walk did not read, and it holds a
                 // pointer to what it drops.
@@ -611,7 +605,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 }
                 // Glue that unwinds part way through has still run part
                 // way, so the cleanup path inherits the same losses.
-                unwind_to(*unwind, &after, work);
+                unwind_to(*unwind, after, work);
             }
             // What a body leaves behind is read here rather than after the
             // walk, since a local's claim only stands where it was made.
@@ -651,13 +645,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     /// caller reads holds what this body wrote there. Every path out has to
     /// agree, the way the return place itself does.
     fn left_behind(&mut self, state: &State<'tcx>, first: bool) {
-        let count = self.places.len();
-        let base = self.mir.local_decls.len();
-        for index in 0..count {
-            let slot = mir::Local::from_usize(base.saturating_add(index));
-            let Some(path) = self.places.path(slot) else {
-                continue;
-            };
+        for (slot, path) in self.places.each() {
             if path.base != mir::RETURN_PLACE || !path.portable() {
                 continue;
             }
@@ -768,6 +756,26 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     /// Only this block is read, and the reading may not be undone before
     /// the branch, so what the arm proves is about the value it branched
     /// on.
+    /// The last whole assignment to a local in a block, with the statements
+    /// that follow it.
+    ///
+    /// A local written in parts, or written by something other than an
+    /// assignment, has no one rvalue behind it, which is what the caller
+    /// needs before it reads what the value was built from.
+    fn assigned(
+        &self,
+        bb: BasicBlock,
+        local: mir::Local,
+    ) -> Option<(&'a mir::Rvalue<'tcx>, &'a [mir::Statement<'tcx>])> {
+        let statements = &self.mir.basic_blocks[bb].statements;
+        let at = statements.iter().rposition(|s| writes(s, local))?;
+        let mir::StatementKind::Assign(pair) = &statements[at].kind else {
+            return None;
+        };
+        (pair.0.as_local() == Some(local))
+            .then(|| (&pair.1, &statements[at.saturating_add(1)..]))
+    }
+
     fn tagged(
         &self,
         bb: BasicBlock,
@@ -779,21 +787,12 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             return None;
         };
         let read = place.as_local()?;
-        let block = &self.mir.basic_blocks[bb];
-        let at = block.statements.iter().rposition(|s| writes(s, read))?;
-        let mir::StatementKind::Assign(pair) = &block.statements[at].kind
-        else {
-            return None;
-        };
-        if pair.0.as_local() != Some(read) {
-            return None;
-        }
-        let mir::Rvalue::Discriminant(of) = &pair.1 else {
+        let (rvalue, after) = self.assigned(bb, read)?;
+        let mir::Rvalue::Discriminant(of) = rvalue else {
             return None;
         };
         let slot = self.slot_of(of)?;
         let ty = self.enum_at(of)?;
-        let after = &block.statements[at.saturating_add(1)..];
         if after
             .iter()
             .any(|s| self.touches(s, read) || self.touches(s, slot))
@@ -845,7 +844,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         &mut self,
         bb: BasicBlock,
         call: Call<'_, 'tcx>,
-        state: &State<'tcx>,
+        state: State<'tcx>,
         reach: &mut Reach,
         work: &mut Work<'tcx>,
     ) {
@@ -855,22 +854,19 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         // What the callee was handed a pointer to is not read by this walk.
         sweep_aliased(&mut after, &self.places, &self.escaped);
         let found = self.inspect(
-            state,
+            &state,
             call.func,
             call.args,
             call.destination,
             &mut after,
         );
-        if found.quiet
-            && let Some(slot) = reach.quiet.get_mut(bb.as_usize())
-        {
-            *slot = true;
+        if found.quiet {
+            mark(&mut reach.quiet, bb, true);
         }
         if found.left != Fact::default()
             && let Some(slot) = target
-            && let Some(cell) = after.get_mut(slot.as_usize())
         {
-            *cell = found.left;
+            put(&mut after, slot, found.left);
         }
         if let Some(target) = call.target {
             work.merge(target, after);
@@ -884,7 +880,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             // unwind afterwards, so what escaped cannot be read in the
             // cleanup block either. The destination is left alone: a call
             // that unwound never wrote one.
-            let mut unwound = state.clone();
+            let mut unwound = state;
             sweep_aliased(&mut unwound, &self.places, &self.escaped);
             work.merge(cleanup, unwound);
         }
@@ -909,7 +905,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 unwind,
             } => {
                 work.merge(*real_target, state.clone());
-                unwind_to(*unwind, &state, work);
+                unwind_to(*unwind, state, work);
             }
             TerminatorKind::UnwindResume
             | TerminatorKind::UnwindTerminate(_)
@@ -965,19 +961,10 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         state: &State<'tcx>,
     ) -> [Option<Compared<'tcx>>; READINGS] {
         let none = [None; READINGS];
-        let block = &self.mir.basic_blocks[bb];
-        let Some(at) = block.statements.iter().rposition(|s| writes(s, result))
-        else {
+        let Some((rvalue, after)) = self.assigned(bb, result) else {
             return none;
         };
-        let mir::StatementKind::Assign(pair) = &block.statements[at].kind
-        else {
-            return none;
-        };
-        if pair.0.as_local() != Some(result) {
-            return none;
-        }
-        let mir::Rvalue::BinaryOp(op, operands) = &pair.1 else {
+        let mir::Rvalue::BinaryOp(op, operands) = rvalue else {
             return none;
         };
         if !matches!(
@@ -991,7 +978,6 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         ) {
             return none;
         }
-        let after = &block.statements[at.saturating_add(1)..];
         let mut found = self.compared(state, *op, &operands.0, &operands.1);
         for slot in &mut found {
             let Some(measured) = *slot else {
@@ -1150,6 +1136,35 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         Some((Against::Constant(end), self.slot_read(operand)))
     }
 
+    /// Reads a comparison from both sides, pairing each operand's local
+    /// with what the other side measures it against.
+    fn oriented<F>(
+        &self,
+        op: BinOp,
+        left: &mir::Operand<'tcx>,
+        right: &mir::Operand<'tcx>,
+        arm: Option<bool>,
+        what: F,
+    ) -> [Option<Compared<'tcx>>; 2]
+    where
+        F: Fn(&mir::Operand<'tcx>, BinOp) -> Measured<'tcx>,
+    {
+        let one = |op, local: Option<mir::Local>, found: Measured<'tcx>| {
+            local.zip(found).map(|(local, (against, source))| Compared {
+                op,
+                local,
+                against,
+                source,
+                arm,
+            })
+        };
+        let mirrored = value::mirrored(op);
+        [
+            one(op, self.slot_read(left), what(right, op)),
+            one(mirrored, self.slot_read(right), what(left, mirrored)),
+        ]
+    }
+
     /// Splits a comparison into the locals it measures, what each is
     /// measured against, and the operator read with that local on the left.
     ///
@@ -1165,74 +1180,38 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         left: &mir::Operand<'tcx>,
         right: &mir::Operand<'tcx>,
     ) -> [Option<Compared<'tcx>>; READINGS] {
-        let read = |operand: &mir::Operand<'tcx>| self.slot_read(operand);
-        let measure = |operand: &mir::Operand<'tcx>| self.named(state, operand);
-        let placed =
-            |operand: &mir::Operand<'tcx>, _: BinOp| self.sited(state, operand);
-        let inherited = |operand: &mir::Operand<'tcx>, op: BinOp| {
-            self.chained_to(state, operand, op)
-        };
-        let bounded = |operand: &mir::Operand<'tcx>, op: BinOp| {
-            self.ended(state, operand, op)
-        };
         // The arm where the comparison fails reads the other end of the
         // same range: what fails `a < b` is `a >= b`, and what bounds `a`
-        // from below is the bottom of `b` rather than its top.
-        let failing = |operand: &mir::Operand<'tcx>, op: BinOp| {
-            self.ended(state, operand, value::negated(op))
-        };
-        let mirrored = value::mirrored(op);
-        let orient =
-            |what: &dyn Fn(&mir::Operand<'tcx>, BinOp) -> Measured<'tcx>| {
-                [
-                    read(left).zip(what(right, op)).map(
-                        |(local, (against, source))| Compared {
-                            op,
-                            local,
-                            against,
-                            source,
-                            arm: None,
-                        },
-                    ),
-                    read(right).zip(what(left, mirrored)).map(
-                        |(local, (against, source))| Compared {
-                            op: mirrored,
-                            local,
-                            against,
-                            source,
-                            arm: None,
-                        },
-                    ),
-                ]
-            };
-        let measured = orient(&|operand, _| measure(operand));
-        let chained = orient(&inherited);
-        // Each range reading is for one arm: the end it names is the end
-        // that arm's comparison points at.
-        let spanned = orient(&bounded).map(|held| {
-            held.map(|one| Compared {
-                arm: Some(true),
-                ..one
+        // from below is the bottom of `b` rather than its top. Each range
+        // reading is for one arm, since the end it names is the end that
+        // arm's comparison points at.
+        let all = self
+            .oriented(op, left, right, None, |operand, _| {
+                self.named(state, operand)
             })
-        });
-        let otherwise = orient(&failing).map(|held| {
-            held.map(|one| Compared {
-                arm: Some(false),
-                ..one
-            })
-        });
+            .into_iter()
+            .chain(self.oriented(op, left, right, None, |operand, op| {
+                self.chained_to(state, operand, op)
+            }))
+            .chain(self.oriented(op, left, right, Some(true), |operand, op| {
+                self.ended(state, operand, op)
+            }))
+            .chain(self.oriented(
+                op,
+                left,
+                right,
+                Some(false),
+                |operand, op| self.ended(state, operand, value::negated(op)),
+            ))
+            .chain(self.oriented(op, left, right, None, |operand, _| {
+                self.sited(state, operand)
+            }));
         // A comparison names two operands and either can be the one a claim
         // is recorded against, so every reading of both is kept: they
         // describe the same comparison from different sides and what one
         // proves the others do not. A reading already held is dropped,
         // since repeating it teaches nothing.
         let mut found: [Option<Compared<'tcx>>; READINGS] = [None; READINGS];
-        let all = measured
-            .into_iter()
-            .chain(chained)
-            .chain(spanned)
-            .chain(otherwise)
-            .chain(orient(&placed));
         for candidate in all.flatten() {
             if found.iter().flatten().any(|kept| *kept == candidate) {
                 continue;
@@ -1261,19 +1240,17 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         let held = Some(u128::from(expected));
         match self.exact(&state, cond).map(Known::truth) {
             Some(actual) if actual == expected => {
-                if let Some(slot) = reach.settled.get_mut(bb.as_usize()) {
-                    *slot = true;
-                }
+                mark(&mut reach.settled, bb, true);
                 work.merge(target, state);
             }
             // The check fails every time, so only the panic path continues.
-            Some(_) => unwind_to(unwind, &state, work),
+            Some(_) => unwind_to(unwind, state, work),
             None => {
                 work.merge(
                     target,
                     refined(&state, proved.as_ref(), held, true),
                 );
-                unwind_to(unwind, &state, work);
+                unwind_to(unwind, state, work);
             }
         }
     }

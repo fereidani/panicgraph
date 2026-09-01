@@ -25,7 +25,7 @@ use crate::value::{
 /// recorded from the first arm and joined with the second. A third arrival
 /// is a loop coming round, where a range that moves has to be pushed to the
 /// end of its type rather than creeping there an iteration at a time.
-pub const PRECISE: u32 = 2;
+const PRECISE: u32 = 2;
 
 /// How many times one local's claim can change before it holds nothing.
 ///
@@ -203,7 +203,8 @@ pub fn escaping<'tcx>(
             // Nothing is written through a shared reference, so the place
             // it was taken of holds what it held. A type carrying a cell is
             // the exception, and `is_freeze` is what tells the two apart.
-            if shared && frozen(tcx, env, mir, place) {
+            if shared && place.ty(&mir.local_decls, tcx).ty.is_freeze(tcx, env)
+            {
                 continue;
             }
             if let Some(slot) = escaped.get_mut(place.local.as_usize()) {
@@ -214,15 +215,11 @@ pub fn escaping<'tcx>(
     escaped
 }
 
-/// Whether a place holds no interior mutability, so a shared reference to
-/// it can never be written through.
-fn frozen<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    env: ty::TypingEnv<'tcx>,
-    mir: &mir::Body<'tcx>,
-    place: &mir::Place<'tcx>,
-) -> bool {
-    place.ty(&mir.local_decls, tcx).ty.is_freeze(tcx, env)
+/// Records a claim against one slot, ignoring a slot outside the state.
+pub fn put<'tcx>(state: &mut State<'tcx>, slot: mir::Local, fact: Fact<'tcx>) {
+    if let Some(cell) = state.get_mut(slot.as_usize()) {
+        *cell = fact;
+    }
 }
 
 /// The local a local's link of sameness points at, or the local itself.
@@ -474,11 +471,11 @@ pub fn retire(state: &mut State<'_>, local: mir::Local) {
 /// Follows the cleanup path a terminator can take.
 pub fn unwind_to<'tcx>(
     unwind: UnwindAction,
-    state: &State<'tcx>,
+    state: State<'tcx>,
     work: &mut Work<'tcx>,
 ) {
     if let UnwindAction::Cleanup(target) = unwind {
-        work.merge(target, state.clone());
+        work.merge(target, state);
     }
 }
 
