@@ -10,12 +10,13 @@ use rustc_middle::{
     mir::{self, TerminatorKind},
     ty::{self, Instance, Ty, TypeVisitableExt, TypingEnv},
 };
+use rustc_span::{Spanned, sym};
 
 use crate::{
     fold::{Folder, Reach},
     sinks::SinkTable,
-    state::{State, root_of},
-    value::{Bounds, Fact, Known, LenRel, Ranks, Value},
+    state::{State, put},
+    value::{self, Bounds, Fact, Known, LenRel, Ranks, Value},
 };
 
 /// How far a chain of calls is followed for what it does.
@@ -134,13 +135,11 @@ impl<'tcx> Folder<'_, 'tcx> {
         &mut self,
         state: &State<'tcx>,
         func: &mir::Operand<'tcx>,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        args: &[Spanned<mir::Operand<'tcx>>],
         destination: mir::Place<'tcx>,
         after: &mut State<'tcx>,
     ) -> Found<'tcx> {
-        let Some(ty) =
-            self.monomorphize(func.ty(&self.mir.local_decls, self.tcx))
-        else {
+        let Some(ty) = self.ty_of(func) else {
             return Found::default();
         };
         if let Some(left) = self.contracted(state, ty, args, destination) {
@@ -160,7 +159,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         &self,
         state: &State<'tcx>,
         func: Ty<'tcx>,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        args: &[Spanned<mir::Operand<'tcx>>],
         destination: mir::Place<'tcx>,
     ) -> Option<Fact<'tcx>> {
         let ty::FnDef(did, _) = *func.kind() else {
@@ -169,18 +168,31 @@ impl<'tcx> Folder<'_, 'tcx> {
         if self.tcx.crate_name(did.krate).as_str() != "core" {
             return None;
         }
+        // The path below is built to be matched against, and building it
+        // allocates. The leaf settles the question first, since no contract
+        // here is written on any other name.
+        let leaf = self.tcx.def_key(did).disambiguated_data.data.get_opt_name();
+        if !leaf.is_some_and(|name| {
+            matches!(
+                name.as_str(),
+                "len"
+                    | "max"
+                    | "min"
+                    | "ctlz"
+                    | "ctlz_nonzero"
+                    | "cttz"
+                    | "cttz_nonzero"
+                    | "ctpop"
+                    | "new"
+                    | "get"
+            )
+        }) {
+            return None;
+        }
         match SinkTable::def_path(self.tcx, did).as_str() {
             "slice::len" => {
-                let receiver = args.first()?;
-                let (mir::Operand::Copy(place) | mir::Operand::Move(place)) =
-                    &receiver.node
-                else {
-                    return None;
-                };
-                Some(Folder::measuring(Value::Length(root_of(
-                    state,
-                    self.slot_of(place)?,
-                ))))
+                let of = self.root_slot(state, &args.first()?.node)?;
+                Some(Folder::measuring(Value::Length(of)))
             }
             // Picking the larger or the smaller of two numbers is what
             // pins a value away from the end of its range, and the two are
@@ -208,9 +220,7 @@ impl<'tcx> Folder<'_, 'tcx> {
             "num::nonzero::new" => self.wrapped(state, args, destination),
             "num::nonzero::get" => {
                 let receiver = args.first()?;
-                let source = self.monomorphize(
-                    receiver.node.ty(&self.mir.local_decls, self.tcx),
-                )?;
+                let source = self.ty_of(&receiver.node)?;
                 if !self.is_nonzero(source) {
                     return None;
                 }
@@ -241,7 +251,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         &mut self,
         state: &State<'tcx>,
         func: Ty<'tcx>,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        args: &[Spanned<mir::Operand<'tcx>>],
         destination: mir::Place<'tcx>,
         after: &mut State<'tcx>,
     ) -> Found<'tcx> {
@@ -325,16 +335,12 @@ impl<'tcx> Folder<'_, 'tcx> {
                     reach.is_quiet(bb) || self.defined(callee, func)
                 }
                 // Dropping a value of a type with nothing to run is the
-                // compiler writing down that the value ends here.
-                // Dropping a value of a type with nothing to run is the
                 // compiler writing down that the value ends here. The type
                 // is read for the instantiation this call makes: a
                 // parameter has drop glue for some arguments and none for
                 // others, and only one of them is in front of us.
                 TerminatorKind::Drop { place, .. } => callee
-                    .monomorphize(
-                        place.ty(&callee.mir.local_decls, self.tcx).ty,
-                    )
+                    .ty_at(place)
                     .is_some_and(|ty| !ty.needs_drop(self.tcx, callee.env)),
                 TerminatorKind::Goto { .. }
                 | TerminatorKind::SwitchInt { .. }
@@ -365,9 +371,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         callee: &Folder<'_, 'tcx>,
         func: &mir::Operand<'tcx>,
     ) -> bool {
-        let Some(ty) =
-            callee.monomorphize(func.ty(&callee.mir.local_decls, self.tcx))
-        else {
+        let Some(ty) = callee.ty_of(func) else {
             return false;
         };
         let ty::FnDef(did, generics) = *ty.kind() else {
@@ -409,7 +413,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         &self,
         state: &State<'tcx>,
         callee: &Folder<'_, 'tcx>,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        args: &[Spanned<mir::Operand<'tcx>>],
     ) -> State<'tcx> {
         let mut entry = callee.blank();
         let carried: Vec<Carried<'tcx>> = args
@@ -507,9 +511,7 @@ impl<'tcx> Folder<'_, 'tcx> {
             if self.escapes(slot) {
                 continue;
             }
-            if let Some(cell) = after.get_mut(slot.as_usize()) {
-                *cell = *fact;
-            }
+            put(after, slot, *fact);
         }
     }
 
@@ -526,13 +528,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         carried: &[Carried<'tcx>],
         entry: &mut State<'tcx>,
     ) {
-        let count = callee.places.len();
-        let first = callee.mir.local_decls.len();
-        for index in 0..count {
-            let slot = mir::Local::from_usize(first.saturating_add(index));
-            let Some(path) = callee.places.path(slot) else {
-                continue;
-            };
+        for (slot, path) in callee.places.each() {
             if callee.escapes(slot) || !path.portable() {
                 continue;
             }
@@ -552,9 +548,7 @@ impl<'tcx> Folder<'_, 'tcx> {
             if fact == Fact::default() {
                 continue;
             }
-            if let Some(cell) = entry.get_mut(slot.as_usize()) {
-                *cell = fact;
-            }
+            put(entry, slot, fact);
         }
     }
 
@@ -564,22 +558,16 @@ impl<'tcx> Folder<'_, 'tcx> {
         state: &State<'tcx>,
         callee: &Folder<'_, 'tcx>,
         index: usize,
-        arg: &rustc_span::Spanned<mir::Operand<'tcx>>,
+        arg: &Spanned<mir::Operand<'tcx>>,
     ) -> Carried<'tcx> {
         let local = mir::Local::from_usize(index.saturating_add(1));
-        let slot = match &arg.node {
-            mir::Operand::Copy(place) | mir::Operand::Move(place) => {
-                self.slot_of(place).map(|slot| root_of(state, slot))
-            }
-            _ => None,
-        };
+        let slot = self.root_slot(state, &arg.node);
         let param = callee
             .mir
             .local_decls
             .get(local)
             .and_then(|decl| callee.monomorphize(decl.ty));
-        let passed =
-            self.monomorphize(arg.node.ty(&self.mir.local_decls, self.tcx));
+        let passed = self.ty_of(&arg.node);
         let alike = param.is_some() && param == passed;
         let held = self.fact(state, &arg.node);
         let fact = Fact {
@@ -613,18 +601,17 @@ impl<'tcx> Folder<'_, 'tcx> {
     fn wrapped(
         &self,
         state: &State<'tcx>,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        args: &[Spanned<mir::Operand<'tcx>>],
         destination: mir::Place<'tcx>,
     ) -> Option<Fact<'tcx>> {
         let held = args.first()?;
-        let ty =
-            self.monomorphize(held.node.ty(&self.mir.local_decls, self.tcx))?;
+        let ty = self.ty_of(&held.node)?;
         let zero = Known {
             bits: 0,
             ty,
             width: self.width(ty)?,
         };
-        let apart = crate::value::compare(
+        let apart = value::compare(
             mir::BinOp::Ne,
             self.fact(state, &held.node),
             Fact::of(Value::Exact(zero)),
@@ -632,14 +619,11 @@ impl<'tcx> Folder<'_, 'tcx> {
         if !apart {
             return None;
         }
-        let out = self
-            .monomorphize(destination.ty(&self.mir.local_decls, self.tcx).ty)?;
+        let out = self.ty_at(&destination)?;
         let ty::Adt(def, args) = out.kind() else {
             return None;
         };
-        if self.tcx.get_diagnostic_item(rustc_span::sym::Option)
-            != Some(def.did())
-        {
+        if self.tcx.get_diagnostic_item(sym::Option) != Some(def.did()) {
             return None;
         }
         // The variant that carries the wrapper is the one with a field.
@@ -659,15 +643,12 @@ impl<'tcx> Folder<'_, 'tcx> {
     /// between none of them and all of them.
     fn counted(
         &self,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        args: &[Spanned<mir::Operand<'tcx>>],
         destination: mir::Place<'tcx>,
     ) -> Option<Value<'tcx>> {
-        let counted = self.monomorphize(
-            args.first()?.node.ty(&self.mir.local_decls, self.tcx),
-        )?;
+        let counted = self.ty_of(&args.first()?.node)?;
         let bits = u128::from(self.width(counted)?);
-        let ty = self
-            .monomorphize(destination.ty(&self.mir.local_decls, self.tcx).ty)?;
+        let ty = self.ty_at(&destination)?;
         let width = self.width(ty)?;
         let seed = Known { bits: 0, ty, width };
         Bounds::new(seed, Known { bits, ..seed }).map(Value::Within)
@@ -683,7 +664,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         &self,
         state: &State<'tcx>,
         larger: bool,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        args: &[Spanned<mir::Operand<'tcx>>],
     ) -> Option<Fact<'tcx>> {
         let fact = Fact {
             value: self.picked(state, larger, args),
@@ -699,7 +680,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         &self,
         state: &State<'tcx>,
         larger: bool,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        args: &[Spanned<mir::Operand<'tcx>>],
     ) -> Ranks {
         let [left, right] = args else {
             return Ranks::none_held();
@@ -732,7 +713,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         &self,
         state: &State<'tcx>,
         larger: bool,
-        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        args: &[Spanned<mir::Operand<'tcx>>],
     ) -> Option<Value<'tcx>> {
         let [left, right] = args else {
             return None;
@@ -754,12 +735,11 @@ impl<'tcx> Folder<'_, 'tcx> {
         state: &State<'tcx>,
         operand: &mir::Operand<'tcx>,
     ) -> Option<Bounds<'tcx>> {
-        let ty =
-            self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))?;
+        let ty = self.ty_of(operand)?;
         let whole = self.whole(ty)?;
         // A length is read through the range that length was found to lie
         // in, so a guard on a slice bounds every number drawn from it.
-        let Some(value) = crate::value::sized(self.fact(state, operand)) else {
+        let Some(value) = value::sized(self.fact(state, operand)) else {
             return Some(whole);
         };
         // A claim written at another type describes another value.
@@ -801,8 +781,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         let ty::Adt(def, _) = ty.kind() else {
             return false;
         };
-        self.tcx.get_diagnostic_item(rustc_span::sym::NonZero)
-            == Some(def.did())
+        self.tcx.get_diagnostic_item(sym::NonZero) == Some(def.did())
     }
 
     /// A value of an integer type that is known not to be zero.

@@ -30,9 +30,8 @@ impl Sink {
     }
 
     /// Whether the sink raises exactly one panic, of this category.
-    const fn is_only(self, category: Category) -> bool {
-        self.second.is_none()
-            && matches!(self.first, (c, _) if c as u8 == category as u8)
+    fn is_only(self, category: Category) -> bool {
+        self.second.is_none() && self.first.0 == category
     }
 }
 

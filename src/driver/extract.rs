@@ -14,7 +14,11 @@ use rustc_middle::{
 };
 use rustc_span::Spanned;
 
-use crate::{fold, sinks::SinkTable};
+use crate::{
+    fold,
+    read::instantiate,
+    sinks::{Sink, SinkTable},
+};
 
 /// One function to analyse, together with the environment its generic
 /// arguments belong to.
@@ -181,10 +185,10 @@ impl<'tcx> Extractor<'tcx> {
     /// Records one function and returns the callees worth expanding.
     fn build(&mut self, work: Work<'tcx>, key: FuncKey) -> Vec<Work<'tcx>> {
         let inst = work.inst;
+        let did = inst.def_id();
+        let display = self.tcx.def_path_str(did);
+        let krate = self.tcx.crate_name(did.krate).to_string();
         if !Self::has_mir_body(self.tcx, inst) {
-            let did = inst.def_id();
-            let display = self.tcx.def_path_str(did);
-            let krate = self.tcx.crate_name(did.krate).to_string();
             let mut body = Body::opaque(key, display, krate);
             // Foreign code has no Rust body to read and never will, so it is
             // reported apart from a Rust function a fuller standard library
@@ -195,12 +199,10 @@ impl<'tcx> Extractor<'tcx> {
             // agree: a foreign item declared here reports the local crate
             // name, and saying it is not local contradicts that.
             body.local = did.is_local();
-            if self.never_unwinds(did) {
-                // The compiler guarantees this function does not unwind, so
-                // it raises no panic even though its body is unavailable.
-                // Allocator shims are the common case.
-                body.opaque = false;
-            }
+            // A function the compiler guarantees does not unwind raises no
+            // panic even though its body is unavailable. Allocator shims are
+            // the common case.
+            body.opaque = !self.never_unwinds(did);
             self.bodies.push(body);
             return Vec::new();
         }
@@ -218,11 +220,10 @@ impl<'tcx> Extractor<'tcx> {
             call.guard = Self::guard_for(mir, &origins, *bb);
         }
 
-        let did = inst.def_id();
         self.bodies.push(Body {
             key,
-            display: self.tcx.def_path_str(did),
-            krate: self.tcx.crate_name(did.krate).to_string(),
+            display,
+            krate,
             loc: self.loc_of(self.tcx.def_span(did)),
             sites,
             calls,
@@ -524,7 +525,7 @@ impl<'tcx> Extractor<'tcx> {
         at: At,
         callee: Instance<'tcx>,
         operands: &[Spanned<mir::Operand<'tcx>>],
-        sink: crate::sinks::Sink,
+        sink: Sink,
     ) {
         let path = self.tcx.def_path_str(callee.def_id());
         let reason = self.panic_message(cx, operands).map_or_else(
@@ -557,14 +558,7 @@ impl<'tcx> Extractor<'tcx> {
         let mir::Operand::Constant(konst) = &operands.first()?.node else {
             return None;
         };
-        let konst = cx
-            .inst
-            .try_instantiate_mir_and_normalize_erasing_regions(
-                self.tcx,
-                cx.env,
-                ty::EarlyBinder::bind(self.tcx, konst.const_),
-            )
-            .ok()?;
+        let konst = instantiate(self.tcx, cx.inst, cx.env, konst.const_)?;
         let ty::Ref(_, inner, _) = konst.ty().kind() else {
             return None;
         };
@@ -640,14 +634,7 @@ impl<'tcx> Extractor<'tcx> {
         cx: Work<'tcx>,
         konst: &mir::ConstOperand<'tcx>,
     ) -> Option<Instance<'tcx>> {
-        let konst = cx
-            .inst
-            .try_instantiate_mir_and_normalize_erasing_regions(
-                self.tcx,
-                cx.env,
-                ty::EarlyBinder::bind(self.tcx, konst.const_),
-            )
-            .ok()?;
+        let konst = instantiate(self.tcx, cx.inst, cx.env, konst.const_)?;
         if let ty::FnDef(did, args) = *konst.ty().kind() {
             let args = args.no_bound_vars()?;
             return Instance::try_resolve(self.tcx, cx.env, did, args)
@@ -778,13 +765,7 @@ impl<'tcx> Extractor<'tcx> {
         cx: Work<'tcx>,
         ty: ty::Ty<'tcx>,
     ) -> Option<ty::Ty<'tcx>> {
-        cx.inst
-            .try_instantiate_mir_and_normalize_erasing_regions(
-                self.tcx,
-                cx.env,
-                ty::EarlyBinder::bind(self.tcx, ty),
-            )
-            .ok()
+        instantiate(self.tcx, cx.inst, cx.env, ty)
     }
 
     /// Appends an edge to a target the analysis could not pin down.
@@ -939,9 +920,14 @@ impl<'tcx> Extractor<'tcx> {
         edges: &[(UnwindOrigin, BasicBlock)],
     ) -> Map<BasicBlock, Vec<UnwindOrigin>> {
         let mut out: Map<BasicBlock, Vec<UnwindOrigin>> = Map::default();
+        // Every edge walks the same body, so the two scratch buffers are
+        // reused rather than rebuilt once per edge.
+        let mut seen: Set<BasicBlock> = Set::default();
+        let mut stack: Vec<BasicBlock> = Vec::new();
         for (origin, start) in edges {
-            let mut seen: Set<BasicBlock> = Set::default();
-            let mut stack = vec![*start];
+            seen.clear();
+            stack.clear();
+            stack.push(*start);
             // `seen` admits each block once, so the walk is bounded by the
             // number of basic blocks in the body.
             while let Some(bb) = stack.pop() {

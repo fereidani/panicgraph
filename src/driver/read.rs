@@ -9,7 +9,7 @@ use std::cmp::Ordering::Less;
 
 use rustc_middle::{
     mir::{self, BinOp},
-    ty::{self, Ty, TypeVisitableExt},
+    ty::{self, Instance, Ty, TyCtxt, TypeVisitableExt, TypingEnv},
 };
 
 use crate::{
@@ -201,8 +201,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         &self,
         operand: &mir::Operand<'tcx>,
     ) -> Option<u64> {
-        let source =
-            self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))?;
+        let source = self.ty_of(operand)?;
         let pointee = match source.kind() {
             ty::Ref(_, inner, _) | ty::RawPtr(inner, _) => *inner,
             _ => return None,
@@ -286,8 +285,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         let apart = if held.address && niche_start == 0 {
             true
         } else {
-            let source =
-                self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))?;
+            let source = self.ty_of(operand)?;
             let width = self.width(source)?;
             value::compare(
                 BinOp::Ne,
@@ -338,12 +336,8 @@ impl<'tcx> Folder<'_, 'tcx> {
         op: BinOp,
         pair: &(mir::Operand<'tcx>, mir::Operand<'tcx>),
     ) -> Option<bool> {
-        let root = |operand: &mir::Operand<'tcx>| match operand {
-            mir::Operand::Copy(place) | mir::Operand::Move(place) => {
-                self.slot_of(place).map(|slot| root_of(state, slot))
-            }
-            _ => None,
-        };
+        let root =
+            |operand: &mir::Operand<'tcx>| self.root_slot(state, operand);
         // A value compared with itself is the same value, whichever local
         // each side was read from.
         if let (Some(near), Some(far)) = (root(&pair.0), root(&pair.1))
@@ -486,7 +480,7 @@ impl<'tcx> Folder<'_, 'tcx> {
 
     /// Whether an operand is read as an unsigned integer.
     pub(crate) fn unsigned(&self, operand: &mir::Operand<'tcx>) -> bool {
-        self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))
+        self.ty_of(operand)
             .is_some_and(|ty| matches!(ty.kind(), ty::Uint(_)))
     }
 
@@ -540,9 +534,21 @@ impl<'tcx> Folder<'_, 'tcx> {
 
     /// The enum type of a place, when it is one.
     pub(crate) fn enum_at(&self, place: &mir::Place<'tcx>) -> Option<Ty<'tcx>> {
-        let ty =
-            self.monomorphize(place.ty(&self.mir.local_decls, self.tcx).ty)?;
+        let ty = self.ty_at(place)?;
         matches!(ty.kind(), ty::Adt(def, _) if def.is_enum()).then_some(ty)
+    }
+
+    /// The local an operand's claims are recorded against, when it has one.
+    pub(crate) fn root_slot(
+        &self,
+        state: &State<'tcx>,
+        operand: &mir::Operand<'tcx>,
+    ) -> Option<mir::Local> {
+        let (mir::Operand::Copy(place) | mir::Operand::Move(place)) = operand
+        else {
+            return None;
+        };
+        self.slot_of(place).map(|slot| root_of(state, slot))
     }
 
     /// The length a wide pointer carries, when the pointee is a slice.
@@ -551,13 +557,8 @@ impl<'tcx> Folder<'_, 'tcx> {
         state: &State<'tcx>,
         operand: &mir::Operand<'tcx>,
     ) -> Option<Value<'tcx>> {
-        let (mir::Operand::Copy(place) | mir::Operand::Move(place)) = operand
-        else {
-            return None;
-        };
-        let local = root_of(state, self.slot_of(place)?);
-        let ty =
-            self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))?;
+        let local = self.root_slot(state, operand)?;
+        let ty = self.ty_of(operand)?;
         let pointee = match ty.kind() {
             ty::Ref(_, inner, _) | ty::RawPtr(inner, _) => *inner,
             _ => return None,
@@ -804,13 +805,7 @@ impl<'tcx> Folder<'_, 'tcx> {
             }
             konst.const_
         } else {
-            self.inst
-                .try_instantiate_mir_and_normalize_erasing_regions(
-                    self.tcx,
-                    self.env,
-                    ty::EarlyBinder::bind(self.tcx, konst.const_),
-                )
-                .ok()?
+            instantiate(self.tcx, self.inst, self.env, konst.const_)?
         };
         let ty = konst.ty();
         let width = self.width(ty)?;
@@ -833,8 +828,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         operand: &mir::Operand<'tcx>,
         ty: Ty<'tcx>,
     ) -> Option<Value<'tcx>> {
-        let source =
-            self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))?;
+        let source = self.ty_of(operand)?;
         let held = self.fact(state, operand).value;
         if matches!(held, Some(Value::Length(_))) {
             return None;
@@ -1130,12 +1124,39 @@ impl<'tcx> Folder<'_, 'tcx> {
 
     /// Resolves a type written in the body against this instantiation.
     pub fn monomorphize(&self, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
-        self.inst
-            .try_instantiate_mir_and_normalize_erasing_regions(
-                self.tcx,
-                self.env,
-                ty::EarlyBinder::bind(self.tcx, ty),
-            )
-            .ok()
+        instantiate(self.tcx, self.inst, self.env, ty)
     }
+
+    /// The type an operand is read at, resolved for this instantiation.
+    pub fn ty_of(&self, operand: &mir::Operand<'tcx>) -> Option<Ty<'tcx>> {
+        self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))
+    }
+
+    /// The type a place holds, resolved for this instantiation.
+    pub fn ty_at(&self, place: &mir::Place<'tcx>) -> Option<Ty<'tcx>> {
+        self.monomorphize(place.ty(&self.mir.local_decls, self.tcx).ty)
+    }
+}
+
+/// Resolves something written in a body against the arguments the body was
+/// reached with.
+///
+/// A type or a constant written against a generic parameter means nothing
+/// until that parameter has one, so this is the step that turns it into a
+/// value the walk can read.
+pub fn instantiate<'tcx, T>(
+    tcx: TyCtxt<'tcx>,
+    inst: Instance<'tcx>,
+    env: TypingEnv<'tcx>,
+    value: T,
+) -> Option<T>
+where
+    T: ty::TypeFoldable<TyCtxt<'tcx>>,
+{
+    inst.try_instantiate_mir_and_normalize_erasing_regions(
+        tcx,
+        env,
+        ty::EarlyBinder::bind(tcx, value),
+    )
+    .ok()
 }
