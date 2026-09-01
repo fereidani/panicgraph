@@ -16,6 +16,7 @@ extern crate rustc_span;
 
 mod extract;
 mod fold;
+mod read;
 mod sinks;
 mod state;
 mod summary;
