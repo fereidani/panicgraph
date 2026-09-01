@@ -297,23 +297,41 @@ pub fn read_baseline(
         )
     })?;
 
+    // A baseline decides what counts as new, so a field it left out is not
+    // an empty answer: reading one that way would report every finding as
+    // new, or call a function fixed because its record was unreadable.
+    let entries =
+        doc.get("findings")
+            .and_then(Value::as_array)
+            .with_context(|| {
+                format!("{} records no list of findings", path.display())
+            })?;
     let mut out = Map::default();
-    let entries = doc.get("findings").and_then(Value::as_array);
-    for entry in entries.into_iter().flatten() {
-        let Some(name) = entry.get("function").and_then(Value::as_str) else {
-            continue;
-        };
-        let categories = entry
+    for (at, entry) in entries.iter().enumerate() {
+        let name = entry.get("function").and_then(Value::as_str).with_context(
+            || format!("finding {at} in {} names no function", path.display()),
+        )?;
+        let list = entry
             .get("categories")
             .and_then(Value::as_array)
-            .map(|list| {
-                list.iter()
-                    .filter_map(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.insert(name.to_owned(), categories);
+            .with_context(|| {
+                format!("{name} in {} lists no categories", path.display())
+            })?;
+        let mut categories = Vec::with_capacity(list.len());
+        for value in list {
+            let category = value.as_str().with_context(|| {
+                format!(
+                    "{name} in {} records a category that is not a name",
+                    path.display()
+                )
+            })?;
+            categories.push(category.to_owned());
+        }
+        ensure!(
+            out.insert(name.to_owned(), categories).is_none(),
+            "{name} is recorded twice in {}",
+            path.display()
+        );
     }
     Ok(out)
 }

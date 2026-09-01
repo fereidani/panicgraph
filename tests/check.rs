@@ -141,6 +141,35 @@ fn a_baseline_round_trips() {
 }
 
 #[test]
+fn a_malformed_baseline_is_refused_rather_than_read_as_empty() {
+    let file = std::env::temp_dir().join("panicgraph-baseline-malformed.json");
+    let (args, _) = gate(&[]);
+    check::write_baseline(&file, &args, &outcome(sample(), &[]).findings)
+        .expect("the baseline should be written");
+    let good = std::fs::read_to_string(&file).expect("and be readable");
+
+    // Each of these once read as a baseline recording nothing, which would
+    // report every finding as new or call a function fixed.
+    for broken in [
+        good.replace("\"findings\"", "\"recorded\""),
+        good.replace("\"function\"", "\"name\""),
+        good.replace("\"categories\"", "\"kinds\""),
+    ] {
+        std::fs::write(&file, &broken).expect("the file should be written");
+        assert!(
+            check::read_baseline(&file, &args).is_err(),
+            "a baseline missing a field it needs must be refused"
+        );
+    }
+    std::fs::write(&file, &good).expect("the file should be written");
+    assert!(
+        check::read_baseline(&file, &args).is_ok(),
+        "the baseline as written still reads back"
+    );
+    let _ = std::fs::remove_file(&file);
+}
+
+#[test]
 fn a_baseline_written_under_other_settings_is_refused() {
     let file = std::env::temp_dir().join("panicgraph-baseline-settings.json");
     let result = outcome(sample(), &[]);
