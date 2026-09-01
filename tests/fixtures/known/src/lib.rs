@@ -1093,3 +1093,16 @@ pub fn must_offset_at_the_end(v: &[u8], off: usize) -> u8 {
     let at = off.min(v.len());
     v[at]
 }
+
+/// Clean. The smaller of two lengths is inside both slices, so a read of
+/// either at that point is in range.
+pub fn clean_prefix_of_both(a: &[u8], b: &[u8]) -> bool {
+    let n = a.len().min(b.len());
+    a[..n] == b[..n]
+}
+
+/// Reaches `index`. The larger of two lengths is outside one of them.
+pub fn must_prefix_of_the_longer(a: &[u8], b: &[u8]) -> bool {
+    let n = a.len().max(b.len());
+    a[..n] == b[..n]
+}

@@ -15,7 +15,7 @@ use crate::{
     fold::{Folder, Reach},
     sinks::SinkTable,
     state::{State, root_of},
-    value::{Bounds, Fact, Known, LenRel, Value},
+    value::{Bounds, Fact, Known, LenRel, Ranks, Value},
 };
 
 /// How far a chain of calls is followed for what it does.
@@ -373,10 +373,12 @@ impl<'tcx> Folder<'_, 'tcx> {
                     .position(|other| other.alike && other.slot == Some(of))?;
                 Some(mir::Local::from_usize(at.saturating_add(1)))
             };
-            let order = held
-                .fact
-                .order
-                .and_then(|(rel, of)| Some((rel, named(of)?)));
+            let mut order = Ranks::none_held();
+            for (rel, of) in held.fact.order.each() {
+                if let Some(there) = named(of) {
+                    order.add(rel, there);
+                }
+            }
             let paired = held.fact.paired.and_then(named);
             let fact = Fact {
                 order,
@@ -612,22 +614,26 @@ impl<'tcx> Folder<'_, 'tcx> {
         state: &State<'tcx>,
         larger: bool,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
-    ) -> Option<(LenRel, mir::Local)> {
+    ) -> Ranks {
         let [left, right] = args else {
-            return None;
+            return Ranks::none_held();
         };
         let bound = |operand: &mir::Operand<'tcx>| {
             let fact = self.fact(state, operand);
             match fact.value {
-                Some(Value::Length(of)) => Some((LenRel::AtMost, of)),
+                Some(Value::Length(of)) => Ranks::of(LenRel::AtMost, of),
                 _ => fact.order,
             }
         };
         let (left, right) = (bound(&left.node), bound(&right.node));
         if larger {
-            return (left == right).then_some(left).flatten();
+            return left.joined(right);
         }
-        left.or(right)
+        let mut both = left;
+        for (rel, of) in right.each() {
+            both.add(rel, of);
+        }
+        both
     }
 
     /// The range a call that picks one of two numbers leaves behind.

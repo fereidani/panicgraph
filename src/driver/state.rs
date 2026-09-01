@@ -14,8 +14,8 @@ use rustc_middle::{
 };
 
 use crate::value::{
-    self, Against, Bounds, Fact, Known, LenRel, Taught, Thresholds, Value,
-    truncate,
+    self, Against, Bounds, Fact, Known, LenRel, Ranks, Taught, Thresholds,
+    Value, truncate,
 };
 
 /// How many times a block's entry is joined exactly before what arrives is
@@ -317,18 +317,20 @@ pub fn learn<'tcx>(
             // The ordering a length carries against its own slice is the
             // one every reading of it starts with, and a guard says more.
             let trivial = matches!(
-                (slot.value, slot.order),
+                (slot.value, slot.order.first()),
                 (Some(Value::Length(mine)), Some((LenRel::AtMost, held)))
                     if mine == held
             );
-            if slot.order.is_none() || trivial {
-                slot.order = Some((rel, of));
+            if trivial {
+                slot.order = Ranks::of(rel, of);
+            } else {
+                slot.order.add(rel, of);
             }
         }
         // A value at most a length and not equal to it is below it.
         Taught::Apart(of) => {
-            if slot.order == Some((LenRel::AtMost, of)) {
-                slot.order = Some((LenRel::Below, of));
+            if slot.order.against(of) == Some(LenRel::AtMost) {
+                slot.order.add(LenRel::Below, of);
             }
         }
         // A slice this local merely holds the length of was handled above.
@@ -403,9 +405,7 @@ pub fn forget(state: &mut State<'_>, local: mir::Local) {
         if slot.value.is_some_and(|value| value.leans_on(local)) {
             slot.value = None;
         }
-        if slot.order.is_some_and(|(_, of)| of == local) {
-            slot.order = None;
-        }
+        slot.order.forget(local);
         if slot.same == Some(local) {
             // The copied value itself stands; only the claim of still
             // being the same as the source dies with the write.

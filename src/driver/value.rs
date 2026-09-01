@@ -237,6 +237,98 @@ impl Known<'_> {
     }
 }
 
+/// How many slices one value's ordering is kept against.
+///
+/// Two is what `min(a.len(), b.len())` leaves behind: the answer is inside
+/// both slices, and a read of either has to find its own claim.
+const RANKS: usize = 2;
+
+/// How a value is ordered against the lengths of slices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Ranks {
+    held: [Option<(LenRel, mir::Local)>; RANKS],
+}
+
+impl Ranks {
+    /// No claim at all, in a form a constant can be built from.
+    pub const fn none_held() -> Self {
+        Self {
+            held: [None; RANKS],
+        }
+    }
+
+    /// A single claim.
+    pub fn of(rel: LenRel, of: mir::Local) -> Self {
+        let mut ranks = Self::default();
+        ranks.add(rel, of);
+        ranks
+    }
+
+    /// Whether nothing is claimed at all.
+    pub fn is_empty(self) -> bool {
+        self.held.iter().all(Option::is_none)
+    }
+
+    /// The claim held against one slice.
+    pub fn against(self, of: mir::Local) -> Option<LenRel> {
+        self.held
+            .iter()
+            .flatten()
+            .find(|(_, held)| *held == of)
+            .map(|(rel, _)| *rel)
+    }
+
+    /// The first claim, for the readings that take one bound and no more.
+    pub fn first(self) -> Option<(LenRel, mir::Local)> {
+        self.held.iter().flatten().copied().next()
+    }
+
+    /// Every claim held.
+    pub fn each(self) -> impl Iterator<Item = (LenRel, mir::Local)> {
+        self.held.into_iter().flatten()
+    }
+
+    /// Records a claim, keeping the sharper one where the same slice is
+    /// already named and dropping it where the table is full.
+    pub fn add(&mut self, rel: LenRel, of: mir::Local) {
+        for slot in &mut self.held {
+            match slot {
+                Some((held, named)) if *named == of => {
+                    if rel == LenRel::Below {
+                        *held = rel;
+                    }
+                    return;
+                }
+                Some(_) => {}
+                None => {
+                    *slot = Some((rel, of));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Everything both sets of claims admit.
+    pub fn joined(self, other: Self) -> Self {
+        let mut ranks = Self::default();
+        for (rel, of) in self.each() {
+            if let Some(theirs) = other.against(of) {
+                ranks.add(if rel == theirs { rel } else { LenRel::AtMost }, of);
+            }
+        }
+        ranks
+    }
+
+    /// Drops every claim measured against a local.
+    pub fn forget(&mut self, local: mir::Local) {
+        for slot in &mut self.held {
+            if slot.is_some_and(|(_, of)| of == local) {
+                *slot = None;
+            }
+        }
+    }
+}
+
 /// How many values a widening step may stop at before it gives up.
 ///
 /// Each one is a step an end of a range can take, so the table is capped:
@@ -426,9 +518,9 @@ pub enum Value<'tcx> {
 pub struct Fact<'tcx> {
     /// What the value is.
     pub value: Option<Value<'tcx>>,
-    /// How the value is ordered against the length of the slice behind
-    /// another local.
-    pub order: Option<(LenRel, mir::Local)>,
+    /// How the value is ordered against the lengths of the slices behind
+    /// other locals.
+    pub order: Ranks,
     /// The local this one was copied from, still unwritten since. The
     /// target never carries a link itself, so chains are one step long.
     pub same: Option<mir::Local>,
@@ -469,7 +561,7 @@ impl<'tcx> Fact<'tcx> {
     pub const fn blank() -> Self {
         Self {
             value: None,
-            order: None,
+            order: Ranks::none_held(),
             same: None,
             extent: None,
             address: false,
@@ -482,7 +574,7 @@ impl<'tcx> Fact<'tcx> {
     pub const fn of(value: Value<'tcx>) -> Self {
         Self {
             value: Some(value),
-            order: None,
+            order: Ranks::none_held(),
             same: None,
             extent: None,
             address: false,
@@ -513,16 +605,7 @@ impl<'tcx> Fact<'tcx> {
             // the weaker of the two claims rather than at nothing, which is
             // what carries a bound round a loop whose first turn proved
             // more than the rest.
-            order: match (self.order, other.order) {
-                (Some((mine, here)), Some((theirs, there)))
-                    if here == there =>
-                {
-                    let rel =
-                        if mine == theirs { mine } else { LenRel::AtMost };
-                    Some((rel, here))
-                }
-                _ => None,
-            },
+            order: self.order.joined(other.order),
             same: (self.same == other.same).then_some(self.same).flatten(),
             extent: match (self.extent, other.extent) {
                 (Some(held), Some(arriving)) => held.hull(arriving),
@@ -869,13 +952,10 @@ fn measured_against(
     right: Fact<'_>,
 ) -> Option<bool> {
     use mir::BinOp::{Ge, Gt, Le, Lt};
-    let (Some((rel, of)), Some(Value::Length(len))) = (left.order, right.value)
-    else {
+    let Some(Value::Length(len)) = right.value else {
         return None;
     };
-    if of != len {
-        return None;
-    }
+    let rel = left.order.against(len)?;
     match (rel, op) {
         (LenRel::Below, Lt | Le) | (LenRel::AtMost, Le) => Some(true),
         (LenRel::Below, Ge | Gt) | (LenRel::AtMost, Gt) => Some(false),

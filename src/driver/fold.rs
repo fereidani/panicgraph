@@ -31,7 +31,8 @@ use crate::{
     },
     summary::{BUDGET, Returns, portable},
     value::{
-        self, Against, Bounds, Fact, Known, LenRel, Thresholds, Value, truncate,
+        self, Against, Bounds, Fact, Known, LenRel, Ranks, Thresholds, Value,
+        truncate,
     },
 };
 
@@ -571,7 +572,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     pub fn abroad(held: Fact<'tcx>) -> Fact<'tcx> {
         Fact {
             value: held.value.and_then(portable),
-            order: None,
+            order: Ranks::none_held(),
             same: None,
             paired: None,
             ..held
@@ -952,7 +953,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 return None;
             }
             let held = read(operand)?;
-            let (_, of) = self.fact(state, operand).order?;
+            let (_, of) = self.fact(state, operand).order.first()?;
             Some((Against::Length(of), Some(held)))
         };
         let mirrored = value::mirrored(op);
@@ -1290,7 +1291,9 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         let right = self.fact(state, &pair.1);
         Fact {
             value: self.binary(state, op, pair, left, right),
-            order: self.ordered(state, op, pair, left, right),
+            order: self
+                .ordered(state, op, pair, left, right)
+                .map_or_else(Ranks::none_held, |(rel, of)| Ranks::of(rel, of)),
             ..Fact::default()
         }
     }
@@ -1346,7 +1349,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         if taken.is_signed() {
             return None;
         }
-        let (rel, of) = match (left.order, left.value) {
+        let (rel, of) = match (left.order.first(), left.value) {
             (Some(held), _) => held,
             (None, Some(Value::Length(of))) => (LenRel::AtMost, of),
             _ => return None,
@@ -1451,10 +1454,10 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     /// that started as one keep an ordering where a loop's arms meet: the
     /// turn that walks back carries a bound, and the two agree on the
     /// weaker of them rather than on nothing.
-    pub const fn measuring(value: Value<'tcx>) -> Fact<'tcx> {
+    pub fn measuring(value: Value<'tcx>) -> Fact<'tcx> {
         let order = match value {
-            Value::Length(of) => Some((LenRel::AtMost, of)),
-            _ => None,
+            Value::Length(of) => Ranks::of(LenRel::AtMost, of),
+            _ => Ranks::none_held(),
         };
         Fact {
             order,
@@ -1522,7 +1525,11 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 state.get(root.as_usize()).copied().unwrap_or_default();
             Fact {
                 value: own.value.or(at_root.value),
-                order: own.order.or(at_root.order),
+                order: if own.order.is_empty() {
+                    at_root.order
+                } else {
+                    own.order
+                },
                 address: own.address || at_root.address,
                 ..own
             }
@@ -1545,7 +1552,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     /// against one slice into a read of a second slice known to be as
     /// long.
     fn ranged(state: &State<'tcx>, held: Fact<'tcx>) -> Fact<'tcx> {
-        let Some((rel, of)) = held.order else {
+        let Some((rel, of)) = held.order.first() else {
             return held;
         };
         let Some(extent) = state.get(of.as_usize()).and_then(|s| s.extent)

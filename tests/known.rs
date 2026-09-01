@@ -99,6 +99,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_fill_past_the_end", "index"),
     ("must_middle_of_one", "index"),
     ("must_offset_at_the_end", "index"),
+    ("must_prefix_of_the_longer", "index"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -186,6 +187,7 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_fill_bounded",
     "clean_middle_of_guarded",
     "clean_offset_below_the_end",
+    "clean_prefix_of_both",
 ];
 
 /// The functions that must stay clean in a debug build as well.
