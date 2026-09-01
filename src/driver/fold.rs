@@ -30,7 +30,9 @@ use crate::{
         refined, retire, root_of, sweep_aliased, sweep_base, unwind_to, writes,
     },
     summary::{BUDGET, Returns, portable},
-    value::{self, Against, Bounds, Fact, Known, LenRel, Value, truncate},
+    value::{
+        self, Against, Bounds, Fact, Known, LenRel, Thresholds, Value, truncate,
+    },
 };
 
 /// What one instantiation of a body reaches.
@@ -209,7 +211,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             settled: vec![false; blocks],
             quiet: vec![false; blocks],
         };
-        let mut work = Work::new(blocks);
+        let mut work = Work::new(blocks, self.stops());
         work.merge(mir::START_BLOCK, entry);
 
         // A block is recorded once and afterwards only widens, and one
@@ -239,6 +241,43 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         // seen every path out.
         self.returns = Returns::given_up();
         Reach::everything(blocks)
+    }
+
+    /// The values this body compares against.
+    ///
+    /// They are where a widening step stops, so a counter a loop keeps
+    /// below one of them keeps that bound instead of being given the whole
+    /// of its type. The value a comparison rules in sits next to the one it
+    /// names, so both are recorded.
+    fn stops(&self) -> Thresholds {
+        let mut stops = Thresholds::none();
+        for block in self.mir.basic_blocks.iter() {
+            for stmt in &block.statements {
+                let mir::StatementKind::Assign(pair) = &stmt.kind else {
+                    continue;
+                };
+                let mir::Rvalue::BinaryOp(op, operands) = &pair.1 else {
+                    continue;
+                };
+                if !matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+                {
+                    continue;
+                }
+                for operand in [&operands.0, &operands.1] {
+                    let mir::Operand::Constant(konst) = operand else {
+                        continue;
+                    };
+                    let Some(known) = self.constant(konst) else {
+                        continue;
+                    };
+                    stops.add(known.bits);
+                    if let Some(under) = known.predecessor() {
+                        stops.add(under.bits);
+                    }
+                }
+            }
+        }
+        stops
     }
 
     /// Walks one block, recording what it reaches.
@@ -1249,71 +1288,77 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     ) -> Fact<'tcx> {
         let left = self.fact(state, &pair.0);
         let right = self.fact(state, &pair.1);
-        // The remainder of an unsigned value by the length of a slice lands
-        // below that length, which is what the slice's own bounds check
-        // asks. The length is nonzero wherever this runs, since the
-        // remainder's own check has passed to get here.
-        if op == BinOp::Rem
-            && let Some(Value::Length(of)) = right.value
-            && self.unsigned(&pair.0)
-        {
-            return Fact {
-                order: Some((LenRel::Below, of)),
-                ..Fact::default()
-            };
-        }
-        // A length divided by anything is no larger than that length: the
-        // divisor is above zero wherever this runs, since the check the
-        // compiler writes in front of it has passed to get here.
-        if op == BinOp::Div
-            && let Some(Value::Length(of)) = left.value
-            && self.unsigned(&pair.1)
-        {
-            return Fact {
-                order: Some((LenRel::AtMost, of)),
-                ..Fact::default()
-            };
-        }
-        // A value already measured against a length is still measured
-        // against it once a constant is taken off, and strictly below it
-        // once anything at all is. The value has to be at least what is
-        // taken off, or a build with the check turned off wraps it round
-        // to the top of the type instead.
-        if op == BinOp::Sub
-            && let Some((rel, of)) = left.order
-            && let Some(taken) = right.value.and_then(Value::exact)
-            && !taken.is_signed()
-            && let Some(span) = self.spread(state, &pair.0)
-            && span.lo.order(taken).is_some_and(|by| by != Less)
-        {
-            let rel = if taken.bits == 0 { rel } else { LenRel::Below };
-            return Fact {
-                order: Some((rel, of)),
-                ..Fact::default()
-            };
-        }
-        // A length with a constant taken off it lands below that length,
-        // which is what the read at the end of a slice asks. The slice has
-        // to be long enough for the subtraction to mean what it says: a
-        // build with the check turned off wraps an empty slice round to the
-        // top of the type instead.
-        if op == BinOp::Sub
-            && let Some(Value::Length(of)) = left.value
-            && let Some(extent) = left.extent
-            && let Some(taken) = right.value.and_then(Value::exact)
-            && !taken.is_signed()
-            && taken.bits > 0
-            && extent.lo.order(taken).is_some_and(|by| by != Less)
-        {
-            return Fact {
-                order: Some((LenRel::Below, of)),
-                ..Fact::default()
-            };
-        }
         Fact {
             value: self.binary(state, op, pair, left, right),
+            order: self.ordered(state, op, pair, left, right),
             ..Fact::default()
         }
+    }
+
+    /// How the result of an operator is ordered against a slice's length.
+    ///
+    /// The remainder of an unsigned value by a length lands below it, which
+    /// is what the slice's own bounds check asks, and a length divided by
+    /// anything is no larger than itself. Both divisors are above zero
+    /// wherever this runs, since the check the compiler writes in front of
+    /// them has passed to get here.
+    fn ordered(
+        &self,
+        state: &State<'tcx>,
+        op: BinOp,
+        pair: &(mir::Operand<'tcx>, mir::Operand<'tcx>),
+        left: Fact<'tcx>,
+        right: Fact<'tcx>,
+    ) -> Option<(LenRel, mir::Local)> {
+        match op {
+            BinOp::Rem => {
+                let Value::Length(of) = right.value? else {
+                    return None;
+                };
+                self.unsigned(&pair.0).then_some((LenRel::Below, of))
+            }
+            BinOp::Div => {
+                let Value::Length(of) = left.value? else {
+                    return None;
+                };
+                self.unsigned(&pair.1).then_some((LenRel::AtMost, of))
+            }
+            BinOp::Sub => self.shortened(state, pair, left, right),
+            _ => None,
+        }
+    }
+
+    /// How a subtraction leaves a value ordered against a slice's length.
+    ///
+    /// A value already measured against a length is still measured against
+    /// it once a constant is taken off, and strictly below it once anything
+    /// at all is. The value has to be at least what is taken off, or a
+    /// build with the check turned off wraps it round to the top of the
+    /// type instead of shortening it.
+    fn shortened(
+        &self,
+        state: &State<'tcx>,
+        pair: &(mir::Operand<'tcx>, mir::Operand<'tcx>),
+        left: Fact<'tcx>,
+        right: Fact<'tcx>,
+    ) -> Option<(LenRel, mir::Local)> {
+        let taken = right.value?.exact()?;
+        if taken.is_signed() {
+            return None;
+        }
+        let (rel, of) = match (left.order, left.value) {
+            (Some(held), _) => held,
+            (None, Some(Value::Length(of))) => (LenRel::AtMost, of),
+            _ => return None,
+        };
+        if self.spread(state, &pair.0)?.lo.order(taken)? == Less {
+            return None;
+        }
+        Some(if taken.bits == 0 {
+            (rel, of)
+        } else {
+            (LenRel::Below, of)
+        })
     }
 
     /// Whether an operand is read as an unsigned integer.
@@ -1698,9 +1743,11 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             return Some(Value::Exact(known));
         }
         match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul => {
-                Self::spanned(op, left.value?.bounds()?, right.value?.bounds()?)
-            }
+            BinOp::Add | BinOp::Sub | BinOp::Mul => Self::spanned(
+                op,
+                self.spread(state, &pair.0)?,
+                self.spread(state, &pair.1)?,
+            ),
             BinOp::Div | BinOp::Rem => self.split(state, op, pair),
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
                 self.bitwise(state, op, pair)

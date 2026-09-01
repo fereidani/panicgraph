@@ -237,6 +237,76 @@ impl Known<'_> {
     }
 }
 
+/// How many values a widening step may stop at before it gives up.
+///
+/// Each one is a step an end of a range can take, so the table is capped:
+/// what bounds the walk is that an end moves outward a fixed number of
+/// times whatever the body looks like.
+const STOPS: usize = 8;
+
+/// The values a body compares against, in order.
+///
+/// A range pushed straight to the end of its type loses the bound a loop
+/// was written to keep, so a widening step stops at what the body itself
+/// names first.
+pub struct Thresholds {
+    steps: [u128; STOPS],
+    held: usize,
+}
+
+impl Thresholds {
+    /// An empty table, which widens straight to the end of the type.
+    pub const fn none() -> Self {
+        Self {
+            steps: [0; STOPS],
+            held: 0,
+        }
+    }
+
+    /// Records a value the body compares against, keeping the table
+    /// sorted and free of repeats.
+    pub fn add(&mut self, value: u128) {
+        if self.held >= STOPS || self.steps[..self.held].contains(&value) {
+            return;
+        }
+        let at = self.steps[..self.held]
+            .iter()
+            .position(|step| *step > value)
+            .unwrap_or(self.held);
+        self.steps.copy_within(at..self.held, at.saturating_add(1));
+        self.steps[at] = value;
+        self.held = self.held.saturating_add(1);
+    }
+
+    /// The end a range's top is pushed out to.
+    fn over<'tcx>(&self, end: Known<'tcx>) -> Known<'tcx> {
+        let ceiling = end.type_max();
+        if end.is_signed() {
+            return ceiling;
+        }
+        for step in &self.steps[..self.held] {
+            if *step >= end.bits && *step <= ceiling.bits {
+                return Known { bits: *step, ..end };
+            }
+        }
+        ceiling
+    }
+
+    /// The end a range's bottom is pushed out to.
+    fn under<'tcx>(&self, end: Known<'tcx>) -> Known<'tcx> {
+        let floor = end.type_min();
+        if end.is_signed() {
+            return floor;
+        }
+        for step in self.steps[..self.held].iter().rev() {
+            if *step <= end.bits {
+                return Known { bits: *step, ..end };
+            }
+        }
+        floor
+    }
+}
+
 /// Masks a value to the width of its type.
 pub const fn truncate(bits: u128, width: u32) -> u128 {
     match 1u128.checked_shl(width) {
@@ -467,15 +537,15 @@ impl<'tcx> Fact<'tcx> {
     }
 
     /// The fact widened away from the one it replaced.
-    pub fn widened(self, from: Self) -> Self {
+    pub fn widened(self, from: Self, stops: &Thresholds) -> Self {
         Self {
             value: match (self.value, from.value) {
-                (Some(now), Some(was)) => now.widened(was),
+                (Some(now), Some(was)) => now.widened(was, stops),
                 _ => None,
             },
             extent: match (self.extent, from.extent) {
                 (Some(now), Some(was)) => Value::Within(now)
-                    .widened(Value::Within(was))
+                    .widened(Value::Within(was), stops)
                     .and_then(Value::bounds),
                 _ => None,
             },
@@ -493,6 +563,9 @@ pub enum Taught<'tcx> {
     Order(LenRel, mir::Local),
     /// The slice measured is exactly as long as another.
     Alike(mir::Local),
+    /// The value differs from the length of a slice, which sharpens an
+    /// ordering already held against it.
+    Apart(mir::Local),
 }
 
 impl<'tcx> Value<'tcx> {
@@ -589,21 +662,23 @@ impl<'tcx> Value<'tcx> {
 
     /// The claim widened away from the one it replaced.
     ///
-    /// An end that moved goes straight to the end of its type, so a value
-    /// that a loop walks outward reaches its resting place in one step
-    /// rather than one iteration at a time. Only a range widens; any other
-    /// claim is given up instead.
-    pub fn widened(self, from: Self) -> Option<Self> {
+    /// An end that moved is pushed outward at once rather than one
+    /// iteration at a time, but only as far as the nearest value the body
+    /// compares against: a counter a loop keeps below a constant settles
+    /// at that constant instead of at everything its type admits. Where
+    /// the body names no such value the end goes to the end of the type.
+    /// Only a range widens; any other claim is given up instead.
+    pub fn widened(self, from: Self, stops: &Thresholds) -> Option<Self> {
         let (now, was) = (self.bounds()?, from.bounds()?);
         let lo = if now.lo == was.lo {
             now.lo
         } else {
-            now.lo.type_min()
+            stops.under(now.lo)
         };
         let hi = if now.hi == was.hi {
             now.hi
         } else {
-            now.hi.type_max()
+            stops.over(now.hi)
         };
         Bounds::new(lo, hi).map(Self::Within)
     }
@@ -732,6 +807,7 @@ const fn length_fact<'tcx>(
         mir::BinOp::Lt => Some(Taught::Order(LenRel::Below, of)),
         mir::BinOp::Le => Some(Taught::Order(LenRel::AtMost, of)),
         mir::BinOp::Eq => Some(Taught::Alike(of)),
+        mir::BinOp::Ne => Some(Taught::Apart(of)),
         _ => None,
     }
 }

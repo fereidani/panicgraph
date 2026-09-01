@@ -1043,3 +1043,53 @@ pub fn must_countdown_from_the_length(v: &[u8]) -> u32 {
     }
     total
 }
+
+/// Clean. The guard above every write keeps the counter inside the buffer,
+/// and a widening step stops at the bound the loop was written to keep.
+pub fn clean_fill_bounded(n: u32, out: &mut [u8; 10]) -> usize {
+    let mut used = 0;
+    let mut left = n;
+    while left > 0 && used < out.len() {
+        out[used] = (left % 10) as u8;
+        left /= 10;
+        used += 1;
+    }
+    used
+}
+
+/// Reaches `index`. The guard leaves room for one more than the buffer
+/// holds.
+pub fn must_fill_past_the_end(n: u32, out: &mut [u8; 10]) -> usize {
+    let mut used = 0;
+    let mut left = n;
+    while left > 0 && used <= out.len() {
+        out[used] = (left % 10) as u8;
+        left /= 10;
+        used += 1;
+    }
+    used
+}
+
+/// Clean. A slice of two has a middle, and both ends of the range lie
+/// inside it.
+pub fn clean_middle_of_guarded(v: &[u8]) -> &[u8] {
+    if v.len() >= 2 { &v[1..v.len() - 1] } else { v }
+}
+
+/// Reaches `index`. One element leaves no middle.
+pub fn must_middle_of_one(v: &[u8]) -> &[u8] {
+    if v.is_empty() { v } else { &v[1..v.len() - 1] }
+}
+
+/// Clean. The offset is at most the length and is not the length, so it is
+/// inside the slice.
+pub fn clean_offset_below_the_end(v: &[u8], off: usize) -> u8 {
+    let at = off.min(v.len());
+    if at == v.len() { 0 } else { v[at] }
+}
+
+/// Reaches `index`. Nothing here rules the end out.
+pub fn must_offset_at_the_end(v: &[u8], off: usize) -> u8 {
+    let at = off.min(v.len());
+    v[at]
+}

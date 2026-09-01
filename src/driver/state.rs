@@ -14,7 +14,8 @@ use rustc_middle::{
 };
 
 use crate::value::{
-    self, Against, Bounds, Fact, Known, LenRel, Taught, Value, truncate,
+    self, Against, Bounds, Fact, Known, LenRel, Taught, Thresholds, Value,
+    truncate,
 };
 
 /// How many times a block's entry is joined exactly before what arrives is
@@ -66,16 +67,19 @@ pub struct Work<'tcx> {
     queued: Vec<bool>,
     changes: Vec<u32>,
     queue: VecDeque<BasicBlock>,
+    /// Where a widening step stops before it reaches the end of a type.
+    stops: Thresholds,
 }
 
 impl<'tcx> Work<'tcx> {
     /// Prepares a worklist over a body of `blocks` blocks.
-    pub fn new(blocks: usize) -> Self {
+    pub fn new(blocks: usize, stops: Thresholds) -> Self {
         Self {
             entry: vec![None; blocks],
             queued: vec![false; blocks],
             changes: vec![0; blocks],
             queue: VecDeque::new(),
+            stops,
         }
     }
 
@@ -105,7 +109,7 @@ impl<'tcx> Work<'tcx> {
                         continue;
                     }
                     if widen {
-                        next = next.widened(*held);
+                        next = next.widened(*held, &self.stops);
                     }
                     *held = next;
                     changed = true;
@@ -321,6 +325,12 @@ pub fn learn<'tcx>(
                 slot.order = Some((rel, of));
             }
         }
+        // A value at most a length and not equal to it is below it.
+        Taught::Apart(of) => {
+            if slot.order == Some((LenRel::AtMost, of)) {
+                slot.order = Some((LenRel::Below, of));
+            }
+        }
         // A slice this local merely holds the length of was handled above.
         Taught::Alike(_) => {}
     }
@@ -418,12 +428,16 @@ pub fn forget(state: &mut State<'_>, local: mir::Local) {
 /// copied from. Everything the local claimed in its own right goes; only the
 /// link survives, and a write to the local clears that as it always did.
 pub fn retire(state: &mut State<'_>, local: mir::Local) {
-    let same = state.get(local.as_usize()).and_then(|slot| slot.same);
+    let held = state.get(local.as_usize()).copied().unwrap_or_default();
     forget(state, local);
-    if let Some(root) = same
-        && let Some(slot) = state.get_mut(local.as_usize())
-    {
-        slot.same = Some(root);
+    if let Some(slot) = state.get_mut(local.as_usize()) {
+        // What the local said about the thing behind it outlives the local:
+        // the trail back to where its value came from, how long the slice
+        // it named was, and the slice that one matched. Only what it
+        // claimed in its own right goes.
+        slot.same = held.same;
+        slot.extent = held.extent;
+        slot.paired = held.paired;
     }
 }
 
