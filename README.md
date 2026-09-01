@@ -383,11 +383,11 @@ pointer taken through another: storing into `v[i]` cannot change how long
 `v` is. Values carry what their own type says: a byte is an index every
 table of two hundred and fifty six has room for, a character reaches no
 further than the last code point, and a pointer taken of a place holds an
-address, so the null check written under `NonNull::new` cannot fail. An enum carries
-which variant it holds, which is what folds a `match` and what makes
-`unwrap` of a value built as `Some` reach nothing at all; one written as a
-niche has no tag of its own, so a value proved apart from the pattern that
-stands for the empty variant is read as the variant that carries one.
+address, so the null check written under `NonNull::new` cannot fail. An
+enum carries which variant it holds, which is what folds a `match` and what
+makes `unwrap` of a value built as `Some` reach nothing at all; one written
+as a niche has no tag of its own, so a value proved apart from the pattern
+that stands for the empty variant is read as the variant that carries one.
 
 The driver injects `-Zalways-encode-mir`. Without it, a dependency keeps MIR
 only for generic and small items, so its concrete functions are opaque and
