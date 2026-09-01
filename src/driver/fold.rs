@@ -140,7 +140,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             places,
             depth,
             budget,
-            returns: Returns::Never,
+            returns: Returns::default(),
             returned: Vec::new(),
         }
     }
@@ -237,7 +237,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         // found instead of a verdict that assumed away an unsettled branch,
         // and say nothing about what it returns: a walk cut short has not
         // seen every path out.
-        self.returns = Returns::Anything;
+        self.returns = Returns::given_up();
         Reach::everything(blocks)
     }
 
@@ -515,7 +515,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 // The planes that name a local of this body describe
                 // nothing outside it, so they are dropped rather than
                 // handed to a caller that would read them as its own.
-                let first = matches!(self.returns, Returns::Never);
+                let first = self.returns.is_new();
                 self.left_behind(&state, first);
                 let held = Self::known_at(&state, mir::RETURN_PLACE);
                 self.returns = self.returns.met(Self::abroad(held));

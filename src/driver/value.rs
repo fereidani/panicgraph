@@ -395,6 +395,19 @@ pub struct Fact<'tcx> {
 }
 
 impl<'tcx> Fact<'tcx> {
+    /// A fact claiming nothing, in a form a constant can be built from.
+    pub const fn blank() -> Self {
+        Self {
+            value: None,
+            order: None,
+            same: None,
+            extent: None,
+            address: false,
+            tag: None,
+            paired: None,
+        }
+    }
+
     /// A fact holding just a value.
     pub const fn of(value: Value<'tcx>) -> Self {
         Self {

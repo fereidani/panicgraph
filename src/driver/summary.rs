@@ -36,35 +36,55 @@ pub const DEPTH: u32 = 3;
 pub const BUDGET: u32 = 4096;
 
 /// What every path out of a body was found to leave in the return place.
-#[derive(Debug, Clone, Copy)]
-pub enum Returns<'tcx> {
-    /// No path that returns has been walked.
-    Never,
-    /// Every such path leaves something these claims admit.
-    Held(Fact<'tcx>),
-    /// Nothing definite.
-    Anything,
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Returns<'tcx> {
+    /// What the paths walked so far agree on.
+    held: Fact<'tcx>,
+    /// Whether a path that returns has been walked at all.
+    walked: bool,
+    /// Whether the walk was cut short, so what it found says nothing about
+    /// every path out.
+    partial: bool,
 }
 
 impl<'tcx> Returns<'tcx> {
     /// Adds what one path out of the body leaves behind.
     pub fn met(self, left: Fact<'tcx>) -> Self {
-        match self {
-            Self::Anything => Self::Anything,
-            Self::Never => Self::Held(left),
-            Self::Held(held) => Self::Held(held.joined(left)),
+        Self {
+            held: if self.walked {
+                self.held.joined(left)
+            } else {
+                left
+            },
+            walked: true,
+            ..self
+        }
+    }
+
+    /// Whether no path that returns has been walked yet.
+    pub const fn is_new(self) -> bool {
+        !self.walked
+    }
+
+    /// Gives up on saying anything about what the body leaves behind.
+    pub const fn given_up() -> Self {
+        Self {
+            held: Fact::blank(),
+            walked: false,
+            partial: true,
         }
     }
 
     /// The claim every path agrees on.
     ///
     /// A body no path returns from has none: the call never comes back, so
-    /// there is nothing for the caller to read.
+    /// there is nothing for the caller to read, and neither has a walk that
+    /// did not reach every path out.
     pub fn claim(self) -> Fact<'tcx> {
-        match self {
-            Self::Held(fact) => fact,
-            Self::Never | Self::Anything => Fact::default(),
+        if self.partial || !self.walked {
+            return Fact::default();
         }
+        self.held
     }
 }
 
