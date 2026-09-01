@@ -302,7 +302,13 @@ fn libraries_in(tree: &Path, profile_dir: &str) -> Vec<PathBuf> {
         };
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
-            if path.is_dir() {
+            // Take the kind from the entry, which does not follow a
+            // symbolic link. Descending through one could walk a cycle,
+            // and the walk above is only bounded because it does not.
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
                 if path.file_name().is_some_and(|name| name == "deps") {
                     continue;
                 }
