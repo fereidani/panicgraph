@@ -164,6 +164,13 @@ pub fn escaping(mir: &mir::Body<'_>) -> Vec<bool> {
             else {
                 continue;
             };
+            // A pointer taken through another one is aimed at what that
+            // one points at, not at the local holding it, so `&mut *slice`
+            // leaves the reference itself unaliased and the length it
+            // carries still readable.
+            if place.projection.first() == Some(&mir::ProjectionElem::Deref) {
+                continue;
+            }
             if let Some(slot) = escaped.get_mut(place.local.as_usize()) {
                 *slot = true;
             }

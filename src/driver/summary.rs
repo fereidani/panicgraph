@@ -145,7 +145,9 @@ impl<'tcx> Folder<'_, 'tcx> {
     ) -> bool {
         let known = |arg: &rustc_span::Spanned<mir::Operand<'tcx>>| {
             let fact = self.fact(state, &arg.node);
-            fact.tag.is_some() || fact.value.and_then(portable).is_some()
+            fact.tag.is_some()
+                || fact.extent.is_some()
+                || fact.value.and_then(portable).is_some()
         };
         if args.iter().any(known) {
             return true;

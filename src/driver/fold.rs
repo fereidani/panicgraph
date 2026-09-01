@@ -17,6 +17,8 @@
 //! so `right.max(1)` is known nonzero and the division below it raises
 //! nothing.
 
+use std::cmp::Ordering::Less;
+
 use rustc_middle::{
     mir::{self, BasicBlock, BinOp, TerminatorKind, UnwindAction},
     ty::{self, Instance, Ty, TyCtxt, TypeVisitableExt, TypingEnv},
@@ -421,8 +423,14 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     /// place reached from the same local goes with it; a write through a
     /// pointer can land wherever a pointer could be aimed, so those go too.
     fn overwrite(&self, state: &mut State<'tcx>, place: &mir::Place<'tcx>) {
-        forget(state, place.local);
-        sweep_base(state, &self.places, place.local);
+        // A write through a pointer lands where the pointer aims, not on
+        // the local holding it, so the reference stands and so does every
+        // claim measured against it: storing into `v[i]` cannot change how
+        // long `v` is. What the write could reach is swept below.
+        if place.projection.first() != Some(&mir::ProjectionElem::Deref) {
+            forget(state, place.local);
+            sweep_base(state, &self.places, place.local);
+        }
         if place.is_indirect() {
             sweep_aliased(state, &self.places, &self.escaped);
         }
@@ -440,7 +448,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         match kind {
             TerminatorKind::Goto { target } => work.merge(*target, state),
             TerminatorKind::SwitchInt { discr, targets } => {
-                self.branched(bb, discr, targets, state, work);
+                self.branched(bb, discr, targets, &state, work);
             }
             TerminatorKind::Assert {
                 cond,
@@ -515,21 +523,28 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         bb: BasicBlock,
         discr: &mir::Operand<'tcx>,
         targets: &mir::SwitchTargets,
-        state: State<'tcx>,
+        state: &State<'tcx>,
         work: &mut Work<'tcx>,
     ) {
-        if let Some(value) = self.exact(&state, discr) {
-            work.merge(targets.target_for_value(value.bits), state);
-            return;
-        }
-        let subject = self.subject_of(bb, discr, &state);
-        let tagged = self.tagged(bb, discr, &state);
+        // A settled condition rules the other arms out; it does not make
+        // the arm it does take teach any less. A first turn of a loop that
+        // settles the guard has to leave the same claim behind as the
+        // turns after it, or what the two agree on is nothing.
+        let settled = self.exact(state, discr).map(|known| known.bits);
+        let subject = self.subject_of(bb, discr, state);
+        let tagged = self.tagged(bb, discr, state);
         let mut taken = Vec::new();
         for (value, target) in targets.iter() {
             taken.push(value);
-            let mut arm = refined(&state, subject, Some(value), true);
+            if settled.is_some_and(|held| held != value) {
+                continue;
+            }
+            let mut arm = refined(state, subject, Some(value), true);
             Self::teach_tag(&mut arm, tagged, Some(value));
             work.merge(target, arm);
+        }
+        if settled.is_some_and(|held| taken.contains(&held)) {
+            return;
         }
         // The fallback covers every value not listed, so it settles the
         // condition only when one value is left over.
@@ -537,7 +552,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             [only] => Some(*only),
             _ => None,
         };
-        let mut arm = refined(&state, subject, rest, false);
+        let mut arm = refined(state, subject, rest, false);
         Self::teach_tag(&mut arm, tagged, self.leftover(tagged, &taken));
         work.merge(targets.otherwise(), arm);
     }
@@ -901,6 +916,17 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 operand,
                 ty,
             ) => return self.reinterpreted(state, operand, *ty),
+            // Unsizing an array gives a slice as long as the array's type
+            // says it is, which is what settles the length checks written
+            // against a fixed size buffer.
+            mir::Rvalue::Cast(
+                mir::CastKind::PointerCoercion(
+                    ty::adjustment::PointerCoercion::Unsize,
+                    _,
+                ),
+                operand,
+                _,
+            ) => return self.unsized_from(operand),
             mir::Rvalue::BinaryOp(op, pair) => {
                 return self.operated(state, *op, pair);
             }
@@ -946,6 +972,45 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         }
     }
 
+    /// How long the slice an array was unsized into is.
+    ///
+    /// The array states its own length, so the slice made of it is exactly
+    /// that long wherever it is read, and a check comparing two such
+    /// lengths is one the walk can settle.
+    fn unsized_from(&self, operand: &mir::Operand<'tcx>) -> Fact<'tcx> {
+        let Some(count) = self.array_length(operand) else {
+            return Fact::default();
+        };
+        let ty = self.tcx.types.usize;
+        let Some(width) = self.width(ty) else {
+            return Fact::default();
+        };
+        let end = Known {
+            bits: u128::from(count),
+            ty,
+            width,
+        };
+        Fact {
+            extent: Bounds::new(end, end),
+            address: true,
+            ..Fact::default()
+        }
+    }
+
+    /// How many elements the array behind a pointer holds.
+    fn array_length(&self, operand: &mir::Operand<'tcx>) -> Option<u64> {
+        let source =
+            self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))?;
+        let pointee = match source.kind() {
+            ty::Ref(_, inner, _) | ty::RawPtr(inner, _) => *inner,
+            _ => return None,
+        };
+        let ty::Array(_, count) = pointee.kind() else {
+            return None;
+        };
+        count.try_to_target_usize(self.tcx)
+    }
+
     /// Reads a value out at another type without changing its bits.
     ///
     /// An address and the value inside a nonzero wrapper both come out this
@@ -989,6 +1054,24 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         if op == BinOp::Rem
             && let Some(Value::Length(of)) = right.value
             && self.unsigned(&pair.0)
+        {
+            return Fact {
+                order: Some((LenRel::Below, of)),
+                ..Fact::default()
+            };
+        }
+        // A length with a constant taken off it lands below that length,
+        // which is what the read at the end of a slice asks. The slice has
+        // to be long enough for the subtraction to mean what it says: a
+        // build with the check turned off wraps an empty slice round to the
+        // top of the type instead.
+        if op == BinOp::Sub
+            && let Some(Value::Length(of)) = left.value
+            && let Some(extent) = left.extent
+            && let Some(taken) = right.value.and_then(Value::exact)
+            && !taken.is_signed()
+            && taken.bits > 0
+            && extent.lo.order(taken).is_some_and(|by| by != Less)
         {
             return Fact {
                 order: Some((LenRel::Below, of)),
@@ -1091,7 +1174,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         state: &State<'tcx>,
         operand: &mir::Operand<'tcx>,
     ) -> Option<Known<'tcx>> {
-        self.fact(state, operand).value?.exact()
+        value::pinned(self.fact(state, operand))
     }
 
     /// Reads everything known about an operand, reading through its link
@@ -1151,10 +1234,43 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             }
         });
         let Some(Value::Length(of)) = held.value else {
-            return held;
+            return Self::ranged(state, held);
         };
         Fact {
             extent: state.get(of.as_usize()).and_then(|slot| slot.extent),
+            ..held
+        }
+    }
+
+    /// The claim an ordering against a slice of known length amounts to.
+    ///
+    /// An index below a length that lies in a range lies in that range
+    /// too, one short of its top. That is what carries a bound proved
+    /// against one slice into a read of a second slice known to be as
+    /// long.
+    fn ranged(state: &State<'tcx>, held: Fact<'tcx>) -> Fact<'tcx> {
+        let Some((rel, of)) = held.order else {
+            return held;
+        };
+        let Some(extent) = state.get(of.as_usize()).and_then(|s| s.extent)
+        else {
+            return held;
+        };
+        if extent.hi.is_signed() {
+            return held;
+        }
+        let top = match rel {
+            LenRel::Below => extent.hi.predecessor(),
+            LenRel::AtMost => Some(extent.hi),
+        };
+        let Some(bound) = top.and_then(|hi| Bounds::new(extent.hi.zero(), hi))
+        else {
+            return held;
+        };
+        Fact {
+            value: Some(held.value.map_or(Value::Within(bound), |known| {
+                known.refined(Value::Within(bound))
+            })),
             ..held
         }
     }

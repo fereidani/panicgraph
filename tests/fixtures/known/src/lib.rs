@@ -803,3 +803,46 @@ pub fn must_option_carries_index(table: &[u8; 16], i: usize) -> u8 {
         None => 0,
     }
 }
+
+/// Clean. Both slices are as long as their types say, so the lengths the
+/// copy compares are equal and the check it writes cannot fail.
+pub fn clean_copy_same_length(dst: &mut [u8; 4], src: &[u8; 4]) {
+    dst.copy_from_slice(src);
+}
+
+/// Clean. The counter is bounded by one array's length, the other is as
+/// long, and storing into a slice cannot change how long it is.
+pub fn clean_copy_two_arrays(dst: &mut [u8; 8], src: &[u8; 8]) {
+    for i in 0..dst.len() {
+        dst[i] = src[i];
+    }
+}
+
+/// Reaches `index`. Two slices of unrelated length share no bound.
+pub fn must_copy_two_slices(dst: &mut [u8], src: &[u8]) {
+    for i in 0..dst.len() {
+        dst[i] = src[i];
+    }
+}
+
+/// Clean. A slice that is not empty has a last element.
+pub fn clean_last_of_guarded(v: &[u8]) -> u8 {
+    if v.is_empty() { 0 } else { v[v.len() - 1] }
+}
+
+/// Reaches `index`. Two off the end leaves a slice that holds one.
+pub fn must_second_last_of_guarded(v: &[u8]) -> u8 {
+    if v.is_empty() { 0 } else { v[v.len() - 2] }
+}
+
+/// Reaches `explicit`. Nothing here says how long the slice is.
+pub fn must_take_four(v: &[u8]) -> u8 {
+    assert!(v.len() == 4, "the slice must hold four bytes");
+    v[0]
+}
+
+/// Clean. The slice was made of an array, so it carries the length that
+/// array's type states and the callee's own check is settled.
+pub fn clean_pass_array_of_four(v: &[u8; 4]) -> u8 {
+    must_take_four(v)
+}

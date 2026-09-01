@@ -748,6 +748,37 @@ const fn sized(fact: Fact<'_>) -> Option<Value<'_>> {
     }
 }
 
+/// What a fact settles a value to.
+///
+/// A length is read through the range that length was found to lie in, so
+/// a slice made of a fixed size array answers a check on its length the
+/// way a constant would.
+pub fn pinned(fact: Fact<'_>) -> Option<Known<'_>> {
+    match opened(sized(fact)?) {
+        Value::Exact(known) => Some(known),
+        _ => None,
+    }
+}
+
+/// The claim read in the sharpest form it has.
+///
+/// Ruling out the end of a type leaves everything but that end, which is
+/// what makes a value known apart from zero compare above it, and a range
+/// with one value in it is that value.
+fn opened(value: Value<'_>) -> Value<'_> {
+    match value {
+        Value::Other(ruled_out) => {
+            Bounds::new(ruled_out.type_min(), ruled_out.type_max())
+                .and_then(|whole| Value::without(whole, ruled_out))
+                .unwrap_or(value)
+        }
+        Value::Within(bounds) if bounds.lo == bounds.hi => {
+            Value::Exact(bounds.lo)
+        }
+        _ => value,
+    }
+}
+
 /// Evaluates a comparison over the value plane alone.
 fn values_compare<'tcx>(
     op: mir::BinOp,
@@ -755,7 +786,7 @@ fn values_compare<'tcx>(
     right: Value<'tcx>,
 ) -> Option<bool> {
     use mir::BinOp::{Eq, Ne};
-    match (left, right) {
+    match (opened(left), opened(right)) {
         (Value::Exact(a), Value::Exact(b)) => {
             range_compare(op, Bounds { lo: a, hi: a }, b)
         }
