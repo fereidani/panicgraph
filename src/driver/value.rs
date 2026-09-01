@@ -916,7 +916,7 @@ pub const fn mirrored(op: mir::BinOp) -> mir::BinOp {
 }
 
 /// The comparison operator whose truth is the negation of the given one.
-const fn negated(op: mir::BinOp) -> mir::BinOp {
+pub const fn negated(op: mir::BinOp) -> mir::BinOp {
     use mir::BinOp::{Eq, Ge, Gt, Le, Lt, Ne};
     match op {
         Lt => Ge,

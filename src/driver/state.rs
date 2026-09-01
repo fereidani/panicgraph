@@ -55,7 +55,7 @@ pub struct Subject<'tcx> {
 /// or by the place it was read from. The readings describe one comparison
 /// from different sides and none stands for another, so all are kept
 /// rather than letting the first found take the only seat.
-pub const READINGS: usize = 4;
+pub const READINGS: usize = 6;
 
 /// A comparison a branch turns into a fact about the local it measured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +68,14 @@ pub struct Compared<'tcx> {
     /// a constant. What that local holds now is what the comparison is
     /// read against, so a write to it in between ends the claim.
     pub source: Option<mir::Local>,
+    /// The arm the reading is for, when it is not for both.
+    ///
+    /// Measuring a value by an end of another's range follows from the
+    /// comparison and reads the end that the comparison points at, so the
+    /// arm where it fails points at the other end and is a reading of its
+    /// own. Turning one arm's reading round would rule out values the
+    /// other still admits, so each is kept for the arm it was made for.
+    pub arm: Option<bool>,
 }
 
 /// The blocks still to visit, and what each is entered with.
@@ -255,6 +263,9 @@ pub fn refined<'tcx>(
         // A boolean has two arms, so the fallback settles the comparison
         // just as firmly as naming its value does.
         let truth = if matched { value == 1 } else { value == 0 };
+        if compared.arm.is_some_and(|only| only != truth) {
+            continue;
+        }
         if let Some(fact) = value::fact_of(compared.op, compared.against, truth)
         {
             learn(&mut next, compared.local, fact);

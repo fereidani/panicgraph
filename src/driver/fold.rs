@@ -1057,6 +1057,99 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         Some(Compared { local, ..measured })
     }
 
+    /// The slot an operand was read from, when it names a place.
+    fn slot_read(&self, operand: &mir::Operand<'tcx>) -> Option<mir::Local> {
+        match operand {
+            mir::Operand::Copy(place) | mir::Operand::Move(place) => {
+                self.slot_of(place)
+            }
+            _ => None,
+        }
+    }
+
+    /// What an operand measures, when the walk can name its value.
+    fn named(
+        &self,
+        state: &State<'tcx>,
+        operand: &mir::Operand<'tcx>,
+    ) -> Measured<'tcx> {
+        if let mir::Operand::Constant(konst) = operand {
+            return Some((Against::Constant(self.constant(konst)?), None));
+        }
+        let held = self.slot_read(operand)?;
+        match self.fact(state, operand).value {
+            Some(Value::Length(of)) => Some((Against::Length(of), Some(held))),
+            // A local the walk has settled measures the same as the
+            // constant that could have been written in its place, which is
+            // how a value the caller passed in is read.
+            Some(Value::Exact(known)) => {
+                Some((Against::Constant(known), Some(held)))
+            }
+            _ => None,
+        }
+    }
+
+    /// What an operand measures, named by the place it was read from.
+    ///
+    /// A quantity the walk cannot settle is still one value, and a place
+    /// read twice without a write in between reads the same both times.
+    /// Naming the place is what carries a guard on a container's length
+    /// field to the check that reads the field again, which is how a vector
+    /// indexed under `at < v.len()` folds.
+    fn sited(
+        &self,
+        state: &State<'tcx>,
+        operand: &mir::Operand<'tcx>,
+    ) -> Measured<'tcx> {
+        let held = self.slot_read(operand)?;
+        let of = root_of(state, held);
+        self.places
+            .path(of)
+            .map(|_| (Against::Place(of), Some(held)))
+    }
+
+    /// The length an operand is itself measured by.
+    ///
+    /// A value below one that is itself measured against a length is below
+    /// that length too, which is what a pair of guards written one inside
+    /// the other proves. Only the two operators that carry over are read:
+    /// the rest say nothing about the length.
+    fn chained_to(
+        &self,
+        state: &State<'tcx>,
+        operand: &mir::Operand<'tcx>,
+        op: BinOp,
+    ) -> Measured<'tcx> {
+        if !matches!(op, BinOp::Lt | BinOp::Le) {
+            return None;
+        }
+        let held = self.slot_read(operand)?;
+        let (_, of) = self.fact(state, operand).order.first()?;
+        Some((Against::Length(of), Some(held)))
+    }
+
+    /// The end of an operand's range that an operator reads.
+    ///
+    /// A value compared against one that lies in a range is compared
+    /// against whichever end of that range the operator points at: past
+    /// `lo < n`, `n` is above everything `lo` could be, which for an
+    /// unsigned pair is above zero. That is what clears the division
+    /// written under such a guard.
+    fn ended(
+        &self,
+        state: &State<'tcx>,
+        operand: &mir::Operand<'tcx>,
+        op: BinOp,
+    ) -> Measured<'tcx> {
+        let span = self.spread(state, operand)?;
+        let end = match op {
+            BinOp::Lt | BinOp::Le => span.hi,
+            BinOp::Gt | BinOp::Ge => span.lo,
+            _ => return None,
+        };
+        Some((Against::Constant(end), self.slot_read(operand)))
+    }
+
     /// Splits a comparison into the locals it measures, what each is
     /// measured against, and the operator read with that local on the left.
     ///
@@ -1072,69 +1165,21 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         left: &mir::Operand<'tcx>,
         right: &mir::Operand<'tcx>,
     ) -> [Option<Compared<'tcx>>; READINGS] {
-        let read = |operand: &mir::Operand<'tcx>| match operand {
-            mir::Operand::Copy(place) | mir::Operand::Move(place) => {
-                self.slot_of(place)
-            }
-            _ => None,
-        };
-        let measure = |operand: &mir::Operand<'tcx>| {
-            if let mir::Operand::Constant(konst) = operand {
-                return Some((Against::Constant(self.constant(konst)?), None));
-            }
-            let held = read(operand)?;
-            match self.fact(state, operand).value {
-                Some(Value::Length(of)) => {
-                    Some((Against::Length(of), Some(held)))
-                }
-                // A local the walk has settled measures the same as the
-                // constant that could have been written in its place, which
-                // is how a value the caller passed in is read.
-                Some(Value::Exact(known)) => {
-                    Some((Against::Constant(known), Some(held)))
-                }
-                _ => None,
-            }
-        };
-        // A quantity the walk cannot settle is still one value, and a place
-        // read twice without a write in between reads the same both times.
-        // Naming the place is what carries a guard on a container's length
-        // field to the check that reads the field again, which is how a
-        // vector indexed under `at < v.len()` folds. It is the last reading
-        // tried, since it says nothing beyond the checks that read the same
-        // place, and the readings below carry further.
-        let placed = |operand: &mir::Operand<'tcx>, _: BinOp| {
-            let held = read(operand)?;
-            let of = root_of(state, held);
-            self.places
-                .path(of)
-                .map(|_| (Against::Place(of), Some(held)))
-        };
-        // A value below one that is itself measured against a length is
-        // below that length too, which is what a pair of guards written
-        // one inside the other proves. Only the two operators that carry
-        // over are read: the rest say nothing about the length.
+        let read = |operand: &mir::Operand<'tcx>| self.slot_read(operand);
+        let measure = |operand: &mir::Operand<'tcx>| self.named(state, operand);
+        let placed =
+            |operand: &mir::Operand<'tcx>, _: BinOp| self.sited(state, operand);
         let inherited = |operand: &mir::Operand<'tcx>, op: BinOp| {
-            if !matches!(op, BinOp::Lt | BinOp::Le) {
-                return None;
-            }
-            let held = read(operand)?;
-            let (_, of) = self.fact(state, operand).order.first()?;
-            Some((Against::Length(of), Some(held)))
+            self.chained_to(state, operand, op)
         };
-        // A value compared against one that lies in a range is compared
-        // against whichever end of that range the operator reads: past
-        // `lo < n`, `n` is above everything `lo` could be, which for an
-        // unsigned pair is above zero. That is what clears the division
-        // written under such a guard.
         let bounded = |operand: &mir::Operand<'tcx>, op: BinOp| {
-            let span = self.spread(state, operand)?;
-            let end = match op {
-                BinOp::Lt | BinOp::Le => span.hi,
-                BinOp::Gt | BinOp::Ge => span.lo,
-                _ => return None,
-            };
-            Some((Against::Constant(end), read(operand)))
+            self.ended(state, operand, op)
+        };
+        // The arm where the comparison fails reads the other end of the
+        // same range: what fails `a < b` is `a >= b`, and what bounds `a`
+        // from below is the bottom of `b` rather than its top.
+        let failing = |operand: &mir::Operand<'tcx>, op: BinOp| {
+            self.ended(state, operand, value::negated(op))
         };
         let mirrored = value::mirrored(op);
         let orient =
@@ -1146,6 +1191,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                             local,
                             against,
                             source,
+                            arm: None,
                         },
                     ),
                     read(right).zip(what(left, mirrored)).map(
@@ -1154,13 +1200,27 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                             local,
                             against,
                             source,
+                            arm: None,
                         },
                     ),
                 ]
             };
         let measured = orient(&|operand, _| measure(operand));
         let chained = orient(&inherited);
-        let spanned = orient(&bounded);
+        // Each range reading is for one arm: the end it names is the end
+        // that arm's comparison points at.
+        let spanned = orient(&bounded).map(|held| {
+            held.map(|one| Compared {
+                arm: Some(true),
+                ..one
+            })
+        });
+        let otherwise = orient(&failing).map(|held| {
+            held.map(|one| Compared {
+                arm: Some(false),
+                ..one
+            })
+        });
         // A comparison names two operands and either can be the one a claim
         // is recorded against, so every reading of both is kept: they
         // describe the same comparison from different sides and what one
@@ -1171,6 +1231,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             .into_iter()
             .chain(chained)
             .chain(spanned)
+            .chain(otherwise)
             .chain(orient(&placed));
         for candidate in all.flatten() {
             if found.iter().flatten().any(|kept| *kept == candidate) {

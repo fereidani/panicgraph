@@ -1401,3 +1401,10 @@ pub fn clean_deque_index_guard(
 pub fn clean_string_index_guard(s: &String, at: usize) -> u8 {
     if at >= s.len() { 0 } else { s.as_bytes()[at] }
 }
+
+/// Reaches `index`. A guard read backwards proves nothing: failing `a > b`
+/// leaves `a` at most `b`, which says nothing about where the bottom of
+/// `b`'s range is, so the index is still anything the type admits.
+pub fn must_index_after_le(a: usize, b: usize, t: &[u8; 4]) -> u8 {
+    if a > b { 0 } else { t[a] }
+}

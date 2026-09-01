@@ -369,7 +369,10 @@ string, whichever of the two names the check reads it by.
 
 A comparison is read from both sides and for what each side's range says
 about the other, so `lo < n` leaves `n` above zero for an unsigned pair and
-the division written under that guard cannot fail. A value is also compared
+the division written under that guard cannot fail. Each arm reads the end
+its own comparison points at rather than the other arm's end turned round,
+since what fails `a < b` is `a >= b`, and that bounds `a` from below by the
+bottom of `b` and not at all from above. A value is also compared
 with the one it was reached from, which is what settles the order check
 `&v[at..at + 4]` writes over its two ends.
 

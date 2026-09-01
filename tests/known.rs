@@ -115,6 +115,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_atomic_load", "explicit"),
     ("must_masked_switch", "explicit"),
     ("must_vector_index", "index"),
+    ("must_index_after_le", "index"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -213,7 +214,6 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_copy_the_shorter",
     "clean_modulo_above_guard",
     "clean_table_of_threes",
-    "clean_scan_until",
     "clean_drop_beside_a_guard",
     "clean_deque_walk",
     "clean_atomic_load",
@@ -224,6 +224,20 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_vector_index_guard",
     "clean_deque_index_guard",
     "clean_string_index_guard",
+];
+
+/// The functions that cannot panic and that the analysis cannot yet say so
+/// about.
+///
+/// Each is a false positive kept in view rather than hidden: the code is
+/// clean, and what is missing is a rule that proves it without leaning on
+/// one that is unsound. The test insists they are still reported, so that
+/// whoever supplies the missing rule is told to move the entry.
+const NOT_SETTLED: &[&str] = &[
+    // The counter is at most the length at every turn of the loop, but the
+    // walk loses that where the two ways into the loop meet, and the slice
+    // the counter ends up cutting is what reads it.
+    "clean_scan_until",
 ];
 
 /// The functions that must stay clean in a debug build as well.
@@ -305,6 +319,14 @@ fn a_known_crate_reports_exactly_its_panics() {
             found(function).is_none(),
             "{function} cannot panic, but was reported with {:?}",
             found(function)
+        );
+    }
+
+    for function in NOT_SETTLED {
+        assert!(
+            found(function).is_some(),
+            "{function} is recorded as one the analysis cannot settle, but \
+             it is now clean; move it to MUST_BE_CLEAN"
         );
     }
 }
