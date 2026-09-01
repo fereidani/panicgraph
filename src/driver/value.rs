@@ -561,6 +561,13 @@ pub struct Fact<'tcx> {
     /// happened to hold their lengths. It is what settles the check a copy
     /// between two slices writes over them.
     pub paired: Option<mir::Local>,
+    /// The local this value was reached from, and by how much.
+    ///
+    /// A range index compares its two ends against each other, and the far
+    /// end is usually the near one with something added to it. The link is
+    /// only recorded where the addition stays inside its type, so what it
+    /// says is the arithmetic rather than what the machine wraps to.
+    pub over: Option<(mir::Local, u128)>,
     /// The local holding how long the slice behind this one is.
     ///
     /// A slice cut to a length is exactly that long, so two cut to the same
@@ -580,6 +587,7 @@ impl<'tcx> Fact<'tcx> {
             tag: None,
             paired: None,
             spans: None,
+            over: None,
         }
     }
 
@@ -594,6 +602,7 @@ impl<'tcx> Fact<'tcx> {
             tag: None,
             paired: None,
             spans: None,
+            over: None,
         }
     }
 
@@ -631,6 +640,7 @@ impl<'tcx> Fact<'tcx> {
                 .then_some(self.paired)
                 .flatten(),
             spans: (self.spans == other.spans).then_some(self.spans).flatten(),
+            over: (self.over == other.over).then_some(self.over).flatten(),
         }
     }
 
@@ -825,6 +835,23 @@ impl<'tcx> Value<'tcx> {
         }
         None
     }
+}
+
+/// How a value compares with the same value plus a constant.
+///
+/// The step is never negative and the addition never wraps, so the answer
+/// is the arithmetic one: a value is below itself raised by anything, and
+/// never above it.
+pub const fn stepped(op: mir::BinOp, step: u128) -> Option<bool> {
+    use mir::BinOp::{Eq, Ge, Gt, Le, Lt, Ne};
+    let same = step == 0;
+    Some(match op {
+        Eq | Ge => same,
+        Ne | Lt => !same,
+        Le => true,
+        Gt => false,
+        _ => return None,
+    })
 }
 
 /// What a comparison measured a local against.

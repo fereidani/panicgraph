@@ -381,9 +381,14 @@ impl<'tcx> Folder<'_, 'tcx> {
             }
             let paired = held.fact.paired.and_then(named);
             let spans = held.fact.spans.and_then(named);
+            let over = held
+                .fact
+                .over
+                .and_then(|(of, step)| Some((named(of)?, step)));
             let fact = Fact {
                 order,
                 paired,
+                over,
                 spans,
                 ..held.fact
             };

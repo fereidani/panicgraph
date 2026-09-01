@@ -630,6 +630,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             same: None,
             paired: None,
             spans: None,
+            over: None,
             ..held
         }
     }

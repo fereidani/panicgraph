@@ -1245,3 +1245,17 @@ pub fn clean_modulo_above_guard(lo: u32, n: u32) -> u32 {
 pub fn must_modulo_at_most_guard(lo: u32, n: u32) -> u32 {
     if lo <= n { lo % n } else { 0 }
 }
+
+/// Clean. A value is never above itself raised by three, and three times a
+/// byte leaves room for three more in a table of seven hundred and sixty
+/// eight.
+pub fn clean_table_of_threes(byte: u8, table: &[u8; 768]) -> &[u8] {
+    let at = usize::from(byte) * 3;
+    &table[at..at + 3]
+}
+
+/// Reaches `index`. One byte short of what three times a byte can reach.
+pub fn must_table_of_threes(byte: u8, table: &[u8; 767]) -> &[u8] {
+    let at = usize::from(byte) * 3;
+    &table[at..at + 3]
+}

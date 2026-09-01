@@ -417,6 +417,9 @@ pub fn forget(state: &mut State<'_>, local: mir::Local) {
         if slot.spans == Some(local) {
             slot.spans = None;
         }
+        if slot.over.is_some_and(|(of, _)| of == local) {
+            slot.over = None;
+        }
     }
     if let Some(slot) = state.get_mut(local.as_usize()) {
         *slot = Fact::default();

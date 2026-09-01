@@ -313,11 +313,72 @@ impl<'tcx> Folder<'_, 'tcx> {
     ) -> Fact<'tcx> {
         let left = self.fact(state, &pair.0);
         let right = self.fact(state, &pair.1);
+        // A value and the same value raised by a constant compare by what
+        // was added, which is what settles the order check a range index
+        // writes over `at` and `at + 4`.
+        if let Some(truth) = self.stepped(state, op, pair) {
+            return Fact {
+                value: self.boolean(truth).map(Value::Exact),
+                ..Fact::default()
+            };
+        }
+        let value = self.binary(state, op, pair, left, right);
         Fact {
-            value: self.binary(state, op, pair, left, right),
+            over: self.raised(state, op, pair, right, value),
+            value,
             order: self.ordered(state, op, pair, left, right),
             ..Fact::default()
         }
+    }
+
+    /// How a value compares with the one it was reached from.
+    fn stepped(
+        &self,
+        state: &State<'tcx>,
+        op: BinOp,
+        pair: &(mir::Operand<'tcx>, mir::Operand<'tcx>),
+    ) -> Option<bool> {
+        let root = |operand: &mir::Operand<'tcx>| match operand {
+            mir::Operand::Copy(place) | mir::Operand::Move(place) => {
+                self.slot_of(place).map(|slot| root_of(state, slot))
+            }
+            _ => None,
+        };
+        if let (Some(near), Some((of, step))) =
+            (root(&pair.0), self.fact(state, &pair.1).over)
+            && of == near
+        {
+            return value::stepped(op, step);
+        }
+        let (far, (of, step)) =
+            (root(&pair.1), self.fact(state, &pair.0).over?);
+        (far? == of).then(|| value::stepped(value::mirrored(op), step))?
+    }
+
+    /// The link back to the value an addition was reached from.
+    ///
+    /// It is only recorded where the sum stayed inside its type, so the
+    /// claim is the arithmetic one rather than what the machine wraps to.
+    fn raised(
+        &self,
+        state: &State<'tcx>,
+        op: BinOp,
+        pair: &(mir::Operand<'tcx>, mir::Operand<'tcx>),
+        right: Fact<'tcx>,
+        value: Option<Value<'tcx>>,
+    ) -> Option<(mir::Local, u128)> {
+        if op != BinOp::Add || !matches!(value, Some(Value::Within(_))) {
+            return None;
+        }
+        let step = right.value?.exact()?;
+        if step.is_signed() {
+            return None;
+        }
+        let (mir::Operand::Copy(place) | mir::Operand::Move(place)) = &pair.0
+        else {
+            return None;
+        };
+        Some((root_of(state, self.slot_of(place)?), step.bits))
     }
 
     /// How the result of an operator is ordered against a slice's length.
