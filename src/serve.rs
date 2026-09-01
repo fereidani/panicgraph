@@ -8,7 +8,11 @@
 use std::{
     io::{BufRead, BufReader, ErrorKind, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -21,6 +25,28 @@ const MAX_HEAD_BYTES: u64 = 16 * 1024;
 
 /// Largest number of header lines accepted.
 const MAX_HEADER_LINES: usize = 100;
+
+/// How long one connection may take to send its request or take its answer.
+///
+/// The head is already bounded in size, but not in time: a client sending a
+/// byte an hour would hold its thread for as long as it liked.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How many connections are served at once.
+///
+/// The view is one person's browser, so a handful of parallel requests is
+/// the whole load. The cap is what keeps a client that opens connections
+/// and never finishes them from growing threads without bound.
+const MAX_CONNECTIONS: usize = 64;
+
+/// Holds one connection's place while its thread runs.
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 /// Bodies below this size are sent as they are, because the header and the
 /// deflate block cost more than the saving.
@@ -212,6 +238,8 @@ pub fn serve_on(
         edges,
     });
 
+    let live = Arc::new(AtomicUsize::new(0));
+
     // A server runs until it is stopped. Each connection is handled on its
     // own thread and returns as soon as the response is written.
     for stream in listener.incoming() {
@@ -232,11 +260,23 @@ pub fn serve_on(
                 return Err(err).context("could not accept a connection");
             }
         };
+        // A client that stalls part way through would otherwise hold its
+        // thread, so both halves of the exchange are given a deadline.
+        let _ = stream.set_read_timeout(Some(REQUEST_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(REQUEST_TIMEOUT));
+        if live.fetch_add(1, Ordering::Relaxed) >= MAX_CONNECTIONS {
+            // Nothing is read and nothing is written: dropping the stream
+            // closes it, which is what tells the client to come back.
+            live.fetch_sub(1, Ordering::Relaxed);
+            continue;
+        }
+        let slot = Slot(Arc::clone(&live));
         let state = Arc::clone(&state);
         std::thread::spawn(move || {
             if let Err(err) = handle(&stream, &state) {
                 eprintln!("panicgraph: request failed: {err}");
             }
+            drop(slot);
         });
     }
     Ok(())
