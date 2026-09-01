@@ -281,15 +281,15 @@ fn route(
             state.edges,
             param(query, "expand").is_none(),
         )),
-        "/api/why" => out.result(api::why(
-            &state.graph,
-            param(query, "node")
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(0),
-            &param(query, "category").unwrap_or_default(),
-            suppressed_from(query),
-            state.edges,
-        )),
+        "/api/why" => out.result(node_of(query).and_then(|node| {
+            api::why(
+                &state.graph,
+                node,
+                &param(query, "category").unwrap_or_default(),
+                suppressed_from(query),
+                state.edges,
+            )
+        })),
         "/api/source" => out.result(api::source(
             &state.sources,
             &param(query, "file").unwrap_or_default(),
@@ -348,6 +348,19 @@ fn param(query: &str, name: &str) -> Option<String> {
         let (key, value) = split_once_or(pair, '=');
         (key == name).then(|| percent_decode(value))
     })
+}
+
+/// The function a request asks about.
+///
+/// An index that does not read as a number is a mistake worth naming. Taking
+/// it for the first function instead would explain a function nobody asked
+/// about, which reads as an answer rather than as the error it is.
+fn node_of(query: &str) -> Result<usize> {
+    let Some(text) = param(query, "node") else {
+        return Ok(0);
+    };
+    text.parse()
+        .with_context(|| format!("`{text}` is not a function index"))
 }
 
 /// The two hexadecimal digits of the percent escape at `at`.
