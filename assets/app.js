@@ -495,6 +495,15 @@ createApp({
       (graph.value && graph.value.categories) || []);
     const counterfactual = computed(() =>
       (solution.value && solution.value.counterfactual) || []);
+    /* Categories that name where the analysis stopped seeing rather than a
+       way the program fails. They are shown, not hidden: an unread call is
+       not a clean one. Marking them lets a reader tell the two apart, and
+       set them aside deliberately when that is what they want. */
+    const assumedNames = computed(() =>
+      new Set(categories.value.filter(c => c.assumed).map(c => c.name)));
+    const isAssumed = name => assumedNames.value.has(name);
+    const assumedHidden = computed(() => assumedNames.value.size > 0
+      && [...assumedNames.value].every(n => suppressed.value.has(n)));
 
     /* Most categories reach nothing in a given crate, and a column of zeroes
        pushes the ones that matter off the screen. What decides the split is
@@ -590,6 +599,17 @@ createApp({
     function clearLock() {
       if (!exclusive.value) return;
       exclusive.value = null;
+      refresh();
+    }
+
+    function toggleAssumed() {
+      if (exclusive.value) return;
+      const next = new Set(suppressed.value);
+      const hide = !assumedHidden.value;
+      for (const name of assumedNames.value) {
+        if (hide) next.add(name); else next.delete(name);
+      }
+      suppressed.value = next;
       refresh();
     }
 
@@ -709,6 +729,7 @@ createApp({
              hasCleanup, step, chartWarning,
              suppressed, config, categories, counterfactual, maxCleared,
              summary, delta, caption, toggle, resetDefaults, explain,
+             isAssumed, assumedHidden, toggleAssumed,
              familyStyle, FAMILY_LABEL };
   },
   template: `
@@ -726,6 +747,12 @@ createApp({
   <span class="spacer"></span>
   <button class="ghost" :aria-pressed="String(showTable)"
     @click="showTable = !showTable">Table view</button>
+  <button class="ghost" :aria-pressed="String(assumedHidden)"
+    :disabled="Boolean(exclusive)"
+    @click="toggleAssumed"
+    title="Assume impossible every category that names an unread call rather
+than a panic">
+    {{ assumedHidden ? 'Show unread' : 'Hide unread' }}</button>
   <button class="ghost" @click="resetDefaults">Reset policy</button>
   <button class="ghost" @click="toggleTheme"
     :title="'Switch to ' + (theme === 'dark' ? 'light' : 'dark') + ' mode'">
@@ -787,6 +814,10 @@ createApp({
           @change="toggle(c.category)">
         <span class="family-dot" :style="familyStyle(c.category)"></span>
         <span class="name" @click="toggle(c.category)">{{ c.category }}</span>
+        <span v-if="isAssumed(c.category)" class="unread"
+          title="Not a panic. The analysis could not read what this call
+reaches, so it reports where it stopped seeing rather than a way to fail.">
+          unread</span>
         <button class="only" @click="lockTo(c.category)"
           :aria-pressed="String(exclusive === c.category)"
           :title="exclusive === c.category
@@ -882,12 +913,14 @@ createApp({
       <template v-if="showTable">
         <h2 style="margin-top:0">Panic categories</h2>
         <table class="data">
-          <thead><tr><th>category</th><th>assumed impossible</th>
+          <thead><tr><th>category</th><th>kind</th>
+            <th>assumed impossible</th>
             <th class="n">direct sites</th><th class="n">functions reaching</th>
             <th class="n">functions cleared</th></tr></thead>
           <tbody>
             <tr v-for="c in counterfactual" :key="c.category">
               <td>{{ c.category }}</td>
+              <td>{{ isAssumed(c.category) ? 'unread' : 'panic' }}</td>
               <td>{{ c.suppressed ? 'yes' : 'no' }}</td>
               <td class="n">{{ c.sites }}</td>
               <td class="n">{{ c.functions_reaching }}</td>

@@ -45,7 +45,16 @@ pub fn graph(graph: &Graph) -> Value {
         "config": graph.config(),
         "categories": ALL
             .iter()
-            .map(|c| json!({ "name": c.name(), "describe": c.describe() }))
+            .map(|c| {
+                json!({
+                    "name": c.name(),
+                    "describe": c.describe(),
+                    // Whether the name stands for a panic or for a place
+                    // the analysis could not read. The view separates the
+                    // two, since an unread call is not a finding.
+                    "assumed": CategorySet::assumed().contains(*c),
+                })
+            })
             .collect::<Vec<_>>(),
         "nodes": nodes,
     })
