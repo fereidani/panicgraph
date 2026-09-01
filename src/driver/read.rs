@@ -548,6 +548,8 @@ impl<'tcx> Folder<'_, 'tcx> {
         let held = own.same.map_or(own, |root| {
             let at_root =
                 state.get(root.as_usize()).copied().unwrap_or_default();
+            // A copy denotes what its source did, so what the source is
+            // known about stands for the copy as well.
             Fact {
                 value: own.value.or(at_root.value),
                 order: if own.order.is_empty() {
@@ -555,6 +557,8 @@ impl<'tcx> Folder<'_, 'tcx> {
                 } else {
                     own.order
                 },
+                extent: own.extent.or(at_root.extent),
+                paired: own.paired.or(at_root.paired),
                 address: own.address || at_root.address,
                 ..own
             }

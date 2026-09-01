@@ -1158,3 +1158,29 @@ pub fn must_shift_from_the_length(state: &mut [u8; 8], b: u8) {
     }
     state[0] = b;
 }
+
+/// Clean. The guard measures the same element the read does, and the
+/// element is named by an index nothing has changed since.
+pub fn clean_inner_of_guarded(v: &[&[u8]], i: usize) -> u8 {
+    if i < v.len() && !v[i].is_empty() { v[i][0] } else { 0 }
+}
+
+/// Reaches `index`. The guard measures another element.
+pub fn must_inner_of_other(v: &[&[u8]], i: usize, j: usize) -> u8 {
+    if i < v.len() && j < v.len() && !v[j].is_empty() {
+        v[i][0]
+    } else {
+        0
+    }
+}
+
+/// Reaches `index`. The index moved between the guard and the read, so the
+/// element it names is not the one that was measured.
+pub fn must_inner_after_move(v: &[&[u8]], mut i: usize) -> u8 {
+    if i < v.len() && !v[i].is_empty() {
+        i = 0;
+        if i < v.len() { v[i][0] } else { 0 }
+    } else {
+        0
+    }
+}

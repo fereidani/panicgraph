@@ -431,13 +431,16 @@ pub fn retire(state: &mut State<'_>, local: mir::Local) {
     let held = state.get(local.as_usize()).copied().unwrap_or_default();
     forget(state, local);
     if let Some(slot) = state.get_mut(local.as_usize()) {
-        // What the local said about the thing behind it outlives the local:
-        // the trail back to where its value came from, how long the slice
-        // it named was, and the slice that one matched. Only what it
-        // claimed in its own right goes.
+        // What the local said about something other than itself outlives
+        // it: the trail back to where its value came from, how long the
+        // slice it named was, the slice that one matched, and the slice it
+        // held the length of. Only what it claimed in its own right goes.
         slot.same = held.same;
         slot.extent = held.extent;
         slot.paired = held.paired;
+        if matches!(held.value, Some(Value::Length(_))) {
+            slot.value = held.value;
+        }
     }
 }
 
@@ -461,6 +464,9 @@ pub enum Step {
     Field(u32),
     /// Into the payload of one variant.
     Variant(u32),
+    /// To the element a local names, which is a place only for as long as
+    /// that local holds the same index.
+    At(mir::Local),
 }
 
 /// How far from a local a tracked place may sit.
@@ -496,6 +502,7 @@ impl Path {
             mir::ProjectionElem::Downcast(_, variant) => {
                 Step::Variant(variant.as_u32())
             }
+            mir::ProjectionElem::Index(local) => Step::At(local),
             _ => return None,
         })
     }
@@ -555,6 +562,26 @@ impl Path {
     /// any pointer could land on it.
     pub fn behind_pointer(self) -> bool {
         self.steps.iter().flatten().any(|step| *step == Step::Deref)
+    }
+
+    /// Whether a local decides which element the place is.
+    pub fn indexed_by(self, local: mir::Local) -> bool {
+        self.steps
+            .iter()
+            .flatten()
+            .any(|step| *step == Step::At(local))
+    }
+
+    /// Whether the place means the same thing in another body.
+    ///
+    /// An index names a local of the body it was read in, so a place that
+    /// carries one describes nothing anywhere else.
+    pub fn portable(self) -> bool {
+        !self
+            .steps
+            .iter()
+            .flatten()
+            .any(|step| matches!(step, Step::At(_)))
     }
 }
 
@@ -681,6 +708,22 @@ impl<'tcx> mir::visit::Visitor<'tcx> for Collect<'tcx> {
 pub fn sweep_base(state: &mut State<'_>, places: &Places, base: mir::Local) {
     for (slot, path) in places.each() {
         if path.base == base {
+            forget(state, slot);
+        }
+    }
+}
+
+/// Forgets every place a local decides the element of.
+///
+/// A write to that local names a different element, so what was known about
+/// the one it named before says nothing about the place now.
+pub fn sweep_indexed(
+    state: &mut State<'_>,
+    places: &Places,
+    local: mir::Local,
+) {
+    for (slot, path) in places.each() {
+        if path.indexed_by(local) {
             forget(state, slot);
         }
     }

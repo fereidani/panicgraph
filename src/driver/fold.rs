@@ -25,7 +25,8 @@ use rustc_middle::{
 use crate::{
     state::{
         Compared, Path, Places, STEPS, State, Subject, Work, escaping, forget,
-        refined, retire, root_of, sweep_aliased, sweep_base, unwind_to, writes,
+        refined, retire, root_of, sweep_aliased, sweep_base, sweep_indexed,
+        unwind_to, writes,
     },
     summary::{BUDGET, Returns, portable},
     value::{self, Against, Fact, Known, Ranks, Thresholds, Value},
@@ -182,6 +183,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         match &stmt.kind {
             mir::StatementKind::Assign(pair) => {
                 pair.0.local == path.base
+                    || path.indexed_by(pair.0.local)
                     || (pair.0.is_indirect() && self.aliased(path))
             }
             mir::StatementKind::SetDiscriminant { place, .. } => {
@@ -189,7 +191,9 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                     || (place.is_indirect() && self.aliased(path))
             }
             mir::StatementKind::StorageLive(other)
-            | mir::StatementKind::StorageDead(other) => *other == path.base,
+            | mir::StatementKind::StorageDead(other) => {
+                *other == path.base || path.indexed_by(*other)
+            }
             mir::StatementKind::Intrinsic(_) => true,
             _ => false,
         }
@@ -370,10 +374,12 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             mir::StatementKind::StorageLive(local) => {
                 forget(state, *local);
                 sweep_base(state, &self.places, *local);
+                sweep_indexed(state, &self.places, *local);
             }
             mir::StatementKind::StorageDead(local) => {
                 retire(state, *local);
                 sweep_base(state, &self.places, *local);
+                sweep_indexed(state, &self.places, *local);
             }
             mir::StatementKind::Intrinsic(intrinsic) => {
                 if let mir::NonDivergingIntrinsic::Assume(operand) =
@@ -478,6 +484,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             forget(state, place.local);
             sweep_base(state, &self.places, place.local);
         }
+        sweep_indexed(state, &self.places, place.local);
         if place.is_indirect() {
             sweep_aliased(state, &self.places, &self.escaped);
         }
@@ -594,7 +601,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             let Some(path) = self.places.path(slot) else {
                 continue;
             };
-            if path.base != mir::RETURN_PLACE {
+            if path.base != mir::RETURN_PLACE || !path.portable() {
                 continue;
             }
             let fact = Self::abroad(Self::known_at(state, slot));
@@ -912,7 +919,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             else {
                 return false;
             };
-            if of == local || measured.source == Some(of) {
+            if measured.source == Some(of) {
                 return false;
             }
             if let Against::Length(len) = measured.against
@@ -920,7 +927,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             {
                 return false;
             }
-            of == raw || of == result
+            of == raw || of == result || of == local
         };
         let touched = |s: &mir::Statement<'tcx>| {
             !transient(s)

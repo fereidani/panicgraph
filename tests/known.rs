@@ -102,6 +102,8 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_prefix_of_the_longer", "index"),
     ("must_split_two_past", "index"),
     ("must_shift_from_the_length", "index"),
+    ("must_inner_of_other", "index"),
+    ("must_inner_after_move", "index"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -193,6 +195,7 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_split_at_a_byte",
     "clean_first_half",
     "clean_shift_along",
+    "clean_inner_of_guarded",
 ];
 
 /// The functions that must stay clean in a debug build as well.

@@ -411,7 +411,7 @@ impl<'tcx> Folder<'_, 'tcx> {
             return;
         }
         for (path, fact) in &callee.returned {
-            if *fact == Fact::default() {
+            if *fact == Fact::default() || !path.portable() {
                 continue;
             }
             let Some(slot) = self.places.at(path.rebased(destination.local))
@@ -447,7 +447,7 @@ impl<'tcx> Folder<'_, 'tcx> {
             let Some(path) = callee.places.path(slot) else {
                 continue;
             };
-            if callee.escapes(slot) {
+            if callee.escapes(slot) || !path.portable() {
                 continue;
             }
             let Some(at) = path.base.as_usize().checked_sub(1) else {
