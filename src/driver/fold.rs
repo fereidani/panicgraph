@@ -109,6 +109,10 @@ pub struct Folder<'a, 'tcx> {
     pub budget: u32,
     /// What the walk has found the body to return.
     pub returns: Returns<'tcx>,
+    /// What it leaves in the places it tracks below the return place, so a
+    /// caller reading a field of what it was handed reads the value the
+    /// body put there.
+    pub returned: Vec<(Path, Fact<'tcx>)>,
 }
 
 impl<'a, 'tcx> Folder<'a, 'tcx> {
@@ -121,7 +125,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         depth: u32,
         budget: u32,
     ) -> Self {
-        let places = Places::of(mir);
+        let places = Places::of(tcx, mir);
         let mut escaped = escaping(mir);
         // A place is tracked whatever its base does, since what a pointer
         // could reach is swept where the write happens instead.
@@ -137,6 +141,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             depth,
             budget,
             returns: Returns::Never,
+            returned: Vec::new(),
         }
     }
 
@@ -510,15 +515,51 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 // The planes that name a local of this body describe
                 // nothing outside it, so they are dropped rather than
                 // handed to a caller that would read them as its own.
+                let first = matches!(self.returns, Returns::Never);
+                self.left_behind(&state, first);
                 let held = Self::known_at(&state, mir::RETURN_PLACE);
-                self.returns = self.returns.met(Fact {
-                    value: held.value.and_then(portable),
-                    order: None,
-                    same: None,
-                    ..held
-                });
+                self.returns = self.returns.met(Self::abroad(held));
             }
             _ => Self::onward(kind, state, work),
+        }
+    }
+
+    /// The claim as it reads outside the body it was made in.
+    ///
+    /// The planes that name a local describe nothing anywhere else, so a
+    /// caller is handed what is left rather than a claim about one of its
+    /// own locals that happens to share a number.
+    pub fn abroad(held: Fact<'tcx>) -> Fact<'tcx> {
+        Fact {
+            value: held.value.and_then(portable),
+            order: None,
+            same: None,
+            ..held
+        }
+    }
+
+    /// Records what the parts of the return place hold on one path out.
+    ///
+    /// A structure handed back carries what was put in it, so a field the
+    /// caller reads holds what this body wrote there. Every path out has to
+    /// agree, the way the return place itself does.
+    fn left_behind(&mut self, state: &State<'tcx>, first: bool) {
+        let count = self.places.len();
+        let base = self.mir.local_decls.len();
+        for index in 0..count {
+            let slot = mir::Local::from_usize(base.saturating_add(index));
+            let Some(path) = self.places.path(slot) else {
+                continue;
+            };
+            if path.base != mir::RETURN_PLACE {
+                continue;
+            }
+            let fact = Self::abroad(Self::known_at(state, slot));
+            match self.returned.iter_mut().find(|(held, _)| *held == path) {
+                Some((_, held)) => *held = held.joined(fact),
+                None if first => self.returned.push((path, fact)),
+                None => {}
+            }
         }
     }
 
@@ -654,7 +695,13 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         self.overwrite(&mut after, &call.destination);
         // What the callee was handed a pointer to is not read by this walk.
         sweep_aliased(&mut after, &self.places, &self.escaped);
-        let found = self.inspect(state, call.func, call.args, call.destination);
+        let found = self.inspect(
+            state,
+            call.func,
+            call.args,
+            call.destination,
+            &mut after,
+        );
         if found.quiet
             && let Some(slot) = reach.quiet.get_mut(bb.as_usize())
         {

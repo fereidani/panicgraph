@@ -86,6 +86,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_chunks_of_a_size", "explicit"),
     ("must_step_by_a_size", "explicit"),
     ("must_split_unguarded", "explicit"),
+    ("must_convert_runtime", "remainder-by-zero"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -159,6 +160,8 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_chunks_of_a_constant",
     "clean_step_by_a_constant",
     "clean_split_after_guard",
+    "clean_convert_constant",
+    "clean_chunk_count",
 ];
 
 /// The functions that must stay clean in a debug build as well.

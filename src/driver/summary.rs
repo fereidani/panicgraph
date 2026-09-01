@@ -82,6 +82,9 @@ struct Carried<'tcx> {
     /// Where the argument's claims live in the caller, so a claim naming it
     /// can be rewritten to name the parameter.
     slot: Option<mir::Local>,
+    /// The local the argument was read from whole, which is what the places
+    /// inside it are recorded against.
+    base: Option<mir::Local>,
     /// Whether the argument arrives at the type the parameter is declared
     /// with, which is what makes a claim about it describe the same value.
     alike: bool,
@@ -113,6 +116,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         func: &mir::Operand<'tcx>,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
         destination: mir::Place<'tcx>,
+        after: &mut State<'tcx>,
     ) -> Found<'tcx> {
         let Some(ty) =
             self.monomorphize(func.ty(&self.mir.local_decls, self.tcx))
@@ -125,7 +129,7 @@ impl<'tcx> Folder<'_, 'tcx> {
                 quiet: false,
             };
         }
-        self.folded(state, ty, args)
+        self.folded(state, ty, args, destination, after)
     }
 
     /// The value a call returns by the contract of what it calls.
@@ -210,6 +214,8 @@ impl<'tcx> Folder<'_, 'tcx> {
         state: &State<'tcx>,
         func: Ty<'tcx>,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        destination: mir::Place<'tcx>,
+        after: &mut State<'tcx>,
     ) -> Found<'tcx> {
         let Some(callee) = self.target(func) else {
             return Found::default();
@@ -231,6 +237,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         let entry = self.carried(state, &folder, args);
         let reach = folder.run(entry);
         self.budget = folder.budget;
+        self.handed_back(&folder, destination, after);
         Found {
             left: folder.returns.claim(),
             quiet: self.silent(mir, &reach),
@@ -346,7 +353,84 @@ impl<'tcx> Folder<'_, 'tcx> {
                 *slot = fact;
             }
         }
+        self.handed_over(state, callee, &carried, &mut entry);
         entry
+    }
+
+    /// Records in the caller what the parts of a returned structure hold.
+    ///
+    /// A field the callee filled is the same field where the caller reads
+    /// it back, so the claim travels with the value rather than stopping at
+    /// the call.
+    fn handed_back(
+        &self,
+        callee: &Folder<'_, 'tcx>,
+        destination: mir::Place<'tcx>,
+        after: &mut State<'tcx>,
+    ) {
+        if !destination.projection.is_empty() {
+            return;
+        }
+        for (path, fact) in &callee.returned {
+            if *fact == Fact::default() {
+                continue;
+            }
+            let Some(slot) = self.places.at(path.rebased(destination.local))
+            else {
+                continue;
+            };
+            if self.escapes(slot) {
+                continue;
+            }
+            if let Some(cell) = after.get_mut(slot.as_usize()) {
+                *cell = *fact;
+            }
+        }
+    }
+
+    /// Carries what the caller knows about the parts of an argument into
+    /// the places the callee reads them at.
+    ///
+    /// A value handed over inside a structure is still that value where the
+    /// callee takes it out again: the `Ok` a conversion built carries the
+    /// number it holds through the unwrapping below it.
+    fn handed_over(
+        &self,
+        state: &State<'tcx>,
+        callee: &Folder<'_, 'tcx>,
+        carried: &[Carried<'tcx>],
+        entry: &mut State<'tcx>,
+    ) {
+        let count = callee.places.len();
+        let first = callee.mir.local_decls.len();
+        for index in 0..count {
+            let slot = mir::Local::from_usize(first.saturating_add(index));
+            let Some(path) = callee.places.path(slot) else {
+                continue;
+            };
+            if callee.escapes(slot) {
+                continue;
+            }
+            let Some(at) = path.base.as_usize().checked_sub(1) else {
+                continue;
+            };
+            let Some(held) = carried.get(at).filter(|held| held.alike) else {
+                continue;
+            };
+            let Some(mine) = held
+                .base
+                .and_then(|base| self.places.at(path.rebased(base)))
+            else {
+                continue;
+            };
+            let fact = Folder::abroad(Folder::known_at(state, mine));
+            if fact == Fact::default() {
+                continue;
+            }
+            if let Some(cell) = entry.get_mut(slot.as_usize()) {
+                *cell = fact;
+            }
+        }
     }
 
     /// What one argument tells the parameter it becomes.
@@ -381,7 +465,18 @@ impl<'tcx> Folder<'_, 'tcx> {
             same: None,
             ..held
         };
-        Carried { slot, alike, fact }
+        let base = match &arg.node {
+            mir::Operand::Copy(place) | mir::Operand::Move(place) => {
+                place.projection.is_empty().then_some(place.local)
+            }
+            mir::Operand::Constant(_) | mir::Operand::RuntimeChecks(_) => None,
+        };
+        Carried {
+            slot,
+            base,
+            alike,
+            fact,
+        }
     }
 
     /// The range a count of bits lands in.

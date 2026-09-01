@@ -904,3 +904,23 @@ pub fn clean_split_after_guard(v: &[u8]) -> (&[u8], &[u8]) {
 pub fn must_split_unguarded(v: &[u8]) -> (&[u8], &[u8]) {
     v.split_at(2)
 }
+
+/// Clean. The conversion cannot fail for this value, and the number it
+/// hands back inside the wrapper is the one the division reads.
+pub fn clean_convert_constant(x: u16) -> u16 {
+    let scale: u16 = 10_000i32.try_into().expect("ten thousand fits");
+    x % scale
+}
+
+/// Reaches `remainder-by-zero`. Nothing here settles what the conversion
+/// leaves behind.
+pub fn must_convert_runtime(x: u16, scale: i32) -> u16 {
+    let scale: u16 = scale.try_into().unwrap_or(0);
+    x % scale
+}
+
+/// Clean. The size the iterator carries is the constant it was built with,
+/// so the division its own size hint writes cannot fail.
+pub fn clean_chunk_count(v: &[u8]) -> usize {
+    v.chunks_exact(4).count()
+}

@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 
 use rustc_middle::{
     mir::{self, BasicBlock, BinOp, UnwindAction},
-    ty::Ty,
+    ty::{Ty, TyCtxt},
 };
 
 use crate::value::{
@@ -405,6 +405,21 @@ pub struct Path {
 }
 
 impl Path {
+    /// The step a projection stands for, when it is one this walk can name.
+    ///
+    /// An index is a value in its own right, and a subslice or a cast is not
+    /// a place this walk can tell apart from another.
+    const fn step_of(element: mir::PlaceElem<'_>) -> Option<Step> {
+        Some(match element {
+            mir::ProjectionElem::Deref => Step::Deref,
+            mir::ProjectionElem::Field(field, _) => Step::Field(field.as_u32()),
+            mir::ProjectionElem::Downcast(_, variant) => {
+                Step::Variant(variant.as_u32())
+            }
+            _ => return None,
+        })
+    }
+
     /// The place, when it is one this walk can name.
     fn of(place: &mir::Place<'_>) -> Option<Self> {
         if place.projection.is_empty() || place.projection.len() > REACH {
@@ -412,23 +427,48 @@ impl Path {
         }
         let mut steps = [None; REACH];
         for (slot, element) in steps.iter_mut().zip(place.projection) {
-            *slot = Some(match element {
-                mir::ProjectionElem::Deref => Step::Deref,
-                mir::ProjectionElem::Field(field, _) => {
-                    Step::Field(field.as_u32())
-                }
-                mir::ProjectionElem::Downcast(_, variant) => {
-                    Step::Variant(variant.as_u32())
-                }
-                // An index is a value in its own right, and a subslice or a
-                // cast is not a place this walk can tell apart from another.
-                _ => return None,
-            });
+            *slot = Some(Self::step_of(element)?);
         }
         Some(Self {
             base: place.local,
             steps,
         })
+    }
+
+    /// The place one field of an aggregate written to `place` sits at.
+    ///
+    /// A constructor names the fields it fills without reading them back,
+    /// so the walk would have no slot for them otherwise, and a value
+    /// handed over inside a structure would be lost at the constructor.
+    pub fn under(
+        place: &mir::Place<'_>,
+        variant: Option<u32>,
+        field: u32,
+    ) -> Option<Self> {
+        let mut steps = [None; REACH];
+        let mut at = 0usize;
+        for element in place.projection {
+            *steps.get_mut(at)? = Some(Self::step_of(element)?);
+            at = at.checked_add(1)?;
+        }
+        if let Some(variant) = variant {
+            *steps.get_mut(at)? = Some(Step::Variant(variant));
+            at = at.checked_add(1)?;
+        }
+        *steps.get_mut(at)? = Some(Step::Field(field));
+        Some(Self {
+            base: place.local,
+            steps,
+        })
+    }
+
+    /// The same place, read from another local.
+    ///
+    /// A field of an argument is a field of the parameter it becomes, and
+    /// a field of a returned structure is a field of the place the caller
+    /// put it in, which is what carries a claim across a call.
+    pub const fn rebased(self, base: mir::Local) -> Self {
+        Self { base, ..self }
     }
 
     /// Whether the place is reached through a pointer, so a write through
@@ -450,8 +490,11 @@ pub struct Places {
 
 impl Places {
     /// Collects the places a body reads or writes.
-    pub fn of(mir: &mir::Body<'_>) -> Self {
-        let mut collect = Collect { found: Vec::new() };
+    pub fn of<'tcx>(tcx: TyCtxt<'tcx>, mir: &mir::Body<'tcx>) -> Self {
+        let mut collect = Collect {
+            tcx,
+            found: Vec::new(),
+        };
         mir::visit::Visitor::visit_body(&mut collect, mir);
         Self {
             paths: collect.found,
@@ -466,7 +509,11 @@ impl Places {
 
     /// The slot a place is recorded at.
     pub fn slot(&self, place: &mir::Place<'_>) -> Option<mir::Local> {
-        let path = Path::of(place)?;
+        self.at(Path::of(place)?)
+    }
+
+    /// The slot a path is recorded at.
+    pub fn at(&self, path: Path) -> Option<mir::Local> {
         let at = self.paths.iter().position(|held| *held == path)?;
         Some(mir::Local::from_usize(self.first.saturating_add(at)))
     }
@@ -487,25 +534,61 @@ impl Places {
 }
 
 /// Gathers the places of a body as the visitor walks it.
-struct Collect {
+struct Collect<'tcx> {
+    tcx: TyCtxt<'tcx>,
     found: Vec<Path>,
 }
 
-impl<'tcx> mir::visit::Visitor<'tcx> for Collect {
+impl Collect<'_> {
+    /// Records a place, up to the table's size.
+    fn add(&mut self, path: Path) {
+        if self.found.len() >= TRACKED || self.found.contains(&path) {
+            return;
+        }
+        self.found.push(path);
+    }
+}
+
+impl<'tcx> mir::visit::Visitor<'tcx> for Collect<'tcx> {
     fn visit_place(
         &mut self,
         place: &mir::Place<'tcx>,
         _: mir::visit::PlaceContext,
         _: mir::Location,
     ) {
-        if self.found.len() >= TRACKED {
-            return;
+        if let Some(path) = Path::of(place) {
+            self.add(path);
         }
-        let Some(path) = Path::of(place) else {
+    }
+
+    /// Records the fields a constructor fills as well as the places the
+    /// body names, since a field written and never read here is still one
+    /// a caller or a callee reads.
+    fn visit_assign(
+        &mut self,
+        place: &mir::Place<'tcx>,
+        rvalue: &mir::Rvalue<'tcx>,
+        location: mir::Location,
+    ) {
+        self.super_assign(place, rvalue, location);
+        let mir::Rvalue::Aggregate(kind, fields) = rvalue else {
             return;
         };
-        if !self.found.contains(&path) {
-            self.found.push(path);
+        let variant = match &**kind {
+            mir::AggregateKind::Tuple => None,
+            mir::AggregateKind::Adt(did, variant, ..) => {
+                let def = self.tcx.adt_def(*did);
+                if def.is_union() {
+                    return;
+                }
+                def.is_enum().then(|| variant.as_u32())
+            }
+            _ => return,
+        };
+        for index in fields.indices() {
+            if let Some(path) = Path::under(place, variant, index.as_u32()) {
+                self.add(path);
+            }
         }
     }
 }
