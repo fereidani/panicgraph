@@ -999,3 +999,24 @@ pub fn clean_prefix_under_guard(v: &[u8], n: usize) -> &[u8] {
 pub fn must_prefix_unguarded(v: &[u8], n: usize) -> &[u8] {
     &v[..n]
 }
+
+/// Clean. The inner guard measures against a value the outer one already
+/// proved below the length, so the read is in range.
+pub fn clean_guard_within_a_guard(v: &[u8], i: usize, j: usize) -> u8 {
+    if i < v.len() && j < i { v[j] } else { 0 }
+}
+
+/// Reaches `index`. Two values at most the length can both be the length.
+pub fn must_guard_within_a_loose_guard(v: &[u8], i: usize, j: usize) -> u8 {
+    if i <= v.len() && j <= i { v[j] } else { 0 }
+}
+
+/// Reaches `index`. The outer guard measures another slice.
+pub fn must_guard_within_a_guard_of_other(
+    v: &[u8],
+    w: &[u8],
+    i: usize,
+    j: usize,
+) -> u8 {
+    if i < w.len() && j < i { v[j] } else { 0 }
+}

@@ -904,6 +904,19 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 _ => None,
             }
         };
+        // A value below one that is itself measured against a length is
+        // below that length too, which is what a pair of guards written
+        // one inside the other proves. Only the two operators that carry
+        // over are read: the rest say nothing about the length.
+        let inherited = |operand: &mir::Operand<'tcx>, op: BinOp| {
+            if !matches!(op, BinOp::Lt | BinOp::Le) {
+                return None;
+            }
+            let held = read(operand)?;
+            let (_, of) = self.fact(state, operand).order?;
+            Some((Against::Length(of), Some(held)))
+        };
+        let mirrored = value::mirrored(op);
         if let (Some(local), Some((against, source))) =
             (read(left), measure(right))
         {
@@ -914,9 +927,30 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 source,
             });
         }
-        let (local, (against, source)) = (read(right)?, measure(left)?);
+        if let (Some(local), Some((against, source))) =
+            (read(right), measure(left))
+        {
+            return Some(Compared {
+                op: mirrored,
+                local,
+                against,
+                source,
+            });
+        }
+        if let (Some(local), Some((against, source))) =
+            (read(left), inherited(right, op))
+        {
+            return Some(Compared {
+                op,
+                local,
+                against,
+                source,
+            });
+        }
+        let (local, (against, source)) =
+            (read(right)?, inherited(left, mirrored)?);
         Some(Compared {
-            op: value::mirrored(op),
+            op: mirrored,
             local,
             against,
             source,
