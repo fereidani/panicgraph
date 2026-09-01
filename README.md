@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/panicgraph-icon-dark.svg" alt="" width="120">
+
 # panicgraph
 
 [![Crates.io][crates-badge]][crates-url]
