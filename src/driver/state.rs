@@ -14,8 +14,8 @@ use rustc_middle::{
 };
 
 use crate::value::{
-    self, Against, Bounds, Fact, Known, LenRel, Ranks, Taught, Thresholds,
-    Value, truncate,
+    self, Against, Bounds, Fact, Known, LenRel, Ranks, STOPS, Taught,
+    Thresholds, Value, truncate,
 };
 
 /// How many times a block's entry is joined exactly before what arrives is
@@ -29,10 +29,22 @@ const PRECISE: u32 = 2;
 
 /// How many times one local's claim can change before it holds nothing.
 ///
-/// Two exact joins, a widening step for each end of a range, and the range
-/// itself given up, for each of the two ranges a fact can hold. The walk's
-/// bound is built from this.
-pub const STEPS: usize = 12;
+/// An end of a range is joined exactly [`PRECISE`] times and then widened,
+/// and widening does not reach the end of the type at once: it stops at
+/// each value the body compares against, of which a walk keeps at most
+/// [`STOPS`], before taking the end of the type and then giving the range
+/// up. Both ends of both ranges a fact can hold move that way, and the
+/// planes that name a local rather than a range change once each on top.
+///
+/// The walk's bound is built from this, so it is derived rather than
+/// written down: a longer widening ladder must lengthen the walk that
+/// climbs it, or the bound stops being a proof.
+pub const STEPS: usize = 2 * 2 * (PRECISE as usize + STOPS + 2) + NAMING_PLANES;
+
+/// How many planes of a fact name a local or a tag rather than a range.
+///
+/// Each can change to a different answer once and then to none at all.
+const NAMING_PLANES: usize = 14;
 
 /// What every local is known about at one point.
 pub type State<'tcx> = Vec<Fact<'tcx>>;

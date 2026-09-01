@@ -353,7 +353,7 @@ impl Ranks {
 /// Each one is a step an end of a range can take, so the table is capped:
 /// what bounds the walk is that an end moves outward a fixed number of
 /// times whatever the body looks like.
-const STOPS: usize = 8;
+pub const STOPS: usize = 8;
 
 /// The values a body compares against, in order.
 ///
