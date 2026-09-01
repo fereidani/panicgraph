@@ -99,10 +99,20 @@ fn emit(tcx: TyCtxt<'_>) -> std::io::Result<()> {
 /// Records the settings that change which panics exist.
 fn build_config(tcx: TyCtxt<'_>) -> BuildConfig {
     let debug_assertions = tcx.sess.opts.debug_assertions;
-    let std_mode = match std::env::var(STD_MODE).as_deref() {
-        Ok("full") => StdMode::Full,
-        _ => StdMode::Shipped,
-    };
+    // The front end writes this with `StdMode::name`, so anything else is
+    // the two halves disagreeing. Reporting the artifact under a mode it
+    // was not built in would misdescribe every finding in it, so say so
+    // rather than settle on a default.
+    let raw = std::env::var(STD_MODE).unwrap_or_default();
+    let std_mode = StdMode::from_name(&raw).unwrap_or_else(|| {
+        if !raw.is_empty() {
+            eprintln!(
+                "panicgraph: {STD_MODE} is `{raw}`, which names no standard \
+                 library mode; reading it as shipped"
+            );
+        }
+        StdMode::Shipped
+    });
     BuildConfig {
         rustc: tcx.sess.cfg_version.to_owned(),
         profile: std::env::var(PROFILE)

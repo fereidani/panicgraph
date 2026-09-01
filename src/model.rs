@@ -288,6 +288,17 @@ impl StdMode {
             Self::Full => "full",
         }
     }
+
+    /// The mode one of those names stands for.
+    ///
+    /// The inverse of [`StdMode::name`], so the two cannot drift: what the
+    /// front end writes is what the driver reads back.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::Shipped, Self::Full]
+            .into_iter()
+            .find(|mode| mode.name() == name)
+    }
 }
 
 /// The build configuration an analysis ran under.

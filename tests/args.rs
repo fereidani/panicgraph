@@ -112,3 +112,16 @@ fn a_drawing_is_refused_where_there_is_nothing_to_draw() {
         "the analysis is what a drawing draws"
     );
 }
+
+#[test]
+fn a_standard_library_mode_survives_its_own_name() {
+    for mode in [StdMode::Shipped, StdMode::Full] {
+        assert_eq!(
+            StdMode::from_name(mode.name()),
+            Some(mode),
+            "the driver reads back what the front end writes"
+        );
+    }
+    assert_eq!(StdMode::from_name("partial"), None);
+    assert_eq!(StdMode::from_name(""), None);
+}
