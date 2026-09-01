@@ -274,6 +274,9 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                     if let Some(under) = known.predecessor() {
                         stops.add(under.bits);
                     }
+                    if let Some(over) = known.successor() {
+                        stops.add(over.bits);
+                    }
                 }
             }
         }

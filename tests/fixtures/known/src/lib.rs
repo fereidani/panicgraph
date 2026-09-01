@@ -1137,3 +1137,24 @@ pub fn clean_first_half(v: &[u8]) -> u32 {
     }
     total
 }
+
+/// Clean. The counter walks down from the last position and the guard above
+/// the read keeps it there, so both ends of the move are inside the array.
+pub fn clean_shift_along(state: &mut [u8; 8], b: u8) {
+    let mut at = 7;
+    while at > 0 {
+        state[at] = state[at - 1];
+        at -= 1;
+    }
+    state[0] = b;
+}
+
+/// Reaches `index`. The counter starts one past the last position.
+pub fn must_shift_from_the_length(state: &mut [u8; 8], b: u8) {
+    let mut at = 8;
+    while at > 0 {
+        state[at] = state[at - 1];
+        at -= 1;
+    }
+    state[0] = b;
+}
