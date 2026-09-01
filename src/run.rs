@@ -30,6 +30,9 @@ const BUILT_AGAINST: Option<&str> = option_env!("PANICGRAPH_RUSTC");
 struct Layout {
     out: PathBuf,
     target: PathBuf,
+    /// Whether the build tree is the one every project shares, which goes
+    /// stale on its own terms rather than with one project's artifacts.
+    shared: bool,
 }
 
 /// Builds the crate under the wrapper and returns every artifact produced.
@@ -88,7 +91,7 @@ fn crate_root(args: &Args) -> Result<PathBuf> {
 /// Returns an error when the crate directory cannot be resolved.
 pub fn build_tree(args: &Args) -> Result<PathBuf> {
     let root = crate_root(args)?;
-    analysis_target(&root, args)
+    analysis_target(&root, args).map(|(tree, _)| tree)
 }
 
 /// Reports a toolchain that has moved since this tool was installed.
@@ -188,12 +191,15 @@ fn prepare(root: &Path, driver: &Path, args: &Args) -> Result<Layout> {
         args.std_mode.name(),
         args.package.as_deref().unwrap_or("all"),
     );
+    let (target, shared) = analysis_target(root, args)?;
     let layout = Layout {
         out: base.join(&slot),
-        target: analysis_target(root, args)?,
+        target,
+        shared,
     };
-    let marker = format!("{slot}\n{}\n", driver_stamp(driver));
-    discard_if_stale(&layout, &marker)?;
+    let stamp = driver_stamp(driver);
+    let marker = format!("{slot}\n{stamp}\n");
+    discard_if_stale(&layout, &marker, &stamp)?;
     fs::create_dir_all(&layout.out).with_context(|| {
         format!("could not create {}", layout.out.display())
     })?;
@@ -227,16 +233,40 @@ fn driver_stamp(driver: &Path) -> String {
 /// Both directories go: the artifacts because they describe an analysis this
 /// driver did not perform, and the build tree because cargo would otherwise
 /// consider every crate current and never run the wrapper again.
-fn discard_if_stale(layout: &Layout, marker: &str) -> Result<()> {
+///
+/// A shared build tree is the exception. It belongs to no one project, so it
+/// is judged by the driver alone: keying it on a slot as well would have
+/// each project in turn discard the standard library the last one rebuilt,
+/// which is the one cost the sharing exists to pay once.
+fn discard_if_stale(layout: &Layout, marker: &str, stamp: &str) -> Result<()> {
     let path = layout.out.join(SLOT_MARKER);
-    if !layout.out.exists() {
-        return Ok(());
+    let fresh = layout.out.exists()
+        && fs::read_to_string(&path).is_ok_and(|found| found == marker);
+    if !fresh {
+        clear(&layout.out)?;
+        if !layout.shared {
+            clear(&layout.target)?;
+        }
     }
-    if fs::read_to_string(&path).is_ok_and(|found| found == marker) {
-        return Ok(());
+    if layout.shared {
+        discard_shared_if_stale(&layout.target, stamp)?;
     }
-    clear(&layout.out)?;
-    clear(&layout.target)
+    Ok(())
+}
+
+/// Throws away a shared build tree an earlier driver filled.
+fn discard_shared_if_stale(target: &Path, stamp: &str) -> Result<()> {
+    let path = target.join(SLOT_MARKER);
+    if target.exists()
+        && !fs::read_to_string(&path).is_ok_and(|found| found == stamp)
+    {
+        clear(target)?;
+    }
+    fs::create_dir_all(target)
+        .with_context(|| format!("could not create {}", target.display()))?;
+    fs::write(&path, stamp.as_bytes()).with_context(|| {
+        format!("could not write the marker in {}", target.display())
+    })
 }
 
 /// Removes a directory and everything under it, if it is there at all.
@@ -311,13 +341,12 @@ fn prune_stale(base: &Path, layout: &Layout) {
 /// on the toolchain, so that tree is shared across projects rather than
 /// paid for once per target directory. The artifacts stay local: they
 /// describe one crate.
-fn analysis_target(root: &Path, args: &Args) -> Result<PathBuf> {
+fn analysis_target(root: &Path, args: &Args) -> Result<(PathBuf, bool)> {
     let base = root.join("target").join("panicgraph");
     Ok(match args.std_mode {
-        StdMode::Full => {
-            shared_build_dir()?.unwrap_or_else(|| base.join("build"))
-        }
-        StdMode::Shipped => base.join("build"),
+        StdMode::Full => shared_build_dir()?
+            .map_or_else(|| (base.join("build"), false), |tree| (tree, true)),
+        StdMode::Shipped => (base.join("build"), false),
     })
 }
 
