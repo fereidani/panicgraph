@@ -81,6 +81,10 @@ pub fn reachable<'tcx>(
     folder.run(entry)
 }
 
+/// What one side of a comparison measures the other against, with the local
+/// it was read from.
+type Measured<'tcx> = Option<(Against<'tcx>, Option<mir::Local>)>;
+
 /// The parts of a call the walk reads.
 #[derive(Clone, Copy)]
 struct Call<'a, 'tcx> {
@@ -826,10 +830,11 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             read,
             ty,
             width: self.width(ty)?,
-            compared: ty
-                .is_bool()
-                .then(|| self.comparison_behind(bb, read, state))
-                .flatten(),
+            compared: if ty.is_bool() {
+                self.comparison_behind(bb, read, state)
+            } else {
+                [None; 2]
+            },
         })
     }
 
@@ -839,18 +844,22 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         bb: BasicBlock,
         result: mir::Local,
         state: &State<'tcx>,
-    ) -> Option<Compared<'tcx>> {
+    ) -> [Option<Compared<'tcx>>; 2] {
+        let none = [None; 2];
         let block = &self.mir.basic_blocks[bb];
-        let at = block.statements.iter().rposition(|s| writes(s, result))?;
+        let Some(at) = block.statements.iter().rposition(|s| writes(s, result))
+        else {
+            return none;
+        };
         let mir::StatementKind::Assign(pair) = &block.statements[at].kind
         else {
-            return None;
+            return none;
         };
         if pair.0.as_local() != Some(result) {
-            return None;
+            return none;
         }
         let mir::Rvalue::BinaryOp(op, operands) = &pair.1 else {
-            return None;
+            return none;
         };
         if !matches!(
             op,
@@ -861,20 +870,39 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 | BinOp::Gt
                 | BinOp::Ge
         ) {
-            return None;
+            return none;
         }
-        let measured = self.compared(state, *op, &operands.0, &operands.1)?;
+        let after = &block.statements[at.saturating_add(1)..];
+        let mut found = self.compared(state, *op, &operands.0, &operands.1);
+        for slot in &mut found {
+            let Some(measured) = *slot else {
+                continue;
+            };
+            *slot = self.standing(result, after, state, measured);
+        }
+        found
+    }
+
+    /// The claim, rewritten against the place it belongs to, when nothing
+    /// between the comparison and the branch has undone it.
+    ///
+    /// The facts read at the branch have to be the ones that stood when the
+    /// comparison ran, so nothing it involved may change in between. Ending
+    /// the life of the temporary that was compared, or of the boolean it
+    /// produced, is not such a change: the claim is recorded against the
+    /// place behind them, which outlives both.
+    fn standing(
+        &self,
+        result: mir::Local,
+        after: &[mir::Statement<'tcx>],
+        state: &State<'tcx>,
+        measured: Compared<'tcx>,
+    ) -> Option<Compared<'tcx>> {
         let raw = measured.local;
         let local = root_of(state, raw);
         if self.escapes(local) {
             return None;
         }
-        // The facts read at the branch have to be the ones that stood when
-        // the comparison ran, so nothing it involved may change in between.
-        // Ending the life of the temporary that was compared, or of the
-        // boolean it produced, is not such a change: the claim is recorded
-        // against the place behind them, which outlives both.
-        let after = &block.statements[at.saturating_add(1)..];
         let transient = |s: &mir::Statement<'tcx>| {
             let (mir::StatementKind::StorageLive(of)
             | mir::StatementKind::StorageDead(of)) = s.kind
@@ -908,15 +936,21 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         Some(Compared { local, ..measured })
     }
 
-    /// Splits a comparison into the local it measures, what it is measured
-    /// against, and the operator read with the local on the left.
+    /// Splits a comparison into the locals it measures, what each is
+    /// measured against, and the operator read with that local on the left.
+    ///
+    /// Two claims come out of one comparison where the operands carry
+    /// different kinds of fact: one side settled against a constant, and
+    /// the other ordered against a length it was already measured by. Both
+    /// hold on the arm, and a loop that proves the first on its way in
+    /// needs the second to survive where its arms meet.
     fn compared(
         &self,
         state: &State<'tcx>,
         op: BinOp,
         left: &mir::Operand<'tcx>,
         right: &mir::Operand<'tcx>,
-    ) -> Option<Compared<'tcx>> {
+    ) -> [Option<Compared<'tcx>>; 2] {
         let read = |operand: &mir::Operand<'tcx>| match operand {
             mir::Operand::Copy(place) | mir::Operand::Move(place) => {
                 self.slot_of(place)
@@ -952,44 +986,36 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             Some((Against::Length(of), Some(held)))
         };
         let mirrored = value::mirrored(op);
-        if let (Some(local), Some((against, source))) =
-            (read(left), measure(right))
+        let pick =
+            |what: &dyn Fn(&mir::Operand<'tcx>, BinOp) -> Measured<'tcx>| {
+                if let (Some(local), Some((against, source))) =
+                    (read(left), what(right, op))
+                {
+                    return Some(Compared {
+                        op,
+                        local,
+                        against,
+                        source,
+                    });
+                }
+                let (local, (against, source)) =
+                    (read(right)?, what(left, mirrored)?);
+                Some(Compared {
+                    op: mirrored,
+                    local,
+                    against,
+                    source,
+                })
+            };
+        let held = pick(&|operand, _| measure(operand));
+        let mut chained = pick(&inherited);
+        // The same place twice teaches nothing the first reading did not.
+        if let (Some(first), Some(second)) = (held, chained)
+            && first.local == second.local
         {
-            return Some(Compared {
-                op,
-                local,
-                against,
-                source,
-            });
+            chained = None;
         }
-        if let (Some(local), Some((against, source))) =
-            (read(right), measure(left))
-        {
-            return Some(Compared {
-                op: mirrored,
-                local,
-                against,
-                source,
-            });
-        }
-        if let (Some(local), Some((against, source))) =
-            (read(left), inherited(right, op))
-        {
-            return Some(Compared {
-                op,
-                local,
-                against,
-                source,
-            });
-        }
-        let (local, (against, source)) =
-            (read(right)?, inherited(left, mirrored)?);
-        Some(Compared {
-            op: mirrored,
-            local,
-            against,
-            source,
-        })
+        [held, chained]
     }
 
     /// Follows an `Assert`, recording it when its condition cannot fail.

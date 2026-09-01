@@ -1106,3 +1106,34 @@ pub fn must_prefix_of_the_longer(a: &[u8], b: &[u8]) -> bool {
     let n = a.len().max(b.len());
     a[..n] == b[..n]
 }
+
+/// Clean. Everything past a byte inside a slice is still inside it, and the
+/// counter is bounded by half a length that is itself bounded.
+pub fn clean_split_at_a_byte(src: &[u8]) -> (&[u8], &[u8]) {
+    let mut at = 0;
+    while at < src.len() {
+        if src[at] == b'\n' {
+            return (&src[..at], &src[at + 1..]);
+        }
+        at += 1;
+    }
+    (src, &[])
+}
+
+/// Reaches `index`. Two past a byte inside a slice can be past its end.
+pub fn must_split_two_past(v: &[u8], at: usize) -> &[u8] {
+    if at < v.len() { &v[at + 2..] } else { v }
+}
+
+/// Clean. The counter is below half a length, and half a length is at most
+/// that length.
+pub fn clean_first_half(v: &[u8]) -> u32 {
+    let half = v.len() / 2;
+    let mut total = 0u32;
+    let mut at = 0;
+    while at < half {
+        total = total.wrapping_add(u32::from(v[at]));
+        at += 1;
+    }
+    total
+}

@@ -44,8 +44,8 @@ pub struct Subject<'tcx> {
     pub read: mir::Local,
     pub ty: Ty<'tcx>,
     pub width: u32,
-    /// The comparison it stands for, when it is a boolean holding one.
-    pub compared: Option<Compared<'tcx>>,
+    /// The comparisons it stands for, when it is a boolean holding one.
+    pub compared: [Option<Compared<'tcx>>; 2],
 }
 
 /// A comparison a branch turns into a fact about the local it measured.
@@ -242,7 +242,7 @@ pub fn refined<'tcx>(
         subject.read,
         Taught::Value(settle(read, matched)),
     );
-    if let Some(compared) = subject.compared {
+    for compared in subject.compared.into_iter().flatten() {
         // A boolean has two arms, so the fallback settles the comparison
         // just as firmly as naming its value does.
         let truth = if matched { value == 1 } else { value == 0 };

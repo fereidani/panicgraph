@@ -288,9 +288,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         let right = self.fact(state, &pair.1);
         Fact {
             value: self.binary(state, op, pair, left, right),
-            order: self
-                .ordered(state, op, pair, left, right)
-                .map_or_else(Ranks::none_held, |(rel, of)| Ranks::of(rel, of)),
+            order: self.ordered(state, op, pair, left, right),
             ..Fact::default()
         }
     }
@@ -309,23 +307,48 @@ impl<'tcx> Folder<'_, 'tcx> {
         pair: &(mir::Operand<'tcx>, mir::Operand<'tcx>),
         left: Fact<'tcx>,
         right: Fact<'tcx>,
-    ) -> Option<(LenRel, mir::Local)> {
+    ) -> Ranks {
         match op {
-            BinOp::Rem => {
-                let Value::Length(of) = right.value? else {
-                    return None;
-                };
-                self.unsigned(&pair.0).then_some((LenRel::Below, of))
-            }
-            BinOp::Div => {
-                let Value::Length(of) = left.value? else {
-                    return None;
-                };
-                self.unsigned(&pair.1).then_some((LenRel::AtMost, of))
-            }
+            BinOp::Rem => match right.value {
+                Some(Value::Length(of)) if self.unsigned(&pair.0) => {
+                    Ranks::of(LenRel::Below, of)
+                }
+                _ => Ranks::none_held(),
+            },
+            BinOp::Div => match left.value {
+                Some(Value::Length(of)) if self.unsigned(&pair.1) => {
+                    Ranks::of(LenRel::AtMost, of)
+                }
+                _ => Ranks::none_held(),
+            },
             BinOp::Sub => self.shortened(state, pair, left, right),
-            _ => None,
+            BinOp::Add => Self::lengthened(left, right),
+            _ => Ranks::none_held(),
         }
+    }
+
+    /// How an addition leaves a value ordered against a slice's length.
+    ///
+    /// A value below a length is at most that length once one is added to
+    /// it, which is what the read of everything past a byte asks. The sum
+    /// cannot wrap: the length itself lies inside the type, so a value
+    /// below it has room for one more.
+    fn lengthened(left: Fact<'tcx>, right: Fact<'tcx>) -> Ranks {
+        let mut ranks = Ranks::none_held();
+        let Some(added) = right.value.and_then(Value::exact) else {
+            return ranks;
+        };
+        if added.is_signed() {
+            return ranks;
+        }
+        for (rel, of) in left.order.each() {
+            match (rel, added.bits) {
+                (held, 0) => ranks.add(held, of),
+                (LenRel::Below, 1) => ranks.add(LenRel::AtMost, of),
+                _ => {}
+            }
+        }
+        ranks
     }
 
     /// How a subtraction leaves a value ordered against a slice's length.
@@ -341,24 +364,29 @@ impl<'tcx> Folder<'_, 'tcx> {
         pair: &(mir::Operand<'tcx>, mir::Operand<'tcx>),
         left: Fact<'tcx>,
         right: Fact<'tcx>,
-    ) -> Option<(LenRel, mir::Local)> {
-        let taken = right.value?.exact()?;
-        if taken.is_signed() {
-            return None;
-        }
-        let (rel, of) = match (left.order.first(), left.value) {
-            (Some(held), _) => held,
-            (None, Some(Value::Length(of))) => (LenRel::AtMost, of),
-            _ => return None,
+    ) -> Ranks {
+        let mut ranks = Ranks::none_held();
+        let Some(taken) = right.value.and_then(Value::exact) else {
+            return ranks;
         };
-        if self.spread(state, &pair.0)?.lo.order(taken)? == Less {
-            return None;
+        let held = match (left.order.is_empty(), left.value) {
+            (true, Some(Value::Length(of))) => Ranks::of(LenRel::AtMost, of),
+            _ => left.order,
+        };
+        if taken.is_signed() || held.is_empty() {
+            return ranks;
         }
-        Some(if taken.bits == 0 {
-            (rel, of)
-        } else {
-            (LenRel::Below, of)
-        })
+        let under = self
+            .spread(state, &pair.0)
+            .and_then(|span| span.lo.order(taken))
+            .is_none_or(|by| by == Less);
+        if under {
+            return ranks;
+        }
+        for (rel, of) in held.each() {
+            ranks.add(if taken.bits == 0 { rel } else { LenRel::Below }, of);
+        }
+        ranks
     }
 
     /// Whether an operand is read as an unsigned integer.
