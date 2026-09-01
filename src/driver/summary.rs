@@ -265,14 +265,6 @@ impl<'tcx> Folder<'_, 'tcx> {
         let entry = self.carried(state, &folder, args);
         let reach = folder.run(entry);
         self.budget = folder.budget;
-        if std::env::var_os("PANICGRAPH_TRACE").is_some() {
-            eprintln!(
-                "TRACE {:?} -> {:?} quiet={}",
-                self.inst,
-                callee,
-                self.silent(&folder, &reach)
-            );
-        }
         self.handed_back(&folder, destination, after);
         Found {
             left: folder.returns.claim(),
@@ -353,15 +345,6 @@ impl<'tcx> Folder<'_, 'tcx> {
                 _ => false,
             };
             if !silent {
-                if std::env::var_os("PANICGRAPH_TRACE").is_some() {
-                    eprintln!(
-                        "TRACE   noisy at {bb:?}: {}",
-                        format!("{:?}", term.kind)
-                            .chars()
-                            .take(90)
-                            .collect::<String>()
-                    );
-                }
                 return false;
             }
         }
