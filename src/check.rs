@@ -18,7 +18,7 @@ use crate::{
 };
 
 /// The format version written into a baseline.
-const BASELINE_VERSION: u32 = 1;
+const BASELINE_VERSION: u32 = 2;
 
 /// One function that can panic.
 #[derive(Debug, Clone)]
@@ -247,6 +247,10 @@ pub fn write_baseline(
         "profile": args.profile,
         "std_mode": args.std_mode.name(),
         "suppressed": args.suppress.names(),
+        "closures": args.closures.name(),
+        "all_crates": args.all_crates,
+        "static_only": args.static_only,
+        "candidates": args.candidates,
         "findings": findings.iter().map(|f| json!({
             "function": f.function,
             "categories": f.categories,
@@ -351,6 +355,31 @@ fn settings_agree(doc: &Value, args: &Args) -> Result<()> {
     ensure!(
         recorded == args.suppress,
         "it was written while suppressing a different set of categories"
+    );
+    // These decide which functions the report names and which edges it
+    // follows, so a baseline written under any of them describes a
+    // different set of functions. Unlike `--only`, nothing about a recorded
+    // entry says whether the change could have hidden it, so there is no
+    // per entry filter to fall back on.
+    let closures = field("closures");
+    ensure!(
+        closures == args.closures.name(),
+        "it was written with closures reporting as {closures}, not {}",
+        args.closures.name()
+    );
+    let flag =
+        |name: &str| doc.get(name).and_then(Value::as_bool).unwrap_or_default();
+    ensure!(
+        flag("all_crates") == args.all_crates,
+        "it was written over a different set of crates"
+    );
+    ensure!(
+        flag("static_only") == args.static_only,
+        "it was written reading a different set of call edges"
+    );
+    ensure!(
+        flag("candidates") == args.candidates,
+        "it was written reading a different set of call targets"
     );
     Ok(())
 }

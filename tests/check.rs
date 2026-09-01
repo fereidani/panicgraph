@@ -141,6 +141,35 @@ fn a_baseline_round_trips() {
 }
 
 #[test]
+fn a_baseline_written_under_other_settings_is_refused() {
+    let file = std::env::temp_dir().join("panicgraph-baseline-settings.json");
+    let result = outcome(sample(), &[]);
+    let (args, _) = gate(&[]);
+    check::write_baseline(&file, &args, &result.findings)
+        .expect("the baseline should be written");
+
+    // Each of these changes which functions the report names, so the
+    // recorded entries describe a different question.
+    for argv in [
+        &["--closures", "parent"][..],
+        &["--all-crates"][..],
+        &["--static-only"][..],
+        &["--candidates"][..],
+    ] {
+        let (other, _) = gate(argv);
+        assert!(
+            check::read_baseline(&file, &other).is_err(),
+            "a baseline written without {argv:?} must not be read with it"
+        );
+    }
+    assert!(
+        check::read_baseline(&file, &args).is_ok(),
+        "the settings it was written under still read it back"
+    );
+    let _ = std::fs::remove_file(&file);
+}
+
+#[test]
 fn a_baseline_admits_what_it_records_and_rejects_the_rest() {
     let file = std::env::temp_dir().join("panicgraph-baseline-gate.json");
     let (args, _) = gate(&[]);

@@ -208,6 +208,17 @@ pub enum Closures {
     Parent,
 }
 
+impl Closures {
+    /// The name used on the command line and in reports.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Separate => "separate",
+            Self::Parent => "parent",
+        }
+    }
+}
+
 /// Output rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
