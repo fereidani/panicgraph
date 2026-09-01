@@ -2,7 +2,7 @@
 
 <img src="assets/panicgraph-icon-dark.svg" alt="" width="120">
 
-# panicgraph
+# PanicGraph
 
 [![Crates.io][crates-badge]][crates-url]
 [![Documentation][doc-badge]][doc-url]
