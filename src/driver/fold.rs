@@ -126,7 +126,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         budget: u32,
     ) -> Self {
         let places = Places::of(tcx, mir);
-        let mut escaped = escaping(mir);
+        let mut escaped = escaping(tcx, env, mir);
         // A place is tracked whatever its base does, since what a pointer
         // could reach is swept where the write happens instead.
         escaped
@@ -1123,10 +1123,12 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         operand: &mir::Operand<'tcx>,
         ty: Ty<'tcx>,
     ) -> Fact<'tcx> {
+        let tag = self.niched(state, operand, ty);
         if self.fact(state, operand).address {
             return Fact {
                 address: true,
                 value: self.apart_from_zero(ty),
+                tag,
                 ..Fact::default()
             };
         }
@@ -1136,8 +1138,70 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             .and_then(|_| self.apart_from_zero(ty));
         Fact {
             value,
+            tag,
             ..Fact::default()
         }
+    }
+
+    /// The variant a value read at a niche encoded enum's own type holds.
+    ///
+    /// Such an enum carries no tag of its own: a variant with no fields is
+    /// written as a value the payload could never take, so a payload the
+    /// walk has ruled that value out for is the variant that carries one.
+    /// It is what settles the match written under `NonZero::new`, and with
+    /// it every check the standard library builds on one.
+    ///
+    /// Only an encoding with a single such value is read, which is what an
+    /// option around a pointer or a nonzero number uses.
+    fn niched(
+        &self,
+        state: &State<'tcx>,
+        operand: &mir::Operand<'tcx>,
+        ty: Ty<'tcx>,
+    ) -> Option<u128> {
+        let ty = self.monomorphize(ty)?;
+        let ty::Adt(def, _) = ty.kind() else {
+            return None;
+        };
+        if !def.is_enum() {
+            return None;
+        }
+        let layout = self.tcx.layout_of(self.env.as_query_input(ty)).ok()?;
+        let rustc_abi::Variants::Multiple {
+            tag_encoding:
+                rustc_abi::TagEncoding::Niche {
+                    untagged_variant,
+                    ref niche_variants,
+                    niche_start,
+                },
+            ..
+        } = layout.variants
+        else {
+            return None;
+        };
+        if niche_variants.start != niche_variants.last {
+            return None;
+        }
+        let held = self.fact(state, operand);
+        let apart = if held.address && niche_start == 0 {
+            true
+        } else {
+            let source =
+                self.monomorphize(operand.ty(&self.mir.local_decls, self.tcx))?;
+            let width = self.width(source)?;
+            value::compare(
+                BinOp::Ne,
+                held,
+                Fact::of(Value::Exact(Known {
+                    bits: truncate(niche_start, width),
+                    ty: source,
+                    width,
+                })),
+            )?
+        };
+        apart.then(|| {
+            def.discriminant_for_variant(self.tcx, untagged_variant).val
+        })
     }
 
     /// Applies a binary operator to what its operands are known about.
@@ -1159,6 +1223,18 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         {
             return Fact {
                 order: Some((LenRel::Below, of)),
+                ..Fact::default()
+            };
+        }
+        // A length divided by anything is no larger than that length: the
+        // divisor is above zero wherever this runs, since the check the
+        // compiler writes in front of it has passed to get here.
+        if op == BinOp::Div
+            && let Some(Value::Length(of)) = left.value
+            && self.unsigned(&pair.1)
+        {
+            return Fact {
+                order: Some((LenRel::AtMost, of)),
                 ..Fact::default()
             };
         }
@@ -1220,7 +1296,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     }
 
     /// The tag one variant of an enum carries.
-    fn tag_of(
+    pub fn tag_of(
         &self,
         did: rustc_span::def_id::DefId,
         args: ty::GenericArgsRef<'tcx>,
@@ -1531,6 +1607,17 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         right: Fact<'tcx>,
     ) -> Option<Value<'tcx>> {
         if let Some(truth) = value::compare(op, left, right) {
+            return self.boolean(truth).map(Value::Exact);
+        }
+        // A value nothing is known about still lies inside its own type,
+        // and that alone settles a check written against the end of it:
+        // nothing unsigned is below zero, which is what a range index turns
+        // into once its other end is proved.
+        if let Some(truth) = self
+            .spread(state, &pair.0)
+            .zip(self.spread(state, &pair.1))
+            .and_then(|(left, right)| value::spans_compare(op, left, right))
+        {
             return self.boolean(truth).map(Value::Exact);
         }
         if let (Some(Value::Exact(l)), Some(Value::Exact(r))) =

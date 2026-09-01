@@ -869,7 +869,7 @@ fn values_compare<'tcx>(
 ///
 /// The mirrored operators recurse once and the mirror of a mirror is not
 /// taken, so the depth is one.
-fn spans_compare<'tcx>(
+pub fn spans_compare<'tcx>(
     op: mir::BinOp,
     a: Bounds<'tcx>,
     b: Bounds<'tcx>,

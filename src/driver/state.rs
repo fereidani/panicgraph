@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 
 use rustc_middle::{
     mir::{self, BasicBlock, BinOp, UnwindAction},
-    ty::{Ty, TyCtxt},
+    ty::{self, Ty, TyCtxt},
 };
 
 use crate::value::{
@@ -151,18 +151,26 @@ impl<'tcx> Work<'tcx> {
 /// A write through a pointer can reach any of these, so their value is never
 /// assumed. Every other local can only be written by naming it, which the
 /// walk sees.
-pub fn escaping(mir: &mir::Body<'_>) -> Vec<bool> {
+pub fn escaping<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    env: ty::TypingEnv<'tcx>,
+    mir: &mir::Body<'tcx>,
+) -> Vec<bool> {
     let mut escaped = vec![false; mir.local_decls.len()];
     for block in mir.basic_blocks.iter() {
         for stmt in &block.statements {
             let mir::StatementKind::Assign(pair) = &stmt.kind else {
                 continue;
             };
-            let (mir::Rvalue::Ref(_, _, place)
-            | mir::Rvalue::RawPtr(_, place)
-            | mir::Rvalue::Reborrow(_, _, place)) = &pair.1
-            else {
-                continue;
+            let (place, shared) = match &pair.1 {
+                mir::Rvalue::Ref(_, kind, place) => {
+                    (place, !matches!(kind, mir::BorrowKind::Mut { .. }))
+                }
+                mir::Rvalue::Reborrow(_, mutability, place) => {
+                    (place, *mutability == mir::Mutability::Not)
+                }
+                mir::Rvalue::RawPtr(_, place) => (place, false),
+                _ => continue,
             };
             // A pointer taken through another one is aimed at what that
             // one points at, not at the local holding it, so `&mut *slice`
@@ -171,12 +179,29 @@ pub fn escaping(mir: &mir::Body<'_>) -> Vec<bool> {
             if place.projection.first() == Some(&mir::ProjectionElem::Deref) {
                 continue;
             }
+            // Nothing is written through a shared reference, so the place
+            // it was taken of holds what it held. A type carrying a cell is
+            // the exception, and `is_freeze` is what tells the two apart.
+            if shared && frozen(tcx, env, mir, place) {
+                continue;
+            }
             if let Some(slot) = escaped.get_mut(place.local.as_usize()) {
                 *slot = true;
             }
         }
     }
     escaped
+}
+
+/// Whether a place holds no interior mutability, so a shared reference to
+/// it can never be written through.
+fn frozen<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    env: ty::TypingEnv<'tcx>,
+    mir: &mir::Body<'tcx>,
+    place: &mir::Place<'tcx>,
+) -> bool {
+    place.ty(&mir.local_decls, tcx).ty.is_freeze(tcx, env)
 }
 
 /// The local a local's link of sameness points at, or the local itself.

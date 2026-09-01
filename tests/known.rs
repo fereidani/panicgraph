@@ -90,6 +90,9 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_copy_into_prefix", "index"),
     ("must_copy_guarded_on_other", "explicit"),
     ("must_index_of_equal_lengths", "index"),
+    ("must_nonzero_of_anything", "unwrap"),
+    ("must_clamped_to_larger", "index"),
+    ("must_prefix_unguarded", "index"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -168,6 +171,10 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_chunk_count",
     "clean_copy_into_array",
     "clean_copy_after_guard",
+    "clean_nonzero_of_set_bit",
+    "clean_split_in_half",
+    "clean_clamped_to_last",
+    "clean_prefix_under_guard",
 ];
 
 /// The functions that must stay clean in a debug build as well.

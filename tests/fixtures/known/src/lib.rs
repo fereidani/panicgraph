@@ -959,3 +959,43 @@ pub fn must_copy_guarded_on_other(dst: &mut [u8], src: &[u8], other: &[u8]) {
 pub fn must_index_of_equal_lengths(a: &[u8], b: &[u8], i: usize) -> u8 {
     if a.len() == b.len() { a[i] } else { 0 }
 }
+
+/// Clean. The wrapper holds a value exactly when that value is not zero,
+/// so the option it hands back never takes the arm that panics.
+pub fn clean_nonzero_of_set_bit(n: usize) -> usize {
+    core::num::NonZeroUsize::new(n | 1)
+        .expect("the low bit is set")
+        .get()
+}
+
+/// Reaches `unwrap`. Nothing here keeps the value away from zero.
+pub fn must_nonzero_of_anything(n: usize) -> usize {
+    core::num::NonZeroUsize::new(n).expect("nonzero").get()
+}
+
+/// Clean. Half a length is no longer than the length, which is what the
+/// split measures its argument against.
+pub fn clean_split_in_half(v: &[u8]) -> (&[u8], &[u8]) {
+    v.split_at(v.len() / 2)
+}
+
+/// Clean. The smaller of an index and the last position is in range.
+pub fn clean_clamped_to_last(v: &[u8], i: usize) -> u8 {
+    if v.is_empty() { 0 } else { v[i.min(v.len() - 1)] }
+}
+
+/// Reaches `index`. The larger of the two is past the end.
+pub fn must_clamped_to_larger(v: &[u8], i: usize) -> u8 {
+    if v.is_empty() { 0 } else { v[i.max(v.len() - 1)] }
+}
+
+/// Clean. The guard measures the same length the prefix is checked
+/// against, and no length is below zero.
+pub fn clean_prefix_under_guard(v: &[u8], n: usize) -> &[u8] {
+    if n <= v.len() { &v[..n] } else { v }
+}
+
+/// Reaches `index`. Nothing here keeps the prefix inside the slice.
+pub fn must_prefix_unguarded(v: &[u8], n: usize) -> &[u8] {
+    &v[..n]
+}

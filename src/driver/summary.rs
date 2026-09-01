@@ -15,7 +15,7 @@ use crate::{
     fold::{Folder, Reach},
     sinks::SinkTable,
     state::{State, root_of},
-    value::{Bounds, Fact, Known, Value},
+    value::{Bounds, Fact, Known, LenRel, Value},
 };
 
 /// How far a chain of calls is followed for what it does.
@@ -143,11 +143,8 @@ impl<'tcx> Folder<'_, 'tcx> {
         else {
             return Found::default();
         };
-        if let Some(value) = self.contracted(state, ty, args, destination) {
-            return Found {
-                left: Fact::of(value),
-                quiet: false,
-            };
+        if let Some(left) = self.contracted(state, ty, args, destination) {
+            return Found { left, quiet: false };
         }
         self.folded(state, ty, args, destination, after)
     }
@@ -165,7 +162,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         func: Ty<'tcx>,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
         destination: mir::Place<'tcx>,
-    ) -> Option<Value<'tcx>> {
+    ) -> Option<Fact<'tcx>> {
         let ty::FnDef(did, _) = *func.kind() else {
             return None;
         };
@@ -180,7 +177,10 @@ impl<'tcx> Folder<'_, 'tcx> {
                 else {
                     return None;
                 };
-                Some(Value::Length(root_of(state, self.slot_of(place)?)))
+                Some(Fact::of(Value::Length(root_of(
+                    state,
+                    self.slot_of(place)?,
+                ))))
             }
             // Picking the larger or the smaller of two numbers is what
             // pins a value away from the end of its range, and the two are
@@ -188,8 +188,8 @@ impl<'tcx> Folder<'_, 'tcx> {
             // through references the walk does not follow. A primitive
             // cannot carry another crate's implementation of the trait, so
             // the body reached is the one this claim describes.
-            "cmp::Ord::max" => self.picked(state, true, args),
-            "cmp::Ord::min" => self.picked(state, false, args),
+            "cmp::Ord::max" => self.chosen(state, true, args),
+            "cmp::Ord::min" => self.chosen(state, false, args),
             // Counting the bits of a value, set or leading or trailing
             // zero, can never answer above the width of the type it was
             // read at, which is what clears the table every such count is
@@ -198,7 +198,14 @@ impl<'tcx> Folder<'_, 'tcx> {
             | "intrinsics::ctlz_nonzero"
             | "intrinsics::cttz"
             | "intrinsics::cttz_nonzero"
-            | "intrinsics::ctpop" => self.counted(args, destination),
+            | "intrinsics::ctpop" => {
+                self.counted(args, destination).map(Fact::of)
+            }
+            // The wrapper holds a value exactly when that value is not
+            // zero, and the option that carries it is `Some` for the same
+            // reason, which is what folds the match written under every
+            // `checked` operation the standard library builds this way.
+            "num::nonzero::new" => self.wrapped(state, args, destination),
             "num::nonzero::get" => {
                 let receiver = args.first()?;
                 let source = self.monomorphize(
@@ -210,6 +217,7 @@ impl<'tcx> Folder<'_, 'tcx> {
                 self.apart_from_zero(
                     destination.ty(&self.mir.local_decls, self.tcx).ty,
                 )
+                .map(Fact::of)
             }
             _ => None,
         }
@@ -508,6 +516,55 @@ impl<'tcx> Folder<'_, 'tcx> {
         }
     }
 
+    /// The option a nonzero wrapper's constructor hands back.
+    ///
+    /// The constructor writes no branch of its own: the option is the value
+    /// read at another type, and zero is the pattern that stands for
+    /// `None`. A value the walk has proved nonzero therefore comes back as
+    /// the variant that carries it.
+    fn wrapped(
+        &self,
+        state: &State<'tcx>,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        destination: mir::Place<'tcx>,
+    ) -> Option<Fact<'tcx>> {
+        let held = args.first()?;
+        let ty =
+            self.monomorphize(held.node.ty(&self.mir.local_decls, self.tcx))?;
+        let zero = Known {
+            bits: 0,
+            ty,
+            width: self.width(ty)?,
+        };
+        let apart = crate::value::compare(
+            mir::BinOp::Ne,
+            self.fact(state, &held.node),
+            Fact::of(Value::Exact(zero)),
+        )?;
+        if !apart {
+            return None;
+        }
+        let out = self
+            .monomorphize(destination.ty(&self.mir.local_decls, self.tcx).ty)?;
+        let ty::Adt(def, args) = out.kind() else {
+            return None;
+        };
+        if self.tcx.get_diagnostic_item(rustc_span::sym::Option)
+            != Some(def.did())
+        {
+            return None;
+        }
+        // The variant that carries the wrapper is the one with a field.
+        let (at, _) = def
+            .variants()
+            .iter_enumerated()
+            .find(|(_, variant)| !variant.fields.is_empty())?;
+        Some(Fact {
+            tag: self.tag_of(def.did(), args, at),
+            ..Fact::default()
+        })
+    }
+
     /// The range a count of bits lands in.
     ///
     /// The answer is a number of bits of the value counted, so it lies
@@ -526,6 +583,51 @@ impl<'tcx> Folder<'_, 'tcx> {
         let width = self.width(ty)?;
         let seed = Known { bits: 0, ty, width };
         Bounds::new(seed, Known { bits, ..seed }).map(Value::Within)
+    }
+
+    /// What picking one of two numbers leaves behind.
+    ///
+    /// The smaller of two is no larger than either, so an ordering against
+    /// a slice length that either side carries is one the answer carries
+    /// too, and a length itself bounds the answer from above. The larger
+    /// keeps only what both sides agree on.
+    fn chosen(
+        &self,
+        state: &State<'tcx>,
+        larger: bool,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+    ) -> Option<Fact<'tcx>> {
+        let fact = Fact {
+            value: self.picked(state, larger, args),
+            order: self.ranked(state, larger, args),
+            ..Fact::default()
+        };
+        (fact != Fact::default()).then_some(fact)
+    }
+
+    /// The ordering against a slice length that picking one of two numbers
+    /// keeps.
+    fn ranked(
+        &self,
+        state: &State<'tcx>,
+        larger: bool,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+    ) -> Option<(LenRel, mir::Local)> {
+        let [left, right] = args else {
+            return None;
+        };
+        let bound = |operand: &mir::Operand<'tcx>| {
+            let fact = self.fact(state, operand);
+            match fact.value {
+                Some(Value::Length(of)) => Some((LenRel::AtMost, of)),
+                _ => fact.order,
+            }
+        };
+        let (left, right) = (bound(&left.node), bound(&right.node));
+        if larger {
+            return (left == right).then_some(left).flatten();
+        }
+        left.or(right)
     }
 
     /// The range a call that picks one of two numbers leaves behind.
