@@ -333,6 +333,16 @@ impl Cli {
         // A drawing is a picture of the whole graph, so it is the report
         // and nothing else. Rendering prose instead would answer a question
         // that was not asked.
+        // The view is the graph with the report drawn over it, so there
+        // is nothing for it to show of a command that answers one question.
+        #[cfg(feature = "serve")]
+        if listen.is_some() && !matches!(command, Command::Analyze) {
+            bail!(
+                "`--listen` serves the graph, so it belongs to the analysis \
+                 rather than to `{}`",
+                command.name()
+            );
+        }
         if self.format == Format::Svg && !matches!(command, Command::Analyze) {
             bail!(
                 "`--format svg` draws the whole graph, so it belongs \

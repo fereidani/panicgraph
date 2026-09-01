@@ -125,3 +125,22 @@ fn a_standard_library_mode_survives_its_own_name() {
     assert_eq!(StdMode::from_name("partial"), None);
     assert_eq!(StdMode::from_name(""), None);
 }
+
+#[cfg(feature = "serve")]
+#[test]
+fn serving_is_refused_where_there_is_nothing_to_serve() {
+    for argv in [
+        &["--listen", "0", "kinds"][..],
+        &["--listen", "0", "why", "parse"][..],
+        &["--listen", "0", "check"][..],
+    ] {
+        assert!(
+            parse(argv).is_err(),
+            "{argv:?} asks to serve something that is not the graph"
+        );
+    }
+    assert!(
+        parse(&["--listen", "0"]).is_ok(),
+        "the analysis is what the view shows"
+    );
+}
