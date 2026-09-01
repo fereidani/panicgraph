@@ -846,3 +846,28 @@ pub fn must_take_four(v: &[u8]) -> u8 {
 pub fn clean_pass_array_of_four(v: &[u8; 4]) -> u8 {
     must_take_four(v)
 }
+
+/// Moves the slice on by one, which is a write to the caller's own local.
+fn shrink_slice(s: &mut &[u8]) {
+    *s = &s[1..];
+}
+
+/// Reaches `index`. The guard was about the slice as it stood, and the call
+/// replaced it with a shorter one.
+pub fn must_index_after_shrink(mut s: &[u8]) -> u8 {
+    if s.len() >= 2 {
+        shrink_slice(&mut s);
+        s[1]
+    } else {
+        0
+    }
+}
+
+/// Reaches `index`. The counter runs one past the end of the array.
+pub fn must_loop_past_the_end(table: &[u8; 16]) -> u32 {
+    let mut total = 0u32;
+    for i in 0..17 {
+        total = total.wrapping_add(u32::from(table[i]));
+    }
+    total
+}

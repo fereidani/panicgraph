@@ -81,6 +81,8 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_copy_two_slices", "index"),
     ("must_second_last_of_guarded", "index"),
     ("must_take_four", "explicit"),
+    ("must_index_after_shrink", "index"),
+    ("must_loop_past_the_end", "index"),
 ];
 
 /// The panics each function must *not* be reported with.
