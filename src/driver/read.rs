@@ -772,9 +772,12 @@ impl<'tcx> Folder<'_, 'tcx> {
                     layout.fields.offset(tag_field.as_usize()),
                     &self.tcx,
                 )?;
-                self.tcx
-                    .global_alloc(alloc_id)
-                    .unwrap_memory()
+                let mir::interpret::GlobalAlloc::Memory(alloc) =
+                    self.tcx.global_alloc(alloc_id)
+                else {
+                    return None;
+                };
+                alloc
                     .inner()
                     .read_scalar(
                         &self.tcx,
