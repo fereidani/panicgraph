@@ -690,6 +690,11 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         if settled.is_some_and(|held| taken.contains(&held)) {
             return;
         }
+        // A branch whose arms already name every value the condition can
+        // hold leaves the fallback nothing to cover.
+        if self.covered(state, discr, &taken) {
+            return;
+        }
         // The fallback covers every value not listed, so it settles the
         // condition only when one value is left over.
         let rest = match taken.as_slice() {
@@ -699,6 +704,53 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         let mut arm = refined(state, subject, rest, false);
         Self::teach_tag(&mut arm, tagged, self.leftover(tagged, &taken));
         work.merge(targets.otherwise(), arm);
+    }
+
+    /// Whether the arms name every value the condition can hold.
+    ///
+    /// A value narrowed to a range, by a mask or by arithmetic, reaches the
+    /// fallback arm only through a value outside that range. Where the
+    /// named arms cover the range there is no such value, and the arm the
+    /// compiler writes down anyway is dead. The standard library's bit
+    /// packed IO error is decoded this way: two bits are masked off and all
+    /// four of them are named.
+    fn covered(
+        &self,
+        state: &State<'tcx>,
+        discr: &mir::Operand<'tcx>,
+        taken: &[u128],
+    ) -> bool {
+        let Some(span) = self.spread(state, discr) else {
+            return false;
+        };
+        // Read as bit patterns, which is how the arms are written. A range
+        // starting below zero is left alone rather than reasoned about in
+        // the wrong order.
+        if !span.lo.nonnegative() {
+            return false;
+        }
+        let Some(width) = span
+            .hi
+            .bits
+            .checked_sub(span.lo.bits)
+            .and_then(|held| held.checked_add(1))
+        else {
+            return false;
+        };
+        // Covering a range takes at least one arm per value in it, which
+        // bounds the walk below by the arms the branch was written with.
+        let Ok(count) = u128::try_from(taken.len()) else {
+            return false;
+        };
+        if width > count {
+            return false;
+        }
+        (0..width).all(|step| {
+            span.lo
+                .bits
+                .checked_add(step)
+                .is_some_and(|value| taken.contains(&value))
+        })
     }
 
     /// The place a branch's discriminant was read from.

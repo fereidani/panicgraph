@@ -1343,3 +1343,37 @@ pub fn must_atomic_load(
 ) -> usize {
     a.load(order)
 }
+
+/// Clean. Masking leaves two bits, and all four values they can hold are
+/// named, so the arm the compiler writes for the rest is dead.
+pub fn clean_masked_switch(x: usize) -> u8 {
+    match x & 0b11 {
+        0 => 10,
+        1 => 20,
+        2 => 30,
+        3 => 40,
+        _ => unreachable!(),
+    }
+}
+
+/// Reaches `explicit`. One of the four values the mask leaves is unnamed,
+/// so the arm for the rest is reachable.
+pub fn must_masked_switch(x: usize) -> u8 {
+    match x & 0b11 {
+        0 => 10,
+        1 => 20,
+        2 => 30,
+        _ => unreachable!(),
+    }
+}
+
+/// Clean. A remainder by four cannot leave the four values named either.
+pub fn clean_remainder_switch(x: u32) -> u8 {
+    match x % 4 {
+        0 => 10,
+        1 => 20,
+        2 => 30,
+        3 => 40,
+        _ => unreachable!(),
+    }
+}

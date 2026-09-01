@@ -113,6 +113,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_drop_beside_a_guard", "index"),
     ("must_deque_range", "index"),
     ("must_atomic_load", "explicit"),
+    ("must_masked_switch", "explicit"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -217,6 +218,8 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_atomic_load",
     "clean_atomic_fence",
     "clean_atomic_compare_exchange",
+    "clean_masked_switch",
+    "clean_remainder_switch",
 ];
 
 /// The functions that must stay clean in a debug build as well.
