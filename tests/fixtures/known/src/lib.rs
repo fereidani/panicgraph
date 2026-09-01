@@ -1377,3 +1377,27 @@ pub fn clean_remainder_switch(x: u32) -> u8 {
         _ => unreachable!(),
     }
 }
+
+/// Clean. A vector's length is a field it is read out of, and the check the
+/// index writes reads that same field again, so the guard covers it.
+pub fn clean_vector_index_guard(v: &Vec<u8>, at: usize) -> u8 {
+    if at >= v.len() { 0 } else { v[at] }
+}
+
+/// Reaches `index`. Nothing measures the index against the length.
+pub fn must_vector_index(v: &Vec<u8>, at: usize) -> u8 {
+    v[at]
+}
+
+/// Clean. The same holds for a deque, whose length is a field as well.
+pub fn clean_deque_index_guard(
+    q: &std::collections::VecDeque<u8>,
+    at: usize,
+) -> u8 {
+    if at >= q.len() { 0 } else { q[at] }
+}
+
+/// Clean. A string's bytes are as many as its length says.
+pub fn clean_string_index_guard(s: &String, at: usize) -> u8 {
+    if at >= s.len() { 0 } else { s.as_bytes()[at] }
+}

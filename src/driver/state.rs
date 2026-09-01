@@ -45,11 +45,20 @@ pub struct Subject<'tcx> {
     pub ty: Ty<'tcx>,
     pub width: u32,
     /// The comparisons it stands for, when it is a boolean holding one.
-    pub compared: [Option<Compared<'tcx>>; 2],
+    pub compared: [Option<Compared<'tcx>>; READINGS],
 }
 
+/// How many readings of one comparison are kept.
+///
+/// Each operand can be read as the measured side, and each side can be
+/// named by a constant, by a slice length, by a length it is itself below,
+/// or by the place it was read from. The readings describe one comparison
+/// from different sides and none stands for another, so all are kept
+/// rather than letting the first found take the only seat.
+pub const READINGS: usize = 4;
+
 /// A comparison a branch turns into a fact about the local it measured.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Compared<'tcx> {
     /// The operator, read with the measured local on the left.
     pub op: BinOp,
@@ -224,7 +233,7 @@ pub fn root_of(state: &State<'_>, local: mir::Local) -> mir::Local {
 /// settles the local that was compared as well.
 pub fn refined<'tcx>(
     state: &State<'tcx>,
-    subject: Option<Subject<'tcx>>,
+    subject: Option<&Subject<'tcx>>,
     value: Option<u128>,
     matched: bool,
 ) -> State<'tcx> {

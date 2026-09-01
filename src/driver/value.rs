@@ -885,12 +885,19 @@ pub const fn stepped(op: mir::BinOp, step: u128) -> Option<bool> {
 }
 
 /// What a comparison measured a local against.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Against<'tcx> {
     /// A constant value.
     Constant(Known<'tcx>),
     /// The length of the slice behind a local.
     Length(mir::Local),
+    /// The quantity read from a place, named by the slot that place is
+    /// recorded at.
+    ///
+    /// A container keeps its length as a field rather than as a slice's
+    /// metadata, so this is how a guard on `v.len()` reaches the check that
+    /// reads the field again.
+    Place(mir::Local),
 }
 
 /// The comparison operator with its operands exchanged.
@@ -931,7 +938,8 @@ pub fn fact_of(
     let op = if holds { op } else { negated(op) };
     match against {
         Against::Constant(k) => constant_fact(op, k).map(Taught::Value),
-        Against::Length(of) => length_fact(op, of),
+        Against::Length(of) => length_fact(op, of, true),
+        Against::Place(of) => length_fact(op, of, false),
     }
 }
 
@@ -954,15 +962,19 @@ fn constant_fact(op: mir::BinOp, k: Known<'_>) -> Option<Value<'_>> {
 ///
 /// Only the two orderings a bounds check can consume are kept. The rest say
 /// something, but nothing this pass reads.
+/// `measures` says whether the quantity is a slice's length. The claims
+/// that pair two slices are only about lengths, so a quantity named by the
+/// place it was read from carries the orderings and nothing more.
 const fn length_fact<'tcx>(
     op: mir::BinOp,
     of: mir::Local,
+    measures: bool,
 ) -> Option<Taught<'tcx>> {
     match op {
         mir::BinOp::Lt => Some(Taught::Order(LenRel::Below, of)),
         mir::BinOp::Le => Some(Taught::Order(LenRel::AtMost, of)),
-        mir::BinOp::Eq => Some(Taught::Alike(of)),
-        mir::BinOp::Ne => Some(Taught::Apart(of)),
+        mir::BinOp::Eq if measures => Some(Taught::Alike(of)),
+        mir::BinOp::Ne if measures => Some(Taught::Apart(of)),
         _ => None,
     }
 }
@@ -1031,10 +1043,18 @@ fn measured_against(
     right: Fact<'_>,
 ) -> Option<bool> {
     use mir::BinOp::{Ge, Gt, Le, Lt};
-    let Some(Value::Length(len)) = right.value else {
-        return None;
+    // The quantity on the right is named by the slice it measures and by
+    // the place it was read from, and either name can carry the ordering,
+    // so both are tried. A vector's length is both at once: the metadata of
+    // the slice built from it, and a reading of the vector's own field.
+    let named = |of| left.order.against(of);
+    let measured = match right.value {
+        Some(Value::Length(of)) => Some(of),
+        _ => None,
     };
-    let rel = left.order.against(len)?;
+    let rel = measured
+        .and_then(named)
+        .or_else(|| right.same.and_then(named))?;
     match (rel, op) {
         (LenRel::Below, Lt | Le) | (LenRel::AtMost, Le) => Some(true),
         (LenRel::Below, Ge | Gt) | (LenRel::AtMost, Gt) => Some(false),

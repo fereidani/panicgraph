@@ -24,9 +24,9 @@ use rustc_middle::{
 
 use crate::{
     state::{
-        Compared, Path, Places, STEPS, State, Subject, Work, escaping, forget,
-        refined, retire, root_of, sweep_aliased, sweep_base, sweep_indexed,
-        unwind_to, writes,
+        Compared, Path, Places, READINGS, STEPS, State, Subject, Work,
+        escaping, forget, refined, retire, root_of, sweep_aliased, sweep_base,
+        sweep_indexed, unwind_to, writes,
     },
     summary::{BUDGET, Returns, portable},
     value::{self, Against, Fact, Known, Ranks, Thresholds, Value},
@@ -194,7 +194,9 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             | mir::StatementKind::StorageDead(other) => {
                 *other == path.base || path.indexed_by(*other)
             }
-            mir::StatementKind::Intrinsic(_) => true,
+            mir::StatementKind::Intrinsic(intrinsic) => {
+                !matches!(&**intrinsic, mir::NonDivergingIntrinsic::Assume(..))
+            }
             _ => false,
         }
     }
@@ -383,16 +385,24 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 sweep_indexed(state, &self.places, *local);
             }
             mir::StatementKind::Intrinsic(intrinsic) => {
+                // An assumption is a note to the optimizer, not a write, so
+                // what the walk holds about memory survives it. The library
+                // states one about a vector's length on the way out of
+                // `len`, between the guard reading that length and the
+                // check reading it again.
                 if let mir::NonDivergingIntrinsic::Assume(operand) =
                     &**intrinsic
-                    && self
+                {
+                    if self
                         .exact(state, operand)
                         .is_some_and(|value| !value.truth())
-                {
-                    return false;
+                    {
+                        return false;
+                    }
+                } else {
+                    // Copying between pointers lands wherever one is aimed.
+                    sweep_aliased(state, &self.places, &self.escaped);
                 }
-                // Copying between pointers lands wherever one is aimed.
-                sweep_aliased(state, &self.places, &self.escaped);
             }
             mir::StatementKind::FakeRead(..)
             | mir::StatementKind::PlaceMention(..)
@@ -683,7 +693,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             if settled.is_some_and(|held| held != value) {
                 continue;
             }
-            let mut arm = refined(state, subject, Some(value), true);
+            let mut arm = refined(state, subject.as_ref(), Some(value), true);
             Self::teach_tag(&mut arm, tagged, Some(value));
             work.merge(target, arm);
         }
@@ -701,7 +711,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             [only] => Some(*only),
             _ => None,
         };
-        let mut arm = refined(state, subject, rest, false);
+        let mut arm = refined(state, subject.as_ref(), rest, false);
         Self::teach_tag(&mut arm, tagged, self.leftover(tagged, &taken));
         work.merge(targets.otherwise(), arm);
     }
@@ -942,7 +952,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             compared: if ty.is_bool() {
                 self.comparison_behind(bb, read, state)
             } else {
-                [None; 2]
+                [None; READINGS]
             },
         })
     }
@@ -953,8 +963,8 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         bb: BasicBlock,
         result: mir::Local,
         state: &State<'tcx>,
-    ) -> [Option<Compared<'tcx>>; 2] {
-        let none = [None; 2];
+    ) -> [Option<Compared<'tcx>>; READINGS] {
+        let none = [None; READINGS];
         let block = &self.mir.basic_blocks[bb];
         let Some(at) = block.statements.iter().rposition(|s| writes(s, result))
         else {
@@ -1036,7 +1046,9 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                     || measured.source.is_some_and(|of| self.touches(s, of))
                     || match measured.against {
                         Against::Constant(_) => false,
-                        Against::Length(of) => self.touches(s, of),
+                        Against::Length(of) | Against::Place(of) => {
+                            self.touches(s, of)
+                        }
                     })
         };
         if after.iter().any(touched) {
@@ -1059,7 +1071,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         op: BinOp,
         left: &mir::Operand<'tcx>,
         right: &mir::Operand<'tcx>,
-    ) -> [Option<Compared<'tcx>>; 2] {
+    ) -> [Option<Compared<'tcx>>; READINGS] {
         let read = |operand: &mir::Operand<'tcx>| match operand {
             mir::Operand::Copy(place) | mir::Operand::Move(place) => {
                 self.slot_of(place)
@@ -1071,16 +1083,32 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 return Some((Against::Constant(self.constant(konst)?), None));
             }
             let held = read(operand)?;
-            match self.fact(state, operand).value? {
-                Value::Length(of) => Some((Against::Length(of), Some(held))),
+            match self.fact(state, operand).value {
+                Some(Value::Length(of)) => {
+                    Some((Against::Length(of), Some(held)))
+                }
                 // A local the walk has settled measures the same as the
                 // constant that could have been written in its place, which
                 // is how a value the caller passed in is read.
-                Value::Exact(known) => {
+                Some(Value::Exact(known)) => {
                     Some((Against::Constant(known), Some(held)))
                 }
                 _ => None,
             }
+        };
+        // A quantity the walk cannot settle is still one value, and a place
+        // read twice without a write in between reads the same both times.
+        // Naming the place is what carries a guard on a container's length
+        // field to the check that reads the field again, which is how a
+        // vector indexed under `at < v.len()` folds. It is the last reading
+        // tried, since it says nothing beyond the checks that read the same
+        // place, and the readings below carry further.
+        let placed = |operand: &mir::Operand<'tcx>, _: BinOp| {
+            let held = read(operand)?;
+            let of = root_of(state, held);
+            self.places
+                .path(of)
+                .map(|_| (Against::Place(of), Some(held)))
         };
         // A value below one that is itself measured against a length is
         // below that length too, which is what a pair of guards written
@@ -1134,19 +1162,22 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         let chained = orient(&inherited);
         let spanned = orient(&bounded);
         // A comparison names two operands and either can be the one a claim
-        // is recorded against, so both readings are kept. The same place
-        // twice teaches nothing the first reading did not.
-        let mut found: [Option<Compared<'tcx>>; 2] = [None, None];
-        let all = measured.into_iter().chain(chained).chain(spanned);
+        // is recorded against, so every reading of both is kept: they
+        // describe the same comparison from different sides and what one
+        // proves the others do not. A reading already held is dropped,
+        // since repeating it teaches nothing.
+        let mut found: [Option<Compared<'tcx>>; READINGS] = [None; READINGS];
+        let all = measured
+            .into_iter()
+            .chain(chained)
+            .chain(spanned)
+            .chain(orient(&placed));
         for candidate in all.flatten() {
-            match &mut found {
-                [slot @ None, _] => *slot = Some(candidate),
-                [Some(first), slot @ None]
-                    if first.local != candidate.local =>
-                {
-                    *slot = Some(candidate);
-                }
-                _ => {}
+            if found.iter().flatten().any(|kept| *kept == candidate) {
+                continue;
+            }
+            if let Some(slot) = found.iter_mut().find(|slot| slot.is_none()) {
+                *slot = Some(candidate);
             }
         }
         found
@@ -1177,7 +1208,10 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             // The check fails every time, so only the panic path continues.
             Some(_) => unwind_to(unwind, &state, work),
             None => {
-                work.merge(target, refined(&state, proved, held, true));
+                work.merge(
+                    target,
+                    refined(&state, proved.as_ref(), held, true),
+                );
                 unwind_to(unwind, &state, work);
             }
         }

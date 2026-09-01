@@ -349,7 +349,10 @@ of one, so the size a `chunks_exact(4)` was built with is still four where
 the iterator's own arithmetic reads it. A call is read for what it raises as
 well as for what it returns: one whose every reachable block was found
 unable to raise leaves nothing behind, and neither does the cleanup path
-only a raise could have reached.
+only a raise could have reached. An operation the compiler defines rather
+than a body raises nothing at all, so an atomic read whose ordering is
+written at the call site keeps none of the arms that reject the orderings it
+is not.
 
 How long a slice is travels with it. An array unsized to a slice is as long
 as its type says, a slice built from a pointer and a count is as long as the
@@ -359,7 +362,10 @@ survives the arithmetic done to it: `len - 1` and `at + 1` are still
 measured against the same slice, `i.min(len - 1)` keeps the tighter of the
 two bounds it was handed, and a value below one that is itself below a
 length is below that length too. Two slices cut to one length are as long
-as each other, whether the length was named or worked out.
+as each other, whether the length was named or worked out. A length a
+container keeps as a field is ordered the same way as one a slice carries,
+so `v[at]` under `if at < v.len()` is in range for a vector, a deque or a
+string, whichever of the two names the check reads it by.
 
 A comparison is read from both sides and for what each side's range says
 about the other, so `lo < n` leaves `n` above zero for an unsigned pair and
@@ -387,7 +393,10 @@ address, so the null check written under `NonNull::new` cannot fail. An
 enum carries which variant it holds, which is what folds a `match` and what
 makes `unwrap` of a value built as `Some` reach nothing at all; one written
 as a niche has no tag of its own, so a value proved apart from the pattern
-that stands for the empty variant is read as the variant that carries one.
+that stands for the empty variant is read as the variant that carries one. A
+branch that names every value its condition can hold leaves nothing for the
+arm written to cover the rest, which is what folds the match on two masked
+bits behind the standard library's packed IO error.
 
 The driver injects `-Zalways-encode-mir`. Without it, a dependency keeps MIR
 only for generic and small items, so its concrete functions are opaque and
