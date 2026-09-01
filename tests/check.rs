@@ -131,7 +131,7 @@ fn a_baseline_round_trips() {
     check::write_baseline(&file, &args, &result.findings)
         .expect("the baseline should be written");
 
-    let read = check::read_baseline(&file).expect("and read back");
+    let read = check::read_baseline(&file, &args).expect("and read back");
     assert_eq!(read.len(), 2);
     assert_eq!(
         read.get("parse").map(Vec::as_slice),
@@ -198,8 +198,10 @@ fn a_baseline_reports_what_no_longer_panics() {
 
 #[test]
 fn a_missing_baseline_says_how_to_make_one() {
-    let err = check::read_baseline(&PathBuf::from("/nonexistent/pg.json"))
-        .expect_err("the file is not there");
+    let (args, _) = gate(&[]);
+    let err =
+        check::read_baseline(&PathBuf::from("/nonexistent/pg.json"), &args)
+            .expect_err("the file is not there");
     let text = format!("{err:#}");
     assert!(
         text.contains("panicgraph baseline"),

@@ -6,7 +6,7 @@
 
 use std::{fmt::Write as _, fs, path::Path};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use regex::RegexSet;
 use serde_json::{Value, json};
 
@@ -111,7 +111,11 @@ pub fn run(
         && check.max.is_none()
         && check.baseline.is_none();
 
-    let baseline = check.baseline.as_deref().map(read_baseline).transpose()?;
+    let baseline = check
+        .baseline
+        .as_deref()
+        .map(|path| read_baseline(path, args))
+        .transpose()?;
 
     for finding in &outcome.findings {
         if allow.is_match(&finding.function) {
@@ -259,7 +263,10 @@ pub fn write_baseline(
 /// # Errors
 ///
 /// Returns an error if the file is missing, unreadable, or not a baseline.
-pub fn read_baseline(path: &Path) -> Result<Map<String, Vec<String>>> {
+pub fn read_baseline(
+    path: &Path,
+    args: &Args,
+) -> Result<Map<String, Vec<String>>> {
     let text = fs::read_to_string(path).with_context(|| {
         format!(
             "could not read {}; write one with `panicgraph baseline {}`",
@@ -278,6 +285,15 @@ pub fn read_baseline(path: &Path) -> Result<Map<String, Vec<String>>> {
             path.display()
         );
     }
+    settings_agree(&doc, args).with_context(|| {
+        format!(
+            "{} does not describe this run; write a fresh one with \
+             `panicgraph baseline {}`",
+            path.display(),
+            path.display()
+        )
+    })?;
+
     let mut out = Map::default();
     let entries = doc.get("findings").and_then(Value::as_array);
     for entry in entries.into_iter().flatten() {
@@ -297,6 +313,47 @@ pub fn read_baseline(path: &Path) -> Result<Map<String, Vec<String>>> {
         out.insert(name.to_owned(), categories);
     }
     Ok(out)
+}
+
+/// Rejects a baseline recorded under settings this run does not share.
+///
+/// The library decides which categories are visible at all, the profile
+/// decides which checks exist, and the suppression policy decides which are
+/// reported. A baseline written under any other answer describes a
+/// different question, so comparing against it means nothing.
+fn settings_agree(doc: &Value, args: &Args) -> Result<()> {
+    let field = |name: &str| {
+        doc.get(name)
+            .and_then(Value::as_str)
+            .unwrap_or("unrecorded")
+            .to_owned()
+    };
+    let profile = field("profile");
+    ensure!(
+        profile == args.profile,
+        "it was written for the {profile} profile, not {}",
+        args.profile
+    );
+    let std_mode = field("std_mode");
+    ensure!(
+        std_mode == args.std_mode.name(),
+        "it was written against the {std_mode} standard library, not {}",
+        args.std_mode.name()
+    );
+    let recorded = doc.get("suppressed").and_then(Value::as_array).map_or(
+        CategorySet::EMPTY,
+        |list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .filter_map(|name| name.parse::<Category>().ok())
+                .collect()
+        },
+    );
+    ensure!(
+        recorded == args.suppress,
+        "it was written while suppressing a different set of categories"
+    );
+    Ok(())
 }
 
 /// Renders the outcome.
