@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use flate2::{Compression, write::GzEncoder};
 
 use crate::{CategorySet, Graph, api, parse_selector, solve::Edges, util::Set};
@@ -270,26 +270,19 @@ fn route(
         "/d3.min.js" => out.asset(JS, &D3, D3_JS),
         "/vue.global.prod.js" => out.asset(JS, &VUE, VUE_JS),
         "/api/graph" => out.json(&api::graph(&state.graph)),
-        "/api/solve" => out.result(api::solve(
-            &state.graph,
-            suppressed_from(query),
-            state.edges,
-        )),
-        "/api/flame" => out.result(api::flame(
-            &state.graph,
-            suppressed_from(query),
-            state.edges,
-            param(query, "expand").is_none(),
-        )),
-        "/api/why" => out.result(node_of(query).and_then(|node| {
-            api::why(
+        "/api/solve" => out.result(
+            suppressed_from(query)
+                .and_then(|s| api::solve(&state.graph, s, state.edges)),
+        ),
+        "/api/flame" => out.result(suppressed_from(query).and_then(|s| {
+            api::flame(
                 &state.graph,
-                node,
-                &param(query, "category").unwrap_or_default(),
-                suppressed_from(query),
+                s,
                 state.edges,
+                param(query, "expand").is_none(),
             )
         })),
+        "/api/why" => out.result(why_route(state, query)),
         "/api/source" => out.result(api::source(
             &state.sources,
             &param(query, "file").unwrap_or_default(),
@@ -299,10 +292,27 @@ fn route(
 }
 
 /// Reads the suppression policy out of a query string.
-fn suppressed_from(query: &str) -> CategorySet {
-    param(query, "suppress").map_or(CategorySet::EMPTY, |text| {
-        parse_selector(&text).unwrap_or(CategorySet::EMPTY)
-    })
+///
+/// A selector naming something that is not a category is a mistake worth
+/// reporting. Falling back to suppressing nothing would quietly answer a
+/// question the caller did not ask.
+fn suppressed_from(query: &str) -> Result<CategorySet> {
+    let Some(text) = param(query, "suppress") else {
+        return Ok(CategorySet::EMPTY);
+    };
+    parse_selector(&text)
+        .map_err(|token| anyhow!("`{token}` is not a panic category"))
+}
+
+/// Answers the explanation endpoint, which reads three parameters.
+fn why_route(state: &State, query: &str) -> Result<serde_json::Value> {
+    api::why(
+        &state.graph,
+        node_of(query)?,
+        &param(query, "category").unwrap_or_default(),
+        suppressed_from(query)?,
+        state.edges,
+    )
 }
 
 /// Reads the request line and the one header the server acts on.
