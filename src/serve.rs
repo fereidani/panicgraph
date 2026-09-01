@@ -6,7 +6,7 @@
 //! than the code it replaces.
 
 use std::{
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, ErrorKind, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{Arc, OnceLock},
 };
@@ -208,7 +208,23 @@ pub fn serve_on(
     // A server runs until it is stopped. Each connection is handled on its
     // own thread and returns as soon as the response is written.
     for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
+        let stream = match stream {
+            Ok(stream) => stream,
+            // A connection lost or a signal caught while waiting says
+            // nothing about the next one. Anything else is the listener
+            // itself failing, and retrying it would spin.
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    ErrorKind::ConnectionAborted | ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(err) => {
+                return Err(err).context("could not accept a connection");
+            }
+        };
         let state = Arc::clone(&state);
         std::thread::spawn(move || {
             if let Err(err) = handle(&stream, &state) {
