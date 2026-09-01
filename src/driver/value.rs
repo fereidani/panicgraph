@@ -456,34 +456,12 @@ impl<'tcx> Bounds<'tcx> {
 
     /// The smallest range holding both.
     fn hull(self, other: Self) -> Option<Self> {
-        use std::cmp::Ordering::Greater;
-        let lo = if self.lo.order(other.lo)? == Greater {
-            other.lo
-        } else {
-            self.lo
-        };
-        let hi = if self.hi.order(other.hi)? == Greater {
-            self.hi
-        } else {
-            other.hi
-        };
-        Self::new(lo, hi)
+        Self::new(self.lo.lesser(other.lo)?, self.hi.greater(other.hi)?)
     }
 
     /// The part both ranges hold, when they meet at all.
     fn overlap(self, other: Self) -> Option<Self> {
-        use std::cmp::Ordering::Greater;
-        let lo = if self.lo.order(other.lo)? == Greater {
-            self.lo
-        } else {
-            other.lo
-        };
-        let hi = if self.hi.order(other.hi)? == Greater {
-            other.hi
-        } else {
-            self.hi
-        };
-        Self::new(lo, hi)
+        Self::new(self.lo.greater(other.lo)?, self.hi.lesser(other.hi)?)
     }
 
     /// The smallest range holding every value given.
@@ -612,17 +590,9 @@ impl<'tcx> Fact<'tcx> {
 
     /// A fact holding just a value.
     pub const fn of(value: Value<'tcx>) -> Self {
-        Self {
-            value: Some(value),
-            order: Ranks::none_held(),
-            same: None,
-            extent: None,
-            address: false,
-            tag: None,
-            paired: None,
-            spans: None,
-            over: None,
-        }
+        let mut fact = Self::blank();
+        fact.value = Some(value);
+        fact
     }
 
     /// Everything both facts admit.
