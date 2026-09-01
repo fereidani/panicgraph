@@ -38,9 +38,10 @@ rustup toolchain install nightly
 rustup component add rustc-dev llvm-tools --toolchain nightly
 ```
 
-A `rust-toolchain.toml` in this repository pins that for you. If you install
-from elsewhere, use `cargo +nightly install`. The build stops with an
-explanation rather than a linker error when either piece is missing.
+The `+nightly` in the install line below selects that toolchain, and a
+`rust-toolchain.toml` does the same if you build from a checkout instead. The
+build stops with an explanation rather than a linker error when either piece
+is missing.
 
 ## Install
 
@@ -48,15 +49,15 @@ explanation rather than a linker error when either piece is missing.
 cargo +nightly install panicgraph
 ```
 
-Or from a checkout of this repository, where `rust-toolchain.toml` selects the
-toolchain for you:
+That installs two binaries, `panicgraph` and `panicgraph-driver`. They live
+next to each other and both are needed.
+
+To work on panicgraph itself, build from a checkout instead, where
+`rust-toolchain.toml` selects the toolchain for you:
 
 ```
 cargo install --path .
 ```
-
-That installs two binaries, `panicgraph` and `panicgraph-driver`. They live
-next to each other and both are needed.
 
 ### A smaller build for continuous integration
 
