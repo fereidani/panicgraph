@@ -342,9 +342,20 @@ pub fn clean_zeroed_int() -> u32 {
     unsafe { std::mem::zeroed() }
 }
 
-/// Reaches `index` at the language level; the optimizer proves the loop in
-/// range and keeps no check, which the verifying sweep must say.
-pub fn verify_absent_loop(v: &[u8]) -> u32 {
+/// Reaches `index` at the language level; the index comes back out of an
+/// iterator the folder does not read, and the optimizer proves it in range
+/// and keeps no check, which the verifying sweep must say.
+pub fn verify_absent_loop(v: &[u8; 16]) -> u32 {
+    let mut s = 0u32;
+    for (i, _) in v.iter().enumerate() {
+        s = s.wrapping_add(u32::from(v[i]));
+    }
+    s
+}
+
+/// Clean. The counter is bounded by the length the read is checked against,
+/// and the bound survives every turn of the loop.
+pub fn clean_range_loop(v: &[u8]) -> u32 {
     let mut s = 0u32;
     for i in 0..v.len() {
         s = s.wrapping_add(u32::from(v[i]));
@@ -762,4 +773,33 @@ pub fn clean_trailing_zeros_index(table: &[u8; 33], x: u32) -> u8 {
 /// Clean. And for counting the bits that are set.
 pub fn clean_count_ones_index(table: &[u8; 33], x: u32) -> u8 {
     table[x.count_ones() as usize]
+}
+
+/// Reaches `index`. The counter is bounded by a length the read is not
+/// measured against.
+pub fn must_range_loop_of_other(v: &[u8], other: &[u8]) -> u32 {
+    let mut s = 0u32;
+    for i in 0..other.len() {
+        s = s.wrapping_add(u32::from(v[i]));
+    }
+    s
+}
+
+/// Clean. The option carries the value the guard settled, and the field it
+/// is read back from is the one it was built with.
+pub fn clean_option_carries_index(table: &[u8; 16], i: usize) -> u8 {
+    let held = if i < 16 { Some(i) } else { None };
+    match held {
+        Some(at) => table[at],
+        None => 0,
+    }
+}
+
+/// Reaches `index`. A wider guard lets a value past the table through.
+pub fn must_option_carries_index(table: &[u8; 16], i: usize) -> u8 {
+    let held = if i < 32 { Some(i) } else { None };
+    match held {
+        Some(at) => table[at],
+        None => 0,
+    }
 }

@@ -240,12 +240,17 @@ fn discard_if_stale(layout: &Layout, marker: &str) -> Result<()> {
 }
 
 /// Removes a directory and everything under it, if it is there at all.
+///
+/// A directory that has already gone is the result this asks for, however it
+/// went: two runs against the same crate can each decide to discard the same
+/// stale tree, and the one that arrives second has nothing left to do.
 fn clear(dir: &Path) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
+    match fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err)
+            .with_context(|| format!("could not clear {}", dir.display())),
     }
-    fs::remove_dir_all(dir)
-        .with_context(|| format!("could not clear {}", dir.display()))
 }
 
 /// Removes result directories that no version in use writes to any more.

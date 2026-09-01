@@ -76,6 +76,8 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_divided_index", "index"),
     ("must_remainder_by_bounded", "index"),
     ("must_leading_zeros_index", "index"),
+    ("must_range_loop_of_other", "index"),
+    ("must_option_carries_index", "index"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -140,6 +142,8 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_leading_zeros_index",
     "clean_trailing_zeros_index",
     "clean_count_ones_index",
+    "clean_range_loop",
+    "clean_option_carries_index",
 ];
 
 /// The functions that must stay clean in a debug build as well.

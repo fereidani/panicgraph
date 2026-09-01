@@ -25,7 +25,7 @@ use rustc_middle::{
 use crate::{
     state::{
         Compared, Path, Places, STEPS, State, Subject, Work, escaping, forget,
-        refined, root_of, sweep_aliased, sweep_base, unwind_to, writes,
+        refined, retire, root_of, sweep_aliased, sweep_base, unwind_to, writes,
     },
     summary::{BUDGET, Returns, portable},
     value::{self, Against, Bounds, Fact, Known, LenRel, Value, truncate},
@@ -297,6 +297,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 {
                     *cell = fact;
                 }
+                self.constructed(state, place, rvalue);
             }
             mir::StatementKind::SetDiscriminant {
                 place,
@@ -317,9 +318,12 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                     cell.tag = tag;
                 }
             }
-            mir::StatementKind::StorageLive(local)
-            | mir::StatementKind::StorageDead(local) => {
+            mir::StatementKind::StorageLive(local) => {
                 forget(state, *local);
+                sweep_base(state, &self.places, *local);
+            }
+            mir::StatementKind::StorageDead(local) => {
+                retire(state, *local);
                 sweep_base(state, &self.places, *local);
             }
             mir::StatementKind::Intrinsic(intrinsic) => {
@@ -343,6 +347,72 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             | mir::StatementKind::BackwardIncompatibleDropHint { .. } => {}
         }
         true
+    }
+
+    /// Records what a constructor put in each of its fields.
+    ///
+    /// A value handed to a constructor is still that value where the field
+    /// is read back, which is what carries a loop counter through the
+    /// `Some` an iterator wraps it in, and a constant through the structure
+    /// that holds it. Only the fields this body reads somewhere are
+    /// recorded, since those are the only ones the walk has a slot for.
+    fn constructed(
+        &self,
+        state: &mut State<'tcx>,
+        place: &mir::Place<'tcx>,
+        rvalue: &mir::Rvalue<'tcx>,
+    ) {
+        let mir::Rvalue::Aggregate(kind, fields) = rvalue else {
+            return;
+        };
+        // A write through a pointer lands wherever the pointer is aimed,
+        // and the sweep that follows it has already taken these claims.
+        if place.is_indirect()
+            || !self.places.each().any(|(_, path)| path.base == place.local)
+        {
+            return;
+        }
+        let variant = match &**kind {
+            mir::AggregateKind::Tuple => None,
+            mir::AggregateKind::Adt(did, variant, ..) => {
+                let def = self.tcx.adt_def(*did);
+                if def.is_union() {
+                    return;
+                }
+                def.is_enum().then_some(*variant)
+            }
+            _ => return,
+        };
+        for (index, operand) in fields.iter_enumerated() {
+            // An operand reaching into the place being written was read
+            // before the write, and says nothing about it afterwards.
+            if operand
+                .place()
+                .is_some_and(|from| from.local == place.local)
+            {
+                continue;
+            }
+            let fact = self.fact(state, operand);
+            if fact == Fact::default() {
+                continue;
+            }
+            let ty = operand.ty(&self.mir.local_decls, self.tcx);
+            let step = mir::ProjectionElem::Field(index, ty);
+            let field = variant.map_or_else(
+                || place.project_deeper(&[step], self.tcx),
+                |at| {
+                    place.project_deeper(
+                        &[mir::ProjectionElem::Downcast(None, at), step],
+                        self.tcx,
+                    )
+                },
+            );
+            if let Some(slot) = self.slot_of(&field)
+                && let Some(cell) = state.get_mut(slot.as_usize())
+            {
+                *cell = fact;
+            }
+        }
     }
 
     /// Applies a write to a place, forgetting whatever it could reach.
@@ -693,16 +763,36 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         }
         // The facts read at the branch have to be the ones that stood when
         // the comparison ran, so nothing it involved may change in between.
+        // Ending the life of the temporary that was compared, or of the
+        // boolean it produced, is not such a change: the claim is recorded
+        // against the place behind them, which outlives both.
         let after = &block.statements[at.saturating_add(1)..];
+        let transient = |s: &mir::Statement<'tcx>| {
+            let (mir::StatementKind::StorageLive(of)
+            | mir::StatementKind::StorageDead(of)) = s.kind
+            else {
+                return false;
+            };
+            if of == local || measured.source == Some(of) {
+                return false;
+            }
+            if let Against::Length(len) = measured.against
+                && len == of
+            {
+                return false;
+            }
+            of == raw || of == result
+        };
         let touched = |s: &mir::Statement<'tcx>| {
-            self.touches(s, local)
-                || self.touches(s, raw)
-                || self.touches(s, result)
-                || measured.source.is_some_and(|of| self.touches(s, of))
-                || match measured.against {
-                    Against::Constant(_) => false,
-                    Against::Length(of) => self.touches(s, of),
-                }
+            !transient(s)
+                && (self.touches(s, local)
+                    || self.touches(s, raw)
+                    || self.touches(s, result)
+                    || measured.source.is_some_and(|of| self.touches(s, of))
+                    || match measured.against {
+                        Against::Constant(_) => false,
+                        Against::Length(of) => self.touches(s, of),
+                    })
         };
         if after.iter().any(touched) {
             return None;

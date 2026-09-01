@@ -337,6 +337,23 @@ pub fn forget(state: &mut State<'_>, local: mir::Local) {
     }
 }
 
+/// Ends the life of a local without losing the trail back to where its value
+/// came from.
+///
+/// A storage marker says the local is gone, not that something else was put
+/// there, so a comparison read through it still measured the place it was
+/// copied from. Everything the local claimed in its own right goes; only the
+/// link survives, and a write to the local clears that as it always did.
+pub fn retire(state: &mut State<'_>, local: mir::Local) {
+    let same = state.get(local.as_usize()).and_then(|slot| slot.same);
+    forget(state, local);
+    if let Some(root) = same
+        && let Some(slot) = state.get_mut(local.as_usize())
+    {
+        slot.same = Some(root);
+    }
+}
+
 /// Follows the cleanup path a terminator can take.
 pub fn unwind_to<'tcx>(
     unwind: UnwindAction,
