@@ -115,8 +115,9 @@ pub struct Folder<'a, 'tcx> {
     pub places: Places,
     /// How many callees deep this body sits below the one being analysed.
     pub depth: u32,
-    /// Blocks left to spend on callees, shared with every fold below this
-    /// one so the whole chain costs what one body is allowed.
+    /// Block visits left to spend, shared with every fold below this one so
+    /// a body and the whole chain of callees under it together cost what
+    /// one body is allowed.
     pub budget: u32,
     /// What the walk has found the body to return.
     pub returns: Returns<'tcx>,
