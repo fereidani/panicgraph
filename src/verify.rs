@@ -116,6 +116,10 @@ fn entry_categories(demangled: &str) -> Option<CategorySet> {
             "alloc::raw_vec::handle_error",
             &[CapacityOverflow, AllocFailure],
         ),
+        (
+            "alloc::raw_vec::handle_reserve",
+            &[CapacityOverflow, AllocFailure],
+        ),
         ("handle_alloc_error", &[AllocFailure]),
         ("panic_const_div_by_zero", &[DivideByZero]),
         ("panic_const_rem_by_zero", &[RemainderByZero]),
