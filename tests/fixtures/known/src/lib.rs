@@ -1278,3 +1278,32 @@ pub fn must_scan_by_two(v: &[u8], stop: u8) -> &[u8] {
     }
     &v[..at]
 }
+
+/// Takes a value it only drops, so what the drop runs is decided by the
+/// caller's choice of type.
+fn take_and_index<T>(x: T, v: &[u8; 4], at: usize) -> u8 {
+    let _ = x;
+    v[at]
+}
+
+/// Clean. The guard settles the read, and the value the callee drops is of
+/// a type with nothing to run, which is what this call makes of it.
+pub fn clean_drop_beside_a_guard(v: &[u8; 4]) -> u8 {
+    take_and_index(7u32, v, 3)
+}
+
+/// Reaches `index`. Nothing settles the read.
+pub fn must_drop_beside_a_guard(v: &[u8; 4], at: usize) -> u8 {
+    take_and_index(7u32, v, at)
+}
+
+/// Clean. Walking a deque asks the library for the whole of it, and a range
+/// with neither end named cannot fall outside anything.
+pub fn clean_deque_walk(q: &std::collections::VecDeque<u8>) -> usize {
+    q.iter().count()
+}
+
+/// Reaches `index`. A range the caller names can leave the deque.
+pub fn must_deque_range(q: &std::collections::VecDeque<u8>, at: usize) -> usize {
+    q.range(at..).count()
+}

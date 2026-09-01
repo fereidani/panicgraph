@@ -265,10 +265,18 @@ impl<'tcx> Folder<'_, 'tcx> {
         let entry = self.carried(state, &folder, args);
         let reach = folder.run(entry);
         self.budget = folder.budget;
+        if std::env::var_os("PANICGRAPH_TRACE").is_some() {
+            eprintln!(
+                "TRACE {:?} -> {:?} quiet={}",
+                self.inst,
+                callee,
+                self.silent(&folder, &reach)
+            );
+        }
         self.handed_back(&folder, destination, after);
         Found {
             left: folder.returns.claim(),
-            quiet: self.silent(mir, &reach),
+            quiet: self.silent(&folder, &reach),
         }
     }
 
@@ -306,8 +314,8 @@ impl<'tcx> Folder<'_, 'tcx> {
     /// terminator with nowhere to raise from, or a check the walk settled.
     /// A call or a drop is not one of them: what either runs is a body this
     /// walk did not read.
-    fn silent(&self, mir: &mir::Body<'tcx>, reach: &Reach) -> bool {
-        for (bb, data) in mir.basic_blocks.iter_enumerated() {
+    fn silent(&self, callee: &Folder<'_, 'tcx>, reach: &Reach) -> bool {
+        for (bb, data) in callee.mir.basic_blocks.iter_enumerated() {
             if !reach.is_live(bb) {
                 continue;
             }
@@ -323,10 +331,16 @@ impl<'tcx> Folder<'_, 'tcx> {
                 TerminatorKind::Call { .. } => reach.is_quiet(bb),
                 // Dropping a value of a type with nothing to run is the
                 // compiler writing down that the value ends here.
-                TerminatorKind::Drop { place, .. } => {
-                    let ty = place.ty(&mir.local_decls, self.tcx).ty;
-                    !ty.needs_drop(self.tcx, TypingEnv::fully_monomorphized())
-                }
+                // Dropping a value of a type with nothing to run is the
+                // compiler writing down that the value ends here. The type
+                // is read for the instantiation this call makes: a
+                // parameter has drop glue for some arguments and none for
+                // others, and only one of them is in front of us.
+                TerminatorKind::Drop { place, .. } => callee
+                    .monomorphize(
+                        place.ty(&callee.mir.local_decls, self.tcx).ty,
+                    )
+                    .is_some_and(|ty| !ty.needs_drop(self.tcx, callee.env)),
                 TerminatorKind::Goto { .. }
                 | TerminatorKind::SwitchInt { .. }
                 | TerminatorKind::Return
@@ -336,6 +350,15 @@ impl<'tcx> Folder<'_, 'tcx> {
                 _ => false,
             };
             if !silent {
+                if std::env::var_os("PANICGRAPH_TRACE").is_some() {
+                    eprintln!(
+                        "TRACE   noisy at {bb:?}: {}",
+                        format!("{:?}", term.kind)
+                            .chars()
+                            .take(90)
+                            .collect::<String>()
+                    );
+                }
                 return false;
             }
         }

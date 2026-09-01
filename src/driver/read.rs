@@ -344,6 +344,13 @@ impl<'tcx> Folder<'_, 'tcx> {
             }
             _ => None,
         };
+        // A value compared with itself is the same value, whichever local
+        // each side was read from.
+        if let (Some(near), Some(far)) = (root(&pair.0), root(&pair.1))
+            && near == far
+        {
+            return value::stepped(op, 0);
+        }
         if let (Some(near), Some((of, step))) =
             (root(&pair.0), self.fact(state, &pair.1).over)
             && of == near
@@ -613,10 +620,19 @@ impl<'tcx> Folder<'_, 'tcx> {
                 }
                 held
             }
-            mir::Operand::Constant(konst) => self
-                .constant(konst)
-                .map(Value::Exact)
-                .map_or_else(Fact::default, Fact::of),
+            mir::Operand::Constant(konst) => {
+                let tag = self.variant_of(konst);
+                self.constant(konst).map(Value::Exact).map_or_else(
+                    || Fact {
+                        tag,
+                        ..Fact::default()
+                    },
+                    |value| Fact {
+                        tag,
+                        ..Fact::of(value)
+                    },
+                )
+            }
             // Whether a check is on is settled by the session compiling the
             // crate, which is what makes a standard library block vanish in
             // a build that turns the check off.
@@ -720,6 +736,55 @@ impl<'tcx> Folder<'_, 'tcx> {
             fact.same = Some(root);
         }
         fact
+    }
+
+    /// The variant an enum written as a constant holds.
+    ///
+    /// A variant carrying no fields is written into the body as a constant
+    /// rather than built by a constructor, so the tag has to be read out of
+    /// the value the compiler laid down. Without it a `match` on such a
+    /// variant walks every arm, including the one that panics.
+    fn variant_of(&self, konst: &mir::ConstOperand<'tcx>) -> Option<u128> {
+        let ty = self.monomorphize(konst.const_.ty())?;
+        let ty::Adt(def, _) = ty.kind() else {
+            return None;
+        };
+        if !def.is_enum() {
+            return None;
+        }
+        let layout = self.tcx.layout_of(self.env.as_query_input(ty)).ok()?;
+        let rustc_abi::Variants::Multiple {
+            tag,
+            tag_encoding: rustc_abi::TagEncoding::Direct,
+            tag_field,
+            ..
+        } = &layout.variants
+        else {
+            return None;
+        };
+        let size = tag.size(&self.tcx);
+        let held = konst.const_.eval(self.tcx, self.env, konst.span).ok()?;
+        let scalar = match held {
+            mir::ConstValue::Scalar(scalar) => scalar,
+            mir::ConstValue::Indirect { alloc_id, offset } => {
+                let at = offset.checked_add(
+                    layout.fields.offset(tag_field.as_usize()),
+                    &self.tcx,
+                )?;
+                self.tcx
+                    .global_alloc(alloc_id)
+                    .unwrap_memory()
+                    .inner()
+                    .read_scalar(
+                        &self.tcx,
+                        mir::interpret::alloc_range(at, size),
+                        false,
+                    )
+                    .ok()?
+            }
+            _ => return None,
+        };
+        Some(scalar.try_to_scalar_int().ok()?.to_bits(size))
     }
 
     /// Evaluates a constant for the arguments this body was reached with.
