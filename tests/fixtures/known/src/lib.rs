@@ -1259,3 +1259,22 @@ pub fn must_table_of_threes(byte: u8, table: &[u8; 767]) -> &[u8] {
     let at = usize::from(byte) * 3;
     &table[at..at + 3]
 }
+
+/// Clean. The counter starts at nothing and only ever steps to the next
+/// place inside the slice, so it never passes the end.
+pub fn clean_scan_until(v: &[u8], stop: u8) -> &[u8] {
+    let mut at = 0;
+    while at < v.len() && v[at] != stop {
+        at += 1;
+    }
+    &v[..at]
+}
+
+/// Reaches `index`. Stepping by two can walk over the end.
+pub fn must_scan_by_two(v: &[u8], stop: u8) -> &[u8] {
+    let mut at = 0;
+    while at < v.len() && v[at] != stop {
+        at += 2;
+    }
+    &v[..at]
+}

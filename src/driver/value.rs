@@ -310,10 +310,29 @@ impl Ranks {
 
     /// Everything both sets of claims admit.
     pub fn joined(self, other: Self) -> Self {
+        self.joined_with(other, false, false)
+    }
+
+    /// Everything both sets admit, where a side that can only be zero is
+    /// at most every length there is.
+    ///
+    /// That is what carries a bound round a loop whose counter starts at
+    /// nothing: the way in proves no ordering of its own, the way round
+    /// proves one, and zero agrees with it.
+    pub fn joined_with(self, other: Self, mine: bool, theirs: bool) -> Self {
         let mut ranks = Self::default();
         for (rel, of) in self.each() {
-            if let Some(theirs) = other.against(of) {
-                ranks.add(if rel == theirs { rel } else { LenRel::AtMost }, of);
+            if let Some(held) = other.against(of) {
+                ranks.add(if rel == held { rel } else { LenRel::AtMost }, of);
+            } else if theirs {
+                ranks.add(LenRel::AtMost, of);
+            }
+        }
+        if mine {
+            for (_, of) in other.each() {
+                if self.against(of).is_none() {
+                    ranks.add(LenRel::AtMost, of);
+                }
             }
         }
         ranks
@@ -628,7 +647,11 @@ impl<'tcx> Fact<'tcx> {
             // the weaker of the two claims rather than at nothing, which is
             // what carries a bound round a loop whose first turn proved
             // more than the rest.
-            order: self.order.joined(other.order),
+            order: self.order.joined_with(
+                other.order,
+                Self::zeroed(self),
+                Self::zeroed(other),
+            ),
             same: (self.same == other.same).then_some(self.same).flatten(),
             extent: match (self.extent, other.extent) {
                 (Some(held), Some(arriving)) => held.hull(arriving),
@@ -642,6 +665,13 @@ impl<'tcx> Fact<'tcx> {
             spans: (self.spans == other.spans).then_some(self.spans).flatten(),
             over: (self.over == other.over).then_some(self.over).flatten(),
         }
+    }
+
+    /// Whether the value can only be zero, which is at most every length.
+    fn zeroed(self) -> bool {
+        self.value
+            .and_then(Value::bounds)
+            .is_some_and(|span| !span.hi.is_signed() && span.hi.bits == 0)
     }
 
     /// The fact widened away from the one it replaced.
