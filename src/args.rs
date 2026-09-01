@@ -208,6 +208,20 @@ pub enum Closures {
     Parent,
 }
 
+impl Command {
+    /// The name used on the command line and in messages.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Analyze => "analyze",
+            Self::Why { .. } => "why",
+            Self::Check(_) => "check",
+            Self::Baseline { .. } => "baseline",
+            Self::Kinds => "kinds",
+        }
+    }
+}
+
 impl Closures {
     /// The name used on the command line and in reports.
     #[must_use]
@@ -316,6 +330,16 @@ impl Cli {
         let listen = self.listen.as_deref().map(listen_addr).transpose()?;
         let only = self.policy.only.as_deref().map(selector).transpose()?;
         let command = self.command.unwrap_or(Command::Analyze);
+        // A drawing is a picture of the whole graph, so it is the report
+        // and nothing else. Rendering prose instead would answer a question
+        // that was not asked.
+        if self.format == Format::Svg && !matches!(command, Command::Analyze) {
+            bail!(
+                "`--format svg` draws the whole graph, so it belongs \
+                 to the analysis rather than to `{}`",
+                command.name()
+            );
+        }
         let std_mode = self
             .scope
             .std_mode

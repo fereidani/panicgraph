@@ -94,3 +94,21 @@ fn std_mode_is_selectable() {
     assert_eq!(args.std_mode, StdMode::Full);
     assert!(parse(&["--std", "partial"]).is_err());
 }
+
+#[test]
+fn a_drawing_is_refused_where_there_is_nothing_to_draw() {
+    for argv in [
+        &["--format", "svg", "kinds"][..],
+        &["--format", "svg", "why", "parse"][..],
+        &["--format", "svg", "check"][..],
+    ] {
+        assert!(
+            parse(argv).is_err(),
+            "{argv:?} asks for a drawing of something that is not the graph"
+        );
+    }
+    assert!(
+        parse(&["--format", "svg"]).is_ok(),
+        "the analysis is what a drawing draws"
+    );
+}

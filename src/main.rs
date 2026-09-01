@@ -1,6 +1,6 @@
 //! Reports which functions can panic, why, and through what call path.
 
-use std::process::ExitCode;
+use std::{fmt::Write as _, process::ExitCode};
 
 use anyhow::Result;
 use clap::Parser;
@@ -35,7 +35,12 @@ fn dispatch() -> Result<u8> {
 
     let code = match &args.command {
         Command::Kinds => {
-            report::kinds(&mut out);
+            match args.format {
+                panicgraph::args::Format::Json => {
+                    report::kinds_json(&mut out)?;
+                }
+                _ => report::kinds(&mut out),
+            }
             EXIT_CLEAN
         }
         #[cfg(feature = "serve")]
@@ -59,7 +64,12 @@ fn dispatch() -> Result<u8> {
         Command::Analyze => analyze(&args, &mut out)?,
         Command::Why { function } => {
             let (graph, solution) = solve(&args)?;
-            report::why(&graph, &solution, function, &mut out);
+            match args.format {
+                panicgraph::args::Format::Json => {
+                    report::why_json(&graph, &solution, function, &mut out)?;
+                }
+                _ => report::why(&graph, &solution, function, &mut out),
+            }
             EXIT_CLEAN
         }
         Command::Check(gate) => gate_check(&args, gate, &mut out)?,
@@ -68,11 +78,24 @@ fn dispatch() -> Result<u8> {
             let outcome =
                 check::run(&graph, &solution, &args, &Check::default())?;
             check::write_baseline(file, &args, &outcome.findings)?;
-            println!(
-                "recorded {} findings in {}",
-                outcome.findings.len(),
-                file.display()
-            );
+            match args.format {
+                panicgraph::args::Format::Json => {
+                    let doc = serde_json::json!({
+                        "recorded": outcome.findings.len(),
+                        "baseline": file.display().to_string(),
+                    });
+                    out.push_str(&serde_json::to_string_pretty(&doc)?);
+                    out.push('\n');
+                }
+                _ => {
+                    let _ = writeln!(
+                        out,
+                        "recorded {} findings in {}",
+                        outcome.findings.len(),
+                        file.display()
+                    );
+                }
+            }
             EXIT_CLEAN
         }
     };

@@ -356,6 +356,96 @@ fn github(
     }
 }
 
+/// Explains one function's panics for a machine.
+///
+/// The same walk the prose takes, written as the path itself: every hop
+/// names the callee it reaches and the edge it was resolved through, and
+/// the ending says what raises.
+///
+/// # Errors
+///
+/// Returns an error if the document cannot be serialized.
+pub fn why_json(
+    graph: &Graph,
+    solution: &Solution,
+    name: &str,
+    out: &mut String,
+) -> Result<()> {
+    let matches = graph.find_by_display(name);
+    let doc = match matches.first() {
+        None => serde_json::json!({ "query": name, "matched": 0 }),
+        Some(&id) => {
+            let body = graph.body(id);
+            let paths: Vec<serde_json::Value> = solution
+                .enabled(id)
+                .iter()
+                .filter_map(|category| {
+                    let path = witness::find(graph, solution, id, category)?;
+                    Some(serde_json::json!({
+                        "category": category.name(),
+                        "hops": path
+                            .hops
+                            .iter()
+                            .map(|hop| serde_json::json!({
+                                "function": graph.body(hop.callee).display,
+                                "kind": hop.kind.name(),
+                                "location": hop
+                                    .loc
+                                    .as_ref()
+                                    .map(ToString::to_string),
+                            }))
+                            .collect::<Vec<_>>(),
+                        "ending": ending(graph, &path),
+                    }))
+                })
+                .collect();
+            serde_json::json!({
+                "query": name,
+                "matched": matches.len(),
+                "function": body.display,
+                "crate": body.krate,
+                "location": body.loc.as_ref().map(ToString::to_string),
+                "categories": solution.enabled(id).names(),
+                "paths": paths,
+            })
+        }
+    };
+    out.push_str(&serde_json::to_string_pretty(&doc)?);
+    out.push('\n');
+    Ok(())
+}
+
+/// What the end of a witness path raises, as a document.
+fn ending(graph: &Graph, path: &witness::Witness) -> serde_json::Value {
+    let body = graph.body(path.func);
+    match path.terminal {
+        Terminal::Site(i) => body.sites.get(i).map_or_else(
+            || serde_json::json!({ "kind": "site" }),
+            |site| {
+                serde_json::json!({
+                    "kind": "site",
+                    "reason": site.reason,
+                    "location": site.loc.as_ref().map(ToString::to_string),
+                })
+            },
+        ),
+        Terminal::Opaque => serde_json::json!({
+            "kind": if body.foreign { "foreign" } else { "opaque" },
+        }),
+        Terminal::Unresolved(i) => body.calls.get(i).map_or_else(
+            || serde_json::json!({ "kind": "unresolved" }),
+            |call| {
+                serde_json::json!({
+                    "kind": "unresolved",
+                    "callee": call.callee_display,
+                    "edge": call.kind.name(),
+                    "location": call.loc.as_ref().map(ToString::to_string),
+                })
+            },
+        ),
+    }
+}
+
 /// Explains how one function reaches a panic.
 pub fn why(graph: &Graph, solution: &Solution, name: &str, out: &mut String) {
     let matches = graph.find_by_display(name);
@@ -460,7 +550,39 @@ fn describe_terminal(graph: &Graph, path: &witness::Witness, out: &mut String) {
     }
 }
 
-/// Lists the categories and what each means.
+/// Lists the categories and what each means, for a machine.
+///
+/// # Errors
+///
+/// Returns an error if the document cannot be serialized.
+pub fn kinds_json(out: &mut String) -> Result<()> {
+    let doc = serde_json::json!({
+        "categories": crate::category::ALL
+            .iter()
+            .map(|category| serde_json::json!({
+                "name": category.name(),
+                "describe": category.describe(),
+                // Whether the name stands for a panic or for a place the
+                // analysis could not read.
+                "assumed": CategorySet::assumed().contains(*category),
+            }))
+            .collect::<Vec<_>>(),
+        "aliases": serde_json::json!({
+            "oom": CategorySet::oom().names(),
+            "default": CategorySet::default_suppressed().names(),
+            "assumed": CategorySet::assumed().names(),
+            "all": crate::category::ALL
+                .iter()
+                .map(|category| category.name())
+                .collect::<Vec<_>>(),
+        }),
+    });
+    out.push_str(&serde_json::to_string_pretty(&doc)?);
+    out.push('\n');
+    Ok(())
+}
+
+/// Writes the taxonomy as prose.
 pub fn kinds(out: &mut String) {
     out.push_str("Panic categories\n\n");
     for category in crate::category::ALL {
