@@ -66,6 +66,16 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_take_indexed", "index"),
     ("must_pass_unguarded", "index"),
     ("Window::must_window_of_other", "index"),
+    ("must_shifted_index", "index"),
+    ("must_shift_by_runtime", "index"),
+    ("must_signed_shift_index", "index"),
+    ("must_shifted_left_index", "index"),
+    ("must_or_divide", "divide-by-zero"),
+    ("must_or_index", "index"),
+    ("must_xor_index", "index"),
+    ("must_divided_index", "index"),
+    ("must_remainder_by_bounded", "index"),
+    ("must_leading_zeros_index", "index"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -120,6 +130,16 @@ const MUST_BE_CLEAN: &[&str] = &[
     "clean_generic_guard",
     "clean_guard_before_call",
     "Window::clean_window_read",
+    "clean_shifted_index",
+    "clean_shifted_left_index",
+    "clean_or_divide",
+    "clean_or_index",
+    "clean_xor_index",
+    "clean_divided_index",
+    "clean_remainder_by_bounded",
+    "clean_leading_zeros_index",
+    "clean_trailing_zeros_index",
+    "clean_count_ones_index",
 ];
 
 /// The functions that must stay clean in a debug build as well.
@@ -154,6 +174,16 @@ const MUST_BE_CLEAN_IN_DEBUG: &[&str] = &[
     "clean_unwrap_ok",
     "clean_match_panic",
     "clean_generic_guard",
+    "clean_shifted_index",
+    "clean_shifted_left_index",
+    "clean_or_divide",
+    "clean_or_index",
+    "clean_xor_index",
+    "clean_divided_index",
+    "clean_remainder_by_bounded",
+    "clean_leading_zeros_index",
+    "clean_trailing_zeros_index",
+    "clean_count_ones_index",
 ];
 
 #[test]

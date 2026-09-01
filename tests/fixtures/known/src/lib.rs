@@ -659,3 +659,107 @@ impl Window {
         if self.at < other.over.len() { self.over[self.at] } else { 0 }
     }
 }
+
+/// Clean. Shifting a byte down by four leaves a nibble, and the table has
+/// room for every one of them.
+pub fn clean_shifted_index(table: &[u8; 16], byte: u8) -> u8 {
+    table[usize::from(byte >> 4)]
+}
+
+/// Reaches `index`. One bit less of a shift leaves twice the values.
+pub fn must_shifted_index(table: &[u8; 16], byte: u8) -> u8 {
+    table[usize::from(byte >> 3)]
+}
+
+/// Reaches `index`. A shift by a runtime amount is a shift by anything.
+pub fn must_shift_by_runtime(table: &[u8; 16], byte: u8, at: u32) -> u8 {
+    table[usize::from(byte >> at)]
+}
+
+/// Reaches `index`. A signed shift keeps the sign, and a negative index
+/// read as unsigned is far past the end.
+pub fn must_signed_shift_index(table: &[u8; 16], x: i32) -> u8 {
+    table[(x >> 28) as usize]
+}
+
+/// Clean. Four values raised two bits stay inside a table of sixty four.
+pub fn clean_shifted_left_index(table: &[u8; 64], n: u8) -> u8 {
+    table[usize::from((n & 0x0f) << 2)]
+}
+
+/// Reaches `index`. One bit further leaves the table behind.
+pub fn must_shifted_left_index(table: &[u8; 64], n: u8) -> u8 {
+    table[usize::from((n & 0x0f) << 3)]
+}
+
+/// Clean. Setting the low bit keeps the divisor away from zero.
+pub fn clean_or_divide(x: u32, d: u32) -> u32 {
+    x / (d | 1)
+}
+
+/// Reaches `divide-by-zero`. Two runtime values can both be zero.
+pub fn must_or_divide(x: u32, d: u32, e: u32) -> u32 {
+    x / (d | e)
+}
+
+/// Clean. Neither masked value reaches above the table.
+pub fn clean_or_index(table: &[u8; 16], a: u8, b: u8) -> u8 {
+    table[usize::from((a & 0x0c) | (b & 0x03))]
+}
+
+/// Reaches `index`. The wider mask carries a bit the table has no room for.
+pub fn must_or_index(table: &[u8; 16], a: u8, b: u8) -> u8 {
+    table[usize::from((a & 0x1c) | (b & 0x03))]
+}
+
+/// Clean. Flipping bits reaches no higher than the bits either side had.
+pub fn clean_xor_index(table: &[u8; 16], a: u8, b: u8) -> u8 {
+    table[usize::from((a & 0x0f) ^ (b & 0x0f))]
+}
+
+/// Reaches `index`. The wider mask carries a bit past the table.
+pub fn must_xor_index(table: &[u8; 16], a: u8, b: u8) -> u8 {
+    table[usize::from((a & 0x0f) ^ (b & 0x1f))]
+}
+
+/// Clean. A byte divided by sixteen is a nibble.
+pub fn clean_divided_index(table: &[u8; 16], i: usize) -> u8 {
+    table[(i & 0xff) / 16]
+}
+
+/// Reaches `index`. Dividing by fifteen leaves seventeen values.
+pub fn must_divided_index(table: &[u8; 16], i: usize) -> u8 {
+    table[(i & 0xff) / 15]
+}
+
+/// Clean. The divisor is pinned to a range, and a remainder lies below it.
+pub fn clean_remainder_by_bounded(table: &[u8; 16], x: u32, d: u32) -> u8 {
+    let d = d.max(1).min(16);
+    table[(x % d) as usize]
+}
+
+/// Reaches `index`. One further leaves a remainder the table cannot hold.
+pub fn must_remainder_by_bounded(table: &[u8; 16], x: u32, d: u32) -> u8 {
+    let d = d.max(1).min(17);
+    table[(x % d) as usize]
+}
+
+/// Clean. A word has thirty three possible counts of leading zeros.
+pub fn clean_leading_zeros_index(table: &[u8; 33], x: u32) -> u8 {
+    table[x.leading_zeros() as usize]
+}
+
+/// Reaches `index`. A word with no bits set counts every one of them.
+pub fn must_leading_zeros_index(table: &[u8; 32], x: u32) -> u8 {
+    table[x.leading_zeros() as usize]
+}
+
+/// Clean. The same holds for counting from the other end.
+pub fn clean_trailing_zeros_index(table: &[u8; 33], x: u32) -> u8 {
+    table[x.trailing_zeros() as usize]
+}
+
+/// Clean. And for counting the bits that are set.
+pub fn clean_count_ones_index(table: &[u8; 33], x: u32) -> u8 {
+    table[x.count_ones() as usize]
+}

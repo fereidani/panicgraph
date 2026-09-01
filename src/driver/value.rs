@@ -134,6 +134,107 @@ impl Known<'_> {
         };
         Some(Self { bits, ..self })
     }
+
+    /// The value shifted by a settled amount, when the shift means what the
+    /// arithmetic says.
+    ///
+    /// Both directions are monotonic, so an end of a range shifted this way
+    /// is still an end of the shifted range. A shift as wide as the type is
+    /// refused: the machine masks the amount there and the arithmetic does
+    /// not, and a claim drawn from the wrong one drops a panic that is real.
+    /// Shifting left multiplies, so it is answered as a product and gives
+    /// the claim up where the product leaves the type.
+    pub fn shifted(self, op: mir::BinOp, amount: u32) -> Option<Self> {
+        use mir::BinOp::{Shl, ShlUnchecked, Shr, ShrUnchecked};
+        if amount >= self.width {
+            return None;
+        }
+        match op {
+            Shr | ShrUnchecked => {
+                let bits = if self.is_signed() {
+                    truncate(
+                        (self.as_signed() >> amount).cast_unsigned(),
+                        self.width,
+                    )
+                } else {
+                    self.bits >> amount
+                };
+                Some(Self { bits, ..self })
+            }
+            Shl | ShlUnchecked => {
+                let factor = Self {
+                    bits: 1u128 << amount,
+                    ..self
+                };
+                // A factor that reads as negative is the sign bit itself,
+                // and multiplying by it reverses the order the ends rely on.
+                if factor.is_signed() && factor.as_signed() < 0 {
+                    return None;
+                }
+                self.arith(mir::BinOp::Mul, factor)
+            }
+            _ => None,
+        }
+    }
+
+    /// The value with every bit below its highest one set as well.
+    ///
+    /// Setting or flipping the bits of two values never reaches above the
+    /// highest bit either of them carries, so this is what bounds an `or`
+    /// or an `xor` from above. A negative value has no such bound, since
+    /// its top bit is the sign.
+    pub fn saturated(self) -> Option<Self> {
+        if self.is_signed() && self.as_signed() < 0 {
+            return None;
+        }
+        let bits = self
+            .bits
+            .checked_ilog2()
+            .map_or(0, |top| truncate(u128::MAX, top.saturating_add(1)));
+        Some(Self { bits, ..self })
+    }
+
+    /// The quotient of two values the type reads as unsigned.
+    ///
+    /// Signed division has a corner the type cannot hold, so it is left to
+    /// the check the compiler writes for it.
+    pub fn quotient(self, other: Self) -> Option<Self> {
+        if self.ty != other.ty || self.is_signed() || other.bits == 0 {
+            return None;
+        }
+        Some(Self {
+            bits: self.bits / other.bits,
+            ..self
+        })
+    }
+
+    /// The smaller of two values of the same type.
+    pub fn lesser(self, other: Self) -> Option<Self> {
+        Some(if self.order(other)? == std::cmp::Ordering::Greater {
+            other
+        } else {
+            self
+        })
+    }
+
+    /// The larger of two values of the same type.
+    pub fn greater(self, other: Self) -> Option<Self> {
+        Some(if self.order(other)? == std::cmp::Ordering::Greater {
+            self
+        } else {
+            other
+        })
+    }
+
+    /// Whether the value reads as zero or above.
+    pub fn nonnegative(self) -> bool {
+        !self.is_signed() || self.as_signed() >= 0
+    }
+
+    /// Zero, read at this value's type.
+    pub const fn zero(self) -> Self {
+        Self { bits: 0, ..self }
+    }
 }
 
 /// Masks a value to the width of its type.

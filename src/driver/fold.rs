@@ -906,7 +906,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             };
         }
         Fact {
-            value: self.binary(op, left, right),
+            value: self.binary(state, op, pair, left, right),
             ..Fact::default()
         }
     }
@@ -1214,7 +1214,9 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     /// operator itself defines.
     fn binary(
         &self,
+        state: &State<'tcx>,
         op: BinOp,
+        pair: &(mir::Operand<'tcx>, mir::Operand<'tcx>),
         left: Fact<'tcx>,
         right: Fact<'tcx>,
     ) -> Option<Value<'tcx>> {
@@ -1231,34 +1233,110 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             BinOp::Add | BinOp::Sub | BinOp::Mul => {
                 Self::spanned(op, left.value?.bounds()?, right.value?.bounds()?)
             }
-            // The remainder of anything by a positive constant lies below
-            // it. Negative operands are signed, and a signed remainder can
-            // be negative, so only unsigned types make the claim.
-            BinOp::Rem => {
-                let divisor = right.value?.exact()?;
-                if divisor.is_signed() || divisor.bits == 0 {
-                    return None;
-                }
-                let hi = divisor.predecessor()?;
-                Bounds::new(divisor.type_min(), hi).map(Value::Within)
+            BinOp::Div | BinOp::Rem => self.split(state, op, pair),
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                self.bitwise(state, op, pair)
             }
-            // A mask with no sign bit pins the result between zero and
-            // itself, whatever the other operand held.
-            BinOp::BitAnd => {
-                let ((Some(mask), _) | (None, Some(mask))) = (
-                    left.value.and_then(Value::exact),
-                    right.value.and_then(Value::exact),
-                ) else {
-                    return None;
-                };
-                if mask.is_signed() && mask.as_signed() < 0 {
-                    return None;
-                }
-                let zero = Known { bits: 0, ..mask };
-                Bounds::new(zero, mask).map(Value::Within)
-            }
+            BinOp::Shl
+            | BinOp::ShlUnchecked
+            | BinOp::Shr
+            | BinOp::ShrUnchecked => self.shifted(state, op, pair, right),
             _ => None,
         }
+    }
+
+    /// The range a division or a remainder leaves behind.
+    ///
+    /// A remainder lies below its divisor and never above the value it was
+    /// taken of, and a quotient moves with the value and against the
+    /// divisor. Both are read as unsigned only: a signed remainder carries
+    /// the sign of its left operand, and a signed division has a corner the
+    /// type cannot hold. The divisor is above zero wherever this runs,
+    /// since the check the compiler writes in front of it has passed to get
+    /// here.
+    fn split(
+        &self,
+        state: &State<'tcx>,
+        op: BinOp,
+        pair: &(mir::Operand<'tcx>, mir::Operand<'tcx>),
+    ) -> Option<Value<'tcx>> {
+        let left = self.spread(state, &pair.0)?;
+        let right = self.spread(state, &pair.1)?;
+        if left.lo.is_signed() || right.lo.is_signed() || right.lo.bits == 0 {
+            return None;
+        }
+        let bounds = match op {
+            BinOp::Div => Bounds::new(
+                left.lo.quotient(right.hi)?,
+                left.hi.quotient(right.lo)?,
+            ),
+            BinOp::Rem => Bounds::new(
+                left.lo.zero(),
+                left.hi.lesser(right.hi.predecessor()?)?,
+            ),
+            _ => return None,
+        };
+        bounds.map(Value::Within)
+    }
+
+    /// The range a bitwise operator leaves behind.
+    ///
+    /// An `and` keeps only the bits an operand already carried, so a side
+    /// that is never negative bounds the result on its own. An `or` and an
+    /// `xor` reach no higher than the topmost bit either side carries, and
+    /// an `or` is never below the larger of the two, which is what keeps
+    /// `d | 1` away from zero.
+    fn bitwise(
+        &self,
+        state: &State<'tcx>,
+        op: BinOp,
+        pair: &(mir::Operand<'tcx>, mir::Operand<'tcx>),
+    ) -> Option<Value<'tcx>> {
+        let left = self.spread(state, &pair.0)?;
+        let right = self.spread(state, &pair.1)?;
+        if op == BinOp::BitAnd {
+            let mut hi = None;
+            for side in [left, right].iter().filter(|s| s.lo.nonnegative()) {
+                hi = Some(match hi {
+                    Some(held) => side.hi.lesser(held)?,
+                    None => side.hi,
+                });
+            }
+            return Bounds::new(left.lo.zero(), hi?).map(Value::Within);
+        }
+        if !left.lo.nonnegative() || !right.lo.nonnegative() {
+            return None;
+        }
+        let hi = left.hi.greater(right.hi)?.saturated()?;
+        let lo = if op == BinOp::BitOr {
+            left.lo.greater(right.lo)?
+        } else {
+            left.lo.zero()
+        };
+        Bounds::new(lo, hi).map(Value::Within)
+    }
+
+    /// The range a shift by a settled amount leaves behind.
+    ///
+    /// The shift moves both ends of the range the same way, so what was an
+    /// end of the value is an end of the result. Nothing is claimed unless
+    /// the amount is settled: a shift the walk cannot read is a shift by
+    /// anything.
+    fn shifted(
+        &self,
+        state: &State<'tcx>,
+        op: BinOp,
+        pair: &(mir::Operand<'tcx>, mir::Operand<'tcx>),
+        right: Fact<'tcx>,
+    ) -> Option<Value<'tcx>> {
+        let amount = right.value?.exact()?;
+        if !amount.nonnegative() {
+            return None;
+        }
+        let amount = u32::try_from(amount.bits).ok()?;
+        let span = self.spread(state, &pair.0)?;
+        Bounds::new(span.lo.shifted(op, amount)?, span.hi.shifted(op, amount)?)
+            .map(Value::Within)
     }
 
     /// The range an arithmetic operator leaves behind.

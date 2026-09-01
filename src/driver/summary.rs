@@ -194,6 +194,15 @@ impl<'tcx> Folder<'_, 'tcx> {
             // the body reached is the one this claim describes.
             "cmp::Ord::max" => self.picked(state, true, args),
             "cmp::Ord::min" => self.picked(state, false, args),
+            // Counting the bits of a value, set or leading or trailing
+            // zero, can never answer above the width of the type it was
+            // read at, which is what clears the table every such count is
+            // used to reach into.
+            "intrinsics::ctlz"
+            | "intrinsics::ctlz_nonzero"
+            | "intrinsics::cttz"
+            | "intrinsics::cttz_nonzero"
+            | "intrinsics::ctpop" => self.counted(args, destination),
             "num::nonzero::get" => {
                 let receiver = args.first()?;
                 let source = self.monomorphize(
@@ -392,6 +401,26 @@ impl<'tcx> Folder<'_, 'tcx> {
         Carried { slot, alike, fact }
     }
 
+    /// The range a count of bits lands in.
+    ///
+    /// The answer is a number of bits of the value counted, so it lies
+    /// between none of them and all of them.
+    fn counted(
+        &self,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        destination: mir::Place<'tcx>,
+    ) -> Option<Value<'tcx>> {
+        let counted = self.monomorphize(
+            args.first()?.node.ty(&self.mir.local_decls, self.tcx),
+        )?;
+        let bits = u128::from(self.width(counted)?);
+        let ty = self
+            .monomorphize(destination.ty(&self.mir.local_decls, self.tcx).ty)?;
+        let width = self.width(ty)?;
+        let seed = Known { bits: 0, ty, width };
+        Bounds::new(seed, Known { bits, ..seed }).map(Value::Within)
+    }
+
     /// The range a call that picks one of two numbers leaves behind.
     ///
     /// Both ends move together: the larger of two values is at least the
@@ -419,7 +448,7 @@ impl<'tcx> Folder<'_, 'tcx> {
 
     /// The range an operand lies in, which is its type's own range when
     /// nothing narrower is known.
-    fn spread(
+    pub fn spread(
         &self,
         state: &State<'tcx>,
         operand: &mir::Operand<'tcx>,
