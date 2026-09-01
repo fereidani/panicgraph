@@ -187,19 +187,32 @@ impl Graphed {
     /// Reads one disassembly listing into the graph.
     fn read(&mut self, listing: &str) {
         let mut current: Option<String> = None;
+        let mut taking = false;
         for line in listing.lines() {
             if let Some(label) = function_label(line) {
                 self.calls.entry(label.clone()).or_default();
                 current = Some(label);
+                taking = false;
                 continue;
             }
             let Some(function) = &current else { continue };
             if let Some(target) = relocation_target(line) {
-                self.calls
-                    .entry(function.clone())
-                    .or_default()
-                    .insert(target);
+                if taking {
+                    // Handing a function's address to something else is
+                    // not calling it. Where the pointer goes is invisible
+                    // here, so the function is left open rather than
+                    // credited with reaching what it only names.
+                    self.open.insert(function.clone());
+                } else {
+                    self.calls
+                        .entry(function.clone())
+                        .or_default()
+                        .insert(target);
+                }
                 continue;
+            }
+            if let Some(word) = mnemonic(line) {
+                taking = word.starts_with("lea");
             }
             // A call through a bare register has no relocation to name its
             // target. A load-and-call through the GOT is not one: its
@@ -259,6 +272,20 @@ fn function_label(line: &str) -> Option<String> {
         return None;
     }
     Some(name.to_owned())
+}
+
+/// The mnemonic of a disassembled instruction line.
+///
+/// A relocation line carries an address too, so it is told apart by the
+/// relocation kind that follows it rather than by shape.
+fn mnemonic(line: &str) -> Option<&str> {
+    let (address, rest) = line.split_once(':')?;
+    let address = address.trim();
+    if address.is_empty() || !address.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let word = rest.split_whitespace().next()?;
+    (!word.starts_with("R_")).then_some(word)
 }
 
 /// The symbol a relocation line points at, when it is code.
