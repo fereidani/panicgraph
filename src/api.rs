@@ -11,7 +11,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
-    Body, Category, CategorySet, FuncId, Graph, Solution, Solver, Terminal,
+    Body, Category, CategorySet, EdgeKind, FuncId, Graph, Solution, Solver,
+    Terminal,
     category::ALL,
     solve::{Edges, Policy},
     util::{Map, Set},
@@ -385,9 +386,13 @@ pub fn children_of(rows: &[FlameRow]) -> Map<usize, Vec<usize>> {
     children
 }
 
-/// Frames that stand for a call rather than a module or a panic.
-const EDGE_KINDS: [&str; 5] =
-    ["static", "drop", "vtable", "fn-ptr", "unresolved"];
+/// Whether a frame stands for a call rather than a module or a panic.
+///
+/// Read from the kinds themselves, so an edge kind added later folds the
+/// way the rest do instead of quietly stopping the chain.
+fn is_edge(kind: &str) -> bool {
+    EdgeKind::ALL.iter().any(|edge| edge.name() == kind)
+}
 
 /// Folds runs of single calls into the frame above them.
 ///
@@ -409,9 +414,7 @@ pub fn fold_chains(rows: &[FlameRow]) -> Vec<FlameRow> {
             let only = kids[0];
             let row = &rows[only];
             let grand = children.get(&only).cloned().unwrap_or_default();
-            if row.category.is_some()
-                || !EDGE_KINDS.contains(&row.kind)
-                || grand.is_empty()
+            if row.category.is_some() || !is_edge(row.kind) || grand.is_empty()
             {
                 break;
             }

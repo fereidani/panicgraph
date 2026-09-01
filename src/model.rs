@@ -60,6 +60,16 @@ pub enum EdgeKind {
 }
 
 impl EdgeKind {
+    /// Every edge kind, so a caller listing them cannot miss one.
+    pub const ALL: [Self; 6] = [
+        Self::Static,
+        Self::Drop,
+        Self::Vtable,
+        Self::FnPtr,
+        Self::Generic,
+        Self::Unresolved,
+    ];
+
     /// Returns whether the edge is exact rather than a candidate.
     #[must_use]
     pub const fn is_exact(self) -> bool {
