@@ -132,55 +132,26 @@ const MUST_NOT_PANIC: &[(&str, &str)] = &[
     ("must_copy_into_prefix", "explicit"),
 ];
 
-/// The functions that must be reported with nothing at all.
-const MUST_BE_CLEAN: &[&str] = &[
-    "clean_divide_by_constant",
+/// The functions that must be reported with nothing at all in a release
+/// build, on top of the ones that must also stay clean in a debug build.
+///
+/// The two lists are disjoint so that a name is written once: the debug
+/// list is a part of the clean set rather than a copy of part of it, and
+/// the two cannot drift apart.
+const MUST_BE_CLEAN_IN_RELEASE: &[&str] = &[
     "clean_fold",
     "clean_count_zeros",
     "clean_sum_by_get",
     "clean_assert_true",
-    "clean_guarded_divide",
-    "clean_guarded_divide_ne",
-    "clean_guarded_remainder",
     "clean_guarded_widening",
-    "clean_modulo_index",
-    "clean_masked_index",
-    "clean_guarded_index",
-    "clean_guarded_index_flipped",
-    "clean_while_index",
-    "clean_nonzero_divide",
     "clean_zeroed_int",
-    "clean_divide_by_max",
-    "clean_remainder_by_max",
     "clean_divide_by_min_plus_one",
-    "clean_divide_by_clamp",
-    "clean_divide_by_helper",
-    "clean_divide_by_either_arm",
     "clean_index_after_empty_guard",
     "clean_index_after_length_guard",
     "clean_masked_index_offset",
-    "clean_precondition_met",
-    "Cursor::clean_field_index",
-    "Cursor::clean_field_divide",
-    "clean_byte_index",
-    "clean_unwrap_built",
-    "clean_unwrap_matched",
-    "clean_unwrap_ok",
-    "clean_match_panic",
     "clean_nonnull_of_place",
-    "clean_generic_guard",
     "clean_guard_before_call",
     "Window::clean_window_read",
-    "clean_shifted_index",
-    "clean_shifted_left_index",
-    "clean_or_divide",
-    "clean_or_index",
-    "clean_xor_index",
-    "clean_divided_index",
-    "clean_remainder_by_bounded",
-    "clean_leading_zeros_index",
-    "clean_trailing_zeros_index",
-    "clean_count_ones_index",
     "clean_range_loop",
     "clean_option_carries_index",
     "clean_copy_same_length",
@@ -284,18 +255,22 @@ const MUST_BE_CLEAN_IN_DEBUG: &[&str] = &[
     "clean_count_ones_index",
 ];
 
+/// The categories one function was reported with, if it was reported.
+fn found(
+    reported: &[(String, Vec<String>)],
+    name: &str,
+) -> Option<Vec<String>> {
+    reported
+        .iter()
+        .find(|(function, _)| function == name)
+        .map(|(_, categories)| categories.clone())
+}
+
 #[test]
 fn a_known_crate_reports_exactly_its_panics() {
     let reported = analyse_fixture("release", &[]);
-    let found = |name: &str| {
-        reported
-            .iter()
-            .find(|(function, _)| function == name)
-            .map(|(_, categories)| categories.clone())
-    };
-
     for (function, category) in MUST_PANIC {
-        let categories = found(function).unwrap_or_else(|| {
+        let categories = found(&reported, function).unwrap_or_else(|| {
             panic!("{function} can panic with {category} and was not reported")
         });
         assert!(
@@ -306,7 +281,7 @@ fn a_known_crate_reports_exactly_its_panics() {
     }
 
     for (function, category) in MUST_NOT_PANIC {
-        let categories = found(function).unwrap_or_default();
+        let categories = found(&reported, function).unwrap_or_default();
         assert!(
             !categories.iter().any(|c| c == category),
             "{function} cannot panic with {category}, but was reported with \
@@ -314,19 +289,22 @@ fn a_known_crate_reports_exactly_its_panics() {
         );
     }
 
-    for function in MUST_BE_CLEAN {
+    for function in MUST_BE_CLEAN_IN_DEBUG
+        .iter()
+        .chain(MUST_BE_CLEAN_IN_RELEASE)
+    {
         assert!(
-            found(function).is_none(),
+            found(&reported, function).is_none(),
             "{function} cannot panic, but was reported with {:?}",
-            found(function)
+            found(&reported, function)
         );
     }
 
     for function in NOT_SETTLED {
         assert!(
-            found(function).is_some(),
+            found(&reported, function).is_some(),
             "{function} is recorded as one the analysis cannot settle, but \
-             it is now clean; move it to MUST_BE_CLEAN"
+             it is now clean; move it to one of the clean lists"
         );
     }
 }
@@ -334,24 +312,17 @@ fn a_known_crate_reports_exactly_its_panics() {
 #[test]
 fn a_debug_build_still_folds_the_guards() {
     let reported = analyse_fixture("debug", &[]);
-    let found = |name: &str| {
-        reported
-            .iter()
-            .find(|(function, _)| function == name)
-            .map(|(_, categories)| categories.clone())
-    };
-
     for function in MUST_BE_CLEAN_IN_DEBUG {
         assert!(
-            found(function).is_none(),
+            found(&reported, function).is_none(),
             "{function} cannot panic in a debug build either, but was \
              reported with {:?}",
-            found(function)
+            found(&reported, function)
         );
     }
 
     for (function, category) in MUST_PANIC {
-        let categories = found(function).unwrap_or_else(|| {
+        let categories = found(&reported, function).unwrap_or_else(|| {
             panic!(
                 "{function} can panic with {category} in a debug build and \
                  was not reported"
@@ -368,15 +339,8 @@ fn a_debug_build_still_folds_the_guards() {
 #[test]
 fn candidates_expand_dyn_and_pointer_calls() {
     let reported = analyse_fixture("release", &["--candidates"]);
-    let found = |name: &str| {
-        reported
-            .iter()
-            .find(|(function, _)| function == name)
-            .map(|(_, categories)| categories.clone())
-            .unwrap_or_default()
-    };
 
-    let dyn_call = found("must_dyn_speak");
+    let dyn_call = found(&reported, "must_dyn_speak").unwrap_or_default();
     assert!(
         dyn_call.iter().any(|c| c == "explicit"),
         "one implementation panics, so following candidates must surface \
@@ -388,7 +352,7 @@ fn candidates_expand_dyn_and_pointer_calls() {
          {dyn_call:?}"
     );
 
-    let pointer = found("must_fn_ptr");
+    let pointer = found(&reported, "must_fn_ptr").unwrap_or_default();
     assert!(
         pointer.iter().any(|c| c == "explicit"),
         "a reified function of this signature panics, got {pointer:?}"
