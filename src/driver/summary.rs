@@ -380,9 +380,11 @@ impl<'tcx> Folder<'_, 'tcx> {
                 }
             }
             let paired = held.fact.paired.and_then(named);
+            let spans = held.fact.spans.and_then(named);
             let fact = Fact {
                 order,
                 paired,
+                spans,
                 ..held.fact
             };
             if fact == Fact::default() {
@@ -392,8 +394,32 @@ impl<'tcx> Folder<'_, 'tcx> {
                 *slot = fact;
             }
         }
+        Self::cut_alike(&carried, &mut entry);
         self.handed_over(state, callee, &carried, &mut entry);
         entry
+    }
+
+    /// Pairs the arguments that were cut to one length.
+    ///
+    /// The length itself is a local of the caller, so it cannot travel; the
+    /// fact that two of the arguments share it can, and that is what the
+    /// callee's own check between them reads.
+    fn cut_alike(carried: &[Carried<'tcx>], entry: &mut State<'tcx>) {
+        for (index, held) in carried.iter().enumerate() {
+            let Some(cut) = held.fact.spans.filter(|_| held.alike) else {
+                continue;
+            };
+            let Some(other) = carried.iter().enumerate().position(|(at, p)| {
+                at != index && p.alike && p.fact.spans == Some(cut)
+            }) else {
+                continue;
+            };
+            let local = mir::Local::from_usize(index.saturating_add(1));
+            let peer = mir::Local::from_usize(other.saturating_add(1));
+            if let Some(slot) = entry.get_mut(local.as_usize()) {
+                slot.paired = Some(peer);
+            }
+        }
     }
 
     /// Records in the caller what the parts of a returned structure hold.

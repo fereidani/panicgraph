@@ -554,6 +554,11 @@ pub struct Fact<'tcx> {
     /// happened to hold their lengths. It is what settles the check a copy
     /// between two slices writes over them.
     pub paired: Option<mir::Local>,
+    /// The local holding how long the slice behind this one is.
+    ///
+    /// A slice cut to a length is exactly that long, so two cut to the same
+    /// length are as long as each other however that length was worked out.
+    pub spans: Option<mir::Local>,
 }
 
 impl<'tcx> Fact<'tcx> {
@@ -567,6 +572,7 @@ impl<'tcx> Fact<'tcx> {
             address: false,
             tag: None,
             paired: None,
+            spans: None,
         }
     }
 
@@ -580,6 +586,7 @@ impl<'tcx> Fact<'tcx> {
             address: false,
             tag: None,
             paired: None,
+            spans: None,
         }
     }
 
@@ -616,6 +623,7 @@ impl<'tcx> Fact<'tcx> {
             paired: (self.paired == other.paired)
                 .then_some(self.paired)
                 .flatten(),
+            spans: (self.spans == other.spans).then_some(self.spans).flatten(),
         }
     }
 
@@ -931,7 +939,14 @@ fn alike(op: mir::BinOp, left: Fact<'_>, right: Fact<'_>) -> Option<bool> {
     else {
         return None;
     };
-    if here != there && left.paired != Some(there) && right.paired != Some(here)
+    // Two slices cut to one length, or as long as the same third, are as
+    // long as each other.
+    let together = (left.paired.is_some() && left.paired == right.paired)
+        || (left.spans.is_some() && left.spans == right.spans);
+    if here != there
+        && !together
+        && left.paired != Some(there)
+        && right.paired != Some(here)
     {
         return None;
     }

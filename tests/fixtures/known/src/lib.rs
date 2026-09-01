@@ -1219,3 +1219,17 @@ pub fn must_copy_prefix_of_other(src: &[u8], dst: &mut [u8], other: &[u8]) {
     }
     dst.copy_from_slice(&src[..other.len()]);
 }
+
+/// Clean. Both slices are cut to the same length, so the check the copy
+/// writes over the two of them cannot fail.
+pub fn clean_copy_the_shorter(dst: &mut [u8], src: &[u8]) {
+    let n = dst.len().min(src.len());
+    dst[..n].copy_from_slice(&src[..n]);
+}
+
+/// Reaches `explicit`. Two lengths that are each in range need not match.
+pub fn must_copy_two_lengths(src: &[u8], dst: &mut [u8], n: usize, m: usize) {
+    if n <= src.len() && m <= dst.len() {
+        dst[..m].copy_from_slice(&src[..n]);
+    }
+}

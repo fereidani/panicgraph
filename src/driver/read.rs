@@ -103,9 +103,18 @@ impl<'tcx> Folder<'_, 'tcx> {
                         Some(Value::Length(of)) => Some(of),
                         _ => None,
                     };
+                    // A slice cut to a length is exactly that long, so
+                    // one cut to the same length again is as long as it.
+                    let spans = match meta {
+                        mir::Operand::Copy(from) | mir::Operand::Move(from) => {
+                            from.as_local().filter(|of| !self.escapes(*of))
+                        }
+                        _ => None,
+                    };
                     return Fact {
                         extent: held.and_then(Value::bounds),
                         paired,
+                        spans,
                         ..Fact::default()
                     };
                 }
@@ -151,7 +160,10 @@ impl<'tcx> Folder<'_, 'tcx> {
         let held = Self::known_at(state, place.local);
         Fact {
             extent: held.extent,
-            paired: held.paired,
+            // A reborrow of everything a pointer points at is as long as
+            // the slice behind that pointer, which is the claim itself.
+            paired: held.paired.or(Some(place.local)),
+            spans: held.spans,
             ..blank
         }
     }
@@ -574,6 +586,7 @@ impl<'tcx> Folder<'_, 'tcx> {
                 },
                 extent: own.extent.or(at_root.extent),
                 paired: own.paired.or(at_root.paired),
+                spans: own.spans.or(at_root.spans),
                 address: own.address || at_root.address,
                 ..own
             }

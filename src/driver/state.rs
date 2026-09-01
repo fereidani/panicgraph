@@ -414,6 +414,9 @@ pub fn forget(state: &mut State<'_>, local: mir::Local) {
         if slot.paired == Some(local) {
             slot.paired = None;
         }
+        if slot.spans == Some(local) {
+            slot.spans = None;
+        }
     }
     if let Some(slot) = state.get_mut(local.as_usize()) {
         *slot = Fact::default();
@@ -438,6 +441,7 @@ pub fn retire(state: &mut State<'_>, local: mir::Local) {
         slot.same = held.same;
         slot.extent = held.extent;
         slot.paired = held.paired;
+        slot.spans = held.spans;
         if matches!(held.value, Some(Value::Length(_))) {
             slot.value = held.value;
         }

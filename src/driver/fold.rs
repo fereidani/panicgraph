@@ -351,6 +351,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                     *cell = fact;
                 }
                 self.constructed(state, place, rvalue);
+                self.sized_by(state, place, rvalue);
             }
             mir::StatementKind::SetDiscriminant {
                 place,
@@ -470,6 +471,50 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         }
     }
 
+    /// Records that the length a slice was built from is that slice's
+    /// length.
+    ///
+    /// A fat pointer takes its metadata from a local, so from there on that
+    /// local holds how long what it points at is. Saying so is what makes
+    /// two slices cut to one length compare equal, which is the check a
+    /// copy between them writes.
+    fn sized_by(
+        &self,
+        state: &mut State<'tcx>,
+        place: &mir::Place<'tcx>,
+        rvalue: &mir::Rvalue<'tcx>,
+    ) {
+        let mir::Rvalue::Aggregate(kind, fields) = rvalue else {
+            return;
+        };
+        if !matches!(&**kind, mir::AggregateKind::RawPtr(..)) {
+            return;
+        }
+        let Some(mir::Operand::Copy(from) | mir::Operand::Move(from)) =
+            fields.iter().nth(1)
+        else {
+            return;
+        };
+        let (Some(local), Some(slot)) = (from.as_local(), self.slot_of(place))
+        else {
+            return;
+        };
+        // A local the walk already reads as something says more than this.
+        if self.escapes(local)
+            || state
+                .get(local.as_usize())
+                .is_none_or(|held| held.value.is_some())
+        {
+            return;
+        }
+        if let Some(cell) = state.get_mut(local.as_usize()) {
+            *cell = Fact {
+                same: cell.same,
+                ..Self::measuring(Value::Length(slot))
+            };
+        }
+    }
+
     /// Applies a write to a place, forgetting whatever it could reach.
     ///
     /// A write into part of a place can land anywhere inside it, so every
@@ -584,6 +629,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             order: Ranks::none_held(),
             same: None,
             paired: None,
+            spans: None,
             ..held
         }
     }
