@@ -333,15 +333,25 @@ fn shared_build_dir() -> Result<Option<PathBuf>> {
 }
 
 /// Reads every artifact in a directory.
+///
+/// The names are read in sorted order rather than the order the filesystem
+/// hands them out. The merge order decides which instantiation of a generic
+/// function names the location a report prints, so leaving it to the
+/// filesystem would let two machines describe the same build differently.
 fn load(dir: &Path) -> Result<Vec<Artifact>> {
-    let mut out = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
     for entry in fs::read_dir(dir)
         .with_context(|| format!("could not read {}", dir.display()))?
     {
         let path = entry?.path();
-        if path.extension().is_none_or(|e| e != "json") {
-            continue;
+        if path.extension().is_some_and(|e| e == "json") {
+            paths.push(path);
         }
+    }
+    paths.sort();
+
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
         let text = fs::read(&path)
             .with_context(|| format!("could not read {}", path.display()))?;
         let artifact: Artifact = serde_json::from_slice(&text)
