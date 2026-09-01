@@ -358,16 +358,22 @@ impl Thresholds {
     /// Records a value the body compares against, keeping the table
     /// sorted and free of repeats.
     pub fn add(&mut self, value: u128) {
-        if self.held >= STOPS || self.steps[..self.held].contains(&value) {
+        let Some(held) = self
+            .steps
+            .get(..self.held)
+            .filter(|held| self.held < STOPS && !held.contains(&value))
+        else {
             return;
-        }
-        let at = self.steps[..self.held]
+        };
+        let at = held
             .iter()
             .position(|step| *step > value)
             .unwrap_or(self.held);
         self.steps.copy_within(at..self.held, at.saturating_add(1));
-        self.steps[at] = value;
-        self.held = self.held.saturating_add(1);
+        if let Some(slot) = self.steps.get_mut(at) {
+            *slot = value;
+            self.held = self.held.saturating_add(1);
+        }
     }
 
     /// The end a range's top is pushed out to.
@@ -376,7 +382,7 @@ impl Thresholds {
         if end.is_signed() {
             return ceiling;
         }
-        for step in &self.steps[..self.held] {
+        for step in self.steps.get(..self.held).unwrap_or_default() {
             if *step >= end.bits && *step <= ceiling.bits {
                 return Known { bits: *step, ..end };
             }
@@ -390,7 +396,8 @@ impl Thresholds {
         if end.is_signed() {
             return floor;
         }
-        for step in self.steps[..self.held].iter().rev() {
+        for step in self.steps.get(..self.held).unwrap_or_default().iter().rev()
+        {
             if *step <= end.bits {
                 return Known { bits: *step, ..end };
             }

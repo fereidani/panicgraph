@@ -1070,10 +1070,12 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         // twice teaches nothing the first reading did not.
         let mut found: [Option<Compared<'tcx>>; 2] = [None, None];
         for candidate in measured.into_iter().chain(chained).flatten() {
-            match found {
-                [None, _] => found[0] = Some(candidate),
-                [Some(first), None] if first.local != candidate.local => {
-                    found[1] = Some(candidate);
+            match &mut found {
+                [slot @ None, _] => *slot = Some(candidate),
+                [Some(first), slot @ None]
+                    if first.local != candidate.local =>
+                {
+                    *slot = Some(candidate);
                 }
                 _ => {}
             }
