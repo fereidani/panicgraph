@@ -422,10 +422,9 @@ Read these before trusting a clean result.
   about `v[i + 3]` in a build where the addition may wrap. An invariant held
   further out is still reported: one a caller establishes and the callee
   only assumes, and one a structure keeps across the methods that maintain
-  it. A function that panics for some input
-  is reported whatever its callers do, which is the honest answer for the
-  function and the reason a caller that rules the input out is cleared
-  separately.
+  it. A function that panics for some input is reported whatever its
+  callers do, which is the honest answer for the function and the reason a
+  caller that rules the input out is cleared separately.
 - **The toolchain is pinned.** The driver links against compiler internals,
   which have no stable interface, so it is built for one nightly at a time.
   Updating the toolchain means reinstalling; the tool says so rather than
