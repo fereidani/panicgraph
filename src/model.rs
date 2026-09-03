@@ -226,6 +226,10 @@ pub struct Reified {
 
 /// Everything the solver needs to know about one function.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag records an independent fact about the body"
+)]
 pub struct Body {
     /// The function's unique key.
     pub key: FuncKey,
@@ -249,6 +253,11 @@ pub struct Body {
     pub foreign: bool,
     /// True when the function is defined in the crate under analysis.
     pub local: bool,
+    /// True when the body was read out of one of the crate's test targets,
+    /// which add instantiations of the crate's generic functions to what
+    /// its own build reported and nothing else.
+    #[serde(default)]
+    pub from_tests: bool,
 }
 
 impl Body {
@@ -278,6 +287,7 @@ impl Body {
             opaque: true,
             foreign: false,
             local: false,
+            from_tests: false,
         }
     }
 }

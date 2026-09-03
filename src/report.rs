@@ -28,6 +28,10 @@ pub(crate) struct Finding<'a> {
     /// What the instantiations the build makes raise, and whether there
     /// are any.
     instantiated: Option<CategorySet>,
+    /// Whether the crate's own build has the function at all. A name seen
+    /// only in a test crate is a test's own generic helper, not a function
+    /// of the crate.
+    owned: bool,
 }
 
 impl Finding<'_> {
@@ -168,6 +172,7 @@ pub(crate) fn collect<'a>(
                 categories: CategorySet::EMPTY,
                 written: CategorySet::EMPTY,
                 instantiated: None,
+                owned: false,
             });
             findings.len().saturating_sub(1)
         };
@@ -175,6 +180,7 @@ pub(crate) fn collect<'a>(
             continue;
         };
         finding.ids.push(id);
+        finding.owned |= !body.from_tests;
         if body.key.is_open() {
             finding.written = finding.written.union(categories);
         } else {
@@ -190,7 +196,7 @@ pub(crate) fn collect<'a>(
                 .union(instantiated.unwrap_or(CategorySet::EMPTY)),
         };
     }
-    findings.retain(|finding| !finding.categories.is_empty());
+    findings.retain(|finding| finding.owned && !finding.categories.is_empty());
     findings.sort_by(|a, b| a.name.cmp(b.name));
     findings
 }

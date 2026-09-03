@@ -30,6 +30,7 @@ impl BodyBuilder {
                 opaque: false,
                 foreign: false,
                 local: true,
+                from_tests: false,
             },
         }
     }

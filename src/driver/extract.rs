@@ -218,6 +218,7 @@ impl<'tcx> Extractor<'tcx> {
             // agree: a foreign item declared here reports the local crate
             // name, and saying it is not local contradicts that.
             body.local = self.reported(inst);
+            body.from_tests = self.tcx.sess.opts.test;
             // A function the compiler guarantees does not unwind raises no
             // panic even though its body is unavailable. Allocator shims are
             // the common case.
@@ -249,6 +250,7 @@ impl<'tcx> Extractor<'tcx> {
             opaque: false,
             foreign: false,
             local: self.reported(inst),
+            from_tests: self.tcx.sess.opts.test,
         });
         raw.successors
     }
@@ -275,7 +277,11 @@ impl<'tcx> Extractor<'tcx> {
             return false;
         }
         let root = self.tcx.typeck_root_def_id(did);
-        self.of_package(did) && self.tcx.generics_of(root).count() > 0
+        self.of_package(did)
+            && self
+                .tcx
+                .generics_of(root)
+                .requires_monomorphization(self.tcx)
     }
 
     /// Whether a function belongs to the library the package builds.
