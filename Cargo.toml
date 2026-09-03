@@ -13,7 +13,6 @@ license = "MIT OR Apache-2.0"
 # was built with, which rust-toolchain.toml selects.
 description = "Reports which functions can panic, why, and through what call path."
 repository = "https://github.com/fereidani/panicgraph"
-readme = "README.md"
 categories = [
     "development-tools",
     "development-tools::debugging",
