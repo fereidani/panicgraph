@@ -184,6 +184,12 @@ unwrap_opt can panic with `unwrap`:
 For a deeper path this prints each call in turn, marking the ones that run
 only while an earlier panic is unwinding.
 
+A finding every call reaches is marked `(always)` in the report, and
+`always` in the machine readable one: no path through the function returns
+without raising there, no loop can spin instead, and the check, where it is
+one, fails every time. It is the difference between a stub that is not
+written yet and a check some argument can fail.
+
 ## Gating a build
 
 `check` fails when a function that must not panic can. With no gate named, no
@@ -399,7 +405,10 @@ written at the call site keeps none of the arms that reject the orderings it
 is not. What folding a callee found is kept, under the body and the claims
 it was handed, so the check the standard library writes under every slice
 read is folded once rather than at every site, and a site short of budget
-reads the answer a fuller walk found.
+reads the answer a fuller walk found. A callee that no path returns from
+under the arguments it was handed never comes back, so nothing written
+after the call runs on that path: the panic it raises instead is the
+call's own.
 
 How long a slice is travels with it. An array unsized to a slice is as long
 as its type says, a slice built from a pointer and a count is as long as the
@@ -414,6 +423,13 @@ container keeps as a field is ordered the same way as one a slice carries,
 so `v[at]` under `if at < v.len()` is in range for a vector, a deque or a
 string, whichever of the two names the check reads it by. A byte string, or
 a slice a constant holds, is as long as the constant says.
+
+A guard between two values the analysis cannot settle still orders the
+pair, and that is what the check between the two ends of `v[start..end]`
+asks: under `start <= end`, it cannot fail. One such ordering is followed
+through another, so an index below a bound that is itself at most a length
+is below that length, and an index below one slice is inside a second slice
+found to be as long.
 
 How far under a length a value sits is kept as a count rather than a yes or
 no. `i + 16 <= v.len()` leaves `i` sixteen short of the length, `i + 3` is
@@ -481,10 +497,11 @@ Read these before trusting a clean result.
   something. `check --fail-on-unknown` refuses to treat the two alike.
 - **Dynamic dispatch is not resolved, only named.** A `dyn Trait` call
   reports `dyn-call` and a function pointer call reports `fn-pointer`.
-  `--candidates` expands both: every concrete implementation of the trait,
-  and every reachable function reified to a pointer of a matching
-  signature, joins the graph as a candidate edge, so the report shows what
-  the call could actually do. The category stays either way, because
+  `--candidates` expands both: every concrete implementation of the trait
+  whose type the reachable code makes into a trait object, and every
+  reachable function reified to a pointer of a matching signature, joins
+  the graph as a candidate edge, so the report shows what the call could
+  actually do. The category stays either way, because
   candidates narrow the unknown rather than close it, and `--static-only`
   still drops the edges entirely. A call a generic function makes through
   one of its bounds reports `generic-bound`, since which implementation
