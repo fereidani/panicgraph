@@ -147,6 +147,30 @@ panicgraph --only unwrap,index          # report just these
 panicgraph kinds                        # list the categories
 ```
 
+## Generic functions
+
+A generic function is analysed as written, with its parameters left open,
+so a check on a const parameter or on the size of a type parameter is
+reported, and a call through a bound reports `generic-bound`. That is the
+honest answer for the function. For the answer about the uses the build
+makes of it:
+
+```
+panicgraph --generics instantiated
+```
+
+reports each generic function through the instantiations the build makes,
+and falls back to the body as written only where nothing instantiates it. A
+library's own code rarely instantiates its public interface, so
+
+```
+panicgraph --with-tests --generics instantiated
+```
+
+builds the crate's test targets as well and reads the instantiations they
+make. The tests themselves are not reported, and neither is the crate's
+code compiled again for its unit tests.
+
 ## Explaining one function
 
 ```
@@ -241,6 +265,12 @@ Upgrade either one deliberately, and write the record again in the same commit
 with `panicgraph baseline panicgraph.json`, so the baseline and the tool that
 reads it move together.
 
+`--mir-opt-level 3` builds the analysis at the compiler's next MIR
+optimization level, where the compiler's own dataflow constant propagation
+settles more checks before the analysis reads a body. The artifact then
+differs from a plain build, so the report names the level, and a baseline
+records it.
+
 `--format github` writes workflow commands, so a failure lands on the line of
 the function it is about instead of at the bottom of a log:
 
@@ -307,15 +337,29 @@ count overflow's inlined trap. The verdict annotates the finding and never
 removes it: absence from one artifact is a fact about that build, not a
 proof about the source.
 
+The sweep is also read the other way round. A function the analysis
+reports clean whose compiled code still reaches a panic entry point is
+listed after the findings, so a check the analysis settled that the
+optimizer kept is in view rather than hidden behind the proof. It is worth
+a look rather than a verdict: the artifact reads a function with its
+callees folded in, so a check a callee keeps for other callers counts
+against it, a caught panic still names its entry point, and a check the
+optimizer could not settle is kept whether or not it can fail. A function
+reported with a category that names unread code is left out, since that
+admits anything already.
+
 ## Measuring precision over a corpus
 
 `scripts/corpus.sh` runs the analysis over a list of crate directories and
 prints one markdown table row per crate: functions analysed, findings, how
-many findings carry only assumed categories, and the busiest categories.
-Running it over crates whose panic freedom is proven externally turns every
-non-assumed finding into a false positive to investigate, and keeping the
-table in a log makes precision drift visible between toolchains and
-releases.
+many findings carry only assumed categories, how many distinct definition
+sites the rest come from, and the busiest categories. Running it over
+crates whose panic freedom is proven externally turns every non-assumed
+finding into a false positive to investigate, and keeping the table in a
+log makes precision drift visible between toolchains and releases. The
+column of distinct sites is the one to watch on a crate that stamps out one
+function per array size or integer type with a macro, where a single check
+counts once there and many times among the findings.
 
 ## How it works
 
@@ -352,7 +396,10 @@ unable to raise leaves nothing behind, and neither does the cleanup path
 only a raise could have reached. An operation the compiler defines rather
 than a body raises nothing at all, so an atomic read whose ordering is
 written at the call site keeps none of the arms that reject the orderings it
-is not.
+is not. What folding a callee found is kept, under the body and the claims
+it was handed, so the check the standard library writes under every slice
+read is folded once rather than at every site, and a site short of budget
+reads the answer a fuller walk found.
 
 How long a slice is travels with it. An array unsized to a slice is as long
 as its type says, a slice built from a pointer and a count is as long as the
@@ -365,7 +412,16 @@ length is below that length too. Two slices cut to one length are as long
 as each other, whether the length was named or worked out. A length a
 container keeps as a field is ordered the same way as one a slice carries,
 so `v[at]` under `if at < v.len()` is in range for a vector, a deque or a
-string, whichever of the two names the check reads it by.
+string, whichever of the two names the check reads it by. A byte string, or
+a slice a constant holds, is as long as the constant says.
+
+How far under a length a value sits is kept as a count rather than a yes or
+no. `i + 16 <= v.len()` leaves `i` sixteen short of the length, `i + 3` is
+then thirteen short and in range, and stepping `i` by sixteen leaves it at
+most the length, which is where the next turn of the loop starts from. The
+count only carries where the arithmetic cannot wrap, which a value under the
+length of a slice of sized elements guarantees: such a slice is at most half
+the address space long.
 
 A comparison is read from both sides and for what each side's range says
 about the other, so `lo < n` leaves `n` above zero for an unsigned pair and
@@ -385,7 +441,9 @@ keeps that bound.
 A claim belongs to the place it was read from rather than to whichever local
 happened to hold it, so a guard on `self.pos` still stands at the next read
 of that field, and a write to it, a call, or a pointer that could be aimed
-at it takes the claim away again. The element an index names is such a
+at it takes the claim away again. A pointer counts from where it is taken,
+so what a guard proved about a local before its address was handed out
+still stands up to that point. The element an index names is such a
 place, and a write to the index names a different one. A shared reference is
 not such a pointer, since nothing is written through one, and neither is a
 pointer taken through another: storing into `v[i]` cannot change how long
@@ -438,11 +496,14 @@ Read these before trusting a clean result.
   not "will it". Folding settles a check against constants, against what a
   branch above it proves, against what a type admits, against how long a
   slice is, and against what walking a callee shows it returns or cannot
-  raise. A bound a guard re-establishes on every turn of a loop is followed;
-  one that is only implied is not, and `i + 16 <= v.len()` says nothing
-  about `v[i + 3]` in a build where the addition may wrap. An invariant held
-  further out is still reported: one a caller establishes and the callee
-  only assumes, and one a structure keeps across the methods that maintain
+  raise. A bound a guard re-establishes on every turn of a loop is followed,
+  and so is what a guard leaves to spare: `i + 16 <= v.len()` puts
+  `v[i + 3]` in range once `i` is known to be no larger than the length,
+  which is what rules out the sum wrapping round. The guard on the sum alone
+  does not, since in a build without overflow checks the sum can wrap. An
+  invariant held further out is still reported: one a caller establishes
+  and the callee only assumes, and one a structure keeps across the methods
+  that maintain
   it. A function that panics for some input is reported whatever its
   callers do, which is the honest answer for the function and the reason a
   caller that rules the input out is cleared separately.
