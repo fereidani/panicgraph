@@ -178,6 +178,8 @@ impl<'tcx> Folder<'_, 'tcx> {
                 "len"
                     | "max"
                     | "min"
+                    | "integer_max"
+                    | "integer_min"
                     | "ctlz"
                     | "ctlz_nonzero"
                     | "cttz"
@@ -195,13 +197,18 @@ impl<'tcx> Folder<'_, 'tcx> {
                 Some(Folder::measuring(Value::Length(of)))
             }
             // Picking the larger or the smaller of two numbers is what
-            // pins a value away from the end of its range, and the two are
-            // read here rather than folded because the body compares
-            // through references the walk does not follow. A primitive
-            // cannot carry another crate's implementation of the trait, so
-            // the body reached is the one this claim describes.
-            "cmp::Ord::max" => self.chosen(state, true, args),
-            "cmp::Ord::min" => self.chosen(state, false, args),
+            // pins a value away from the end of its range. The pair is read
+            // here rather than folded: the trait method compares through
+            // references the walk does not follow, and the intrinsic the
+            // primitive implementations lower to has no body at all. A
+            // primitive cannot carry another crate's implementation of the
+            // trait, so the body reached is the one this claim describes.
+            "cmp::Ord::max" | "intrinsics::integer_max" => {
+                self.chosen(state, true, args)
+            }
+            "cmp::Ord::min" | "intrinsics::integer_min" => {
+                self.chosen(state, false, args)
+            }
             // Counting the bits of a value, set or leading or trailing
             // zero, can never answer above the width of the type it was
             // read at, which is what clears the table every such count is
