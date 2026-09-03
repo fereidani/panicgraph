@@ -81,6 +81,26 @@ pub struct Scope {
     /// `baseline`, which read the categories rather than the count.
     #[arg(long = "std", value_enum, global = true)]
     pub std_mode: Option<Std>,
+
+    /// The compiler's MIR optimization level to build the analysis with.
+    ///
+    /// The compiler settles some checks itself before the analysis reads a
+    /// body, and a higher level settles more: level 3 turns on its own
+    /// dataflow constant propagation. The artifact then differs from the
+    /// one a plain build produces, so the report names the level.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=4), global = true)]
+    pub mir_opt_level: Option<u8>,
+
+    /// Build the crate's test targets as well, so the instantiations they
+    /// make of its generic functions join the analysis.
+    ///
+    /// Only those instantiations are reported: the tests themselves are
+    /// not, and the crate's own code compiled again for its unit tests is
+    /// not reported twice. A test build needs the dev-dependencies; one
+    /// that fails is said so and left out rather than failing the
+    /// analysis.
+    #[arg(long, global = true)]
+    pub with_tests: bool,
 }
 
 /// What the analysis is allowed to assume.
@@ -133,6 +153,18 @@ pub struct Policy {
     /// Include dependencies, not just the local crate.
     #[arg(long, global = true)]
     pub all_crates: bool,
+
+    /// How a generic function reports: as written, or through the
+    /// instantiations the build makes of it.
+    ///
+    /// As written, a generic body is read with its parameters left open, so
+    /// a check on a const parameter or on the size of a type parameter can
+    /// fail and a call through a bound is unknown. Instantiated reports
+    /// what the build's own uses of the function do, and falls back to the
+    /// written body only for a function nothing instantiates. Test crates
+    /// count as uses under `--with-tests`.
+    #[arg(long, value_enum, default_value = "written", global = true)]
+    pub generics: Generics,
 }
 
 /// What the user asked the tool to do.
@@ -197,6 +229,27 @@ pub struct Check {
     /// where visibility ended.
     #[arg(long)]
     pub fail_on_unknown: bool,
+}
+
+/// How generic functions report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Generics {
+    /// The body as written, with its parameters left open.
+    Written,
+    /// The instantiations the build makes, falling back to the written body
+    /// where there are none.
+    Instantiated,
+}
+
+impl Generics {
+    /// The name used on the command line and in reports.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Written => "written",
+            Self::Instantiated => "instantiated",
+        }
+    }
 }
 
 /// How closures report.
@@ -297,6 +350,12 @@ pub struct Args {
     pub profile: String,
     /// How the standard library is supplied.
     pub std_mode: StdMode,
+    /// The compiler's MIR optimization level, when one was asked for.
+    pub mir_opt_level: Option<u8>,
+    /// Build the test targets too, for the instantiations they make.
+    pub with_tests: bool,
+    /// How generic functions report.
+    pub generics: Generics,
     /// Output rendering.
     pub format: Format,
     /// Ignore vtable and function pointer edges.
@@ -360,6 +419,9 @@ impl Cli {
             only,
             profile: self.scope.profile,
             std_mode,
+            mir_opt_level: self.scope.mir_opt_level,
+            with_tests: self.scope.with_tests,
+            generics: self.policy.generics,
             format: self.format,
             static_only: self.policy.static_only,
             candidates: self.policy.candidates,

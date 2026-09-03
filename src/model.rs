@@ -29,11 +29,25 @@ impl fmt::Display for Loc {
 /// A globally unique identifier for one monomorphized function.
 ///
 /// This is the compiler's symbol name, which stays unique across crates and
-/// across instantiations of the same generic function.
+/// across instantiations of the same generic function. A generic function
+/// read as written has no symbol, so it is keyed by its path behind
+/// [`OPEN_PREFIX`] instead.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
 pub struct FuncKey(pub String);
+
+/// What the key of a generic function read as written starts with.
+pub const OPEN_PREFIX: &str = "generic:";
+
+impl FuncKey {
+    /// Whether the key names a generic function read as written, with its
+    /// parameters left open, rather than one instantiation of it.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.0.starts_with(OPEN_PREFIX)
+    }
+}
 
 impl fmt::Display for FuncKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -317,6 +331,10 @@ pub struct BuildConfig {
     pub overflow_checks: bool,
     /// How the standard library was supplied.
     pub std_mode: StdMode,
+    /// The compiler's MIR optimization level, when one was asked for
+    /// rather than left to the profile.
+    #[serde(default)]
+    pub mir_opt_level: Option<u8>,
 }
 
 /// One crate's contribution to the graph.

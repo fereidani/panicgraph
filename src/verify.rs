@@ -21,7 +21,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::{
-    Category, CategorySet, FuncKey, run,
+    Category, CategorySet, FuncId, FuncKey, Graph, Solution, run,
     util::{Map, Set},
 };
 
@@ -51,12 +51,25 @@ impl Verdict {
 }
 
 /// What one compiled function was seen to do.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct Facts {
-    /// Categories of the panic entry points reachable from it.
-    reaches: CategorySet,
+    /// What each panic entry point reachable from it could stand for. A
+    /// funnel serves several categories, so each entry point is kept as
+    /// the set of them rather than folded into one.
+    reaches: Vec<CategorySet>,
     /// Whether it reaches code the sweep cannot follow.
     open: bool,
+}
+
+/// A function the compiled artifact reaches a panic from that the analysis
+/// did not report it with.
+#[derive(Debug, Clone)]
+pub struct Missed {
+    /// The function.
+    pub id: FuncId,
+    /// What each entry point reached could stand for, none of which the
+    /// analysis reported.
+    pub reaches: Vec<CategorySet>,
 }
 
 /// Verdicts for every function the artifact defines.
@@ -81,13 +94,61 @@ impl Verdicts {
         let Some(facts) = self.facts.get(&key.0) else {
             return Verdict::Unverified;
         };
-        if facts.reaches.contains(category) {
+        if facts.reaches.iter().any(|set| set.contains(category)) {
             return Verdict::Confirmed;
         }
         if facts.open {
             return Verdict::Unverified;
         }
         Verdict::Absent
+    }
+
+    /// The functions the artifact reaches a panic from that the analysis
+    /// reported clean of it.
+    ///
+    /// This is the sweep read the other way round. A finding is looked up
+    /// in the artifact to confirm it; here every function the artifact
+    /// defines is looked up in the report, so a panic the analysis settled
+    /// that the optimizer nonetheless kept is surfaced rather than hidden
+    /// behind the proof. An entry point is missed when none of what it
+    /// could stand for was reported, leaving aside what the policy assumes
+    /// impossible, since that was never asked for, and leaving alone a
+    /// function reported with a category that stands for code the analysis
+    /// could not read, since that admits anything already.
+    ///
+    /// What is listed is worth a look rather than a verdict: the artifact
+    /// reads a function with its callees folded in, so a check a callee
+    /// keeps for other callers counts against this one, a panic caught
+    /// inside the function still names its entry point, and a check the
+    /// optimizer could not settle is kept whether or not it can fail.
+    #[must_use]
+    pub fn missed(&self, graph: &Graph, solution: &Solution) -> Vec<Missed> {
+        let assumed = solution.policy().suppressed;
+        let mut out = Vec::new();
+        for (id, body) in graph.locals() {
+            let Some(facts) = self.facts.get(&body.key.0) else {
+                continue;
+            };
+            let reported = solution.enabled(id);
+            if !reported.intersection(CategorySet::assumed()).is_empty() {
+                continue;
+            }
+            let reaches: Vec<CategorySet> = facts
+                .reaches
+                .iter()
+                .map(|set| set.difference(assumed))
+                .filter(|set| {
+                    !set.is_empty() && set.intersection(reported).is_empty()
+                })
+                .collect();
+            if !reaches.is_empty() {
+                out.push(Missed { id, reaches });
+            }
+        }
+        out.sort_by(|a, b| {
+            graph.body(a.id).display.cmp(&graph.body(b.id).display)
+        });
+        out
     }
 }
 
@@ -252,7 +313,9 @@ impl Graphed {
                         format!("{:#}", rustc_demangle::demangle(at));
                     match entry_categories(&readable) {
                         Some(set) => {
-                            facts.reaches = facts.reaches.union(set);
+                            if !facts.reaches.contains(&set) {
+                                facts.reaches.push(set);
+                            }
                         }
                         None => facts.open = true,
                     }

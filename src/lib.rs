@@ -34,7 +34,7 @@ pub use crate::{
     graph::{FuncId, Graph},
     model::{
         Artifact, Body, BuildConfig, CallSite, EdgeKind, FuncKey, Guard, Loc,
-        PanicSite, Reified, StdMode, UnwindOrigin,
+        OPEN_PREFIX, PanicSite, Reified, StdMode, UnwindOrigin,
     },
     solve::{Policy, Solution, Solver},
     witness::{Terminal, Witness},

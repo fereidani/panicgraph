@@ -6,9 +6,9 @@ use anyhow::Result;
 
 use crate::{
     Body, Category, CategorySet, FuncId, Graph, Solution, Terminal,
-    args::{Args, Closures, Format},
+    args::{Args, Closures, Format, Generics},
     util::Map,
-    verify::{Verdict, Verdicts},
+    verify::{Missed, Verdict, Verdicts},
     witness,
 };
 
@@ -23,6 +23,11 @@ pub(crate) struct Finding<'a> {
     /// them separately would print the same line several times.
     pub ids: Vec<FuncId>,
     pub categories: CategorySet,
+    /// What the body read as written raises, with its parameters open.
+    written: CategorySet,
+    /// What the instantiations the build makes raise, and whether there
+    /// are any.
+    instantiated: Option<CategorySet>,
 }
 
 impl Finding<'_> {
@@ -49,7 +54,9 @@ pub fn analysis(
         Format::Human => {
             human(graph, solution, args, &findings, verdicts, out);
         }
-        Format::Json => json(graph, &findings, args, verdicts, out)?,
+        Format::Json => {
+            json(graph, solution, &findings, args, verdicts, out)?;
+        }
         Format::Github => github(graph, &findings, args, out),
         // Handled before the report is built, because it draws the tree
         // rather than the list of findings.
@@ -84,11 +91,13 @@ fn verdict_of(
     }
 }
 
-/// Every function worth reporting, with the categories it reports under.
+/// Every function the report considers, with what it reports under, which
+/// may be nothing at all.
 ///
-/// The report and the gate have to agree about this, since a baseline one
-/// writes is what the other measures against, so both read it from here.
-pub(crate) fn reportable<'a>(
+/// A function that reports nothing still matters: an instantiation of a
+/// generic function that raises nothing is what the instantiation view
+/// reads instead of the body as written.
+fn considered<'a>(
     graph: &'a Graph,
     solution: &'a Solution,
     args: &'a Args,
@@ -100,7 +109,7 @@ pub(crate) fn reportable<'a>(
         let enabled = solution.enabled(id);
         let categories =
             args.only.map_or(enabled, |only| enabled.intersection(only));
-        (!categories.is_empty()).then_some((id, body, categories))
+        Some((id, body, categories))
     })
 }
 
@@ -128,13 +137,16 @@ pub(crate) fn reported_name<'a>(body: &'a Body, args: &Args) -> &'a str {
 /// solution: a run that names no finding has nothing to report.
 #[must_use]
 pub fn any_finding(graph: &Graph, solution: &Solution, args: &Args) -> bool {
-    reportable(graph, solution, args).next().is_some()
+    !collect(graph, solution, args).is_empty()
 }
 
 /// Selects the functions worth reporting, one entry per name.
 ///
 /// The report and the gate both group here, so a function that reports
-/// under one name cannot be gated under another.
+/// under one name cannot be gated under another. A generic function is
+/// read as written and once per instantiation, and which of those the
+/// name reports is the caller's choice: everything, or the instantiations
+/// alone where there are any.
 pub(crate) fn collect<'a>(
     graph: &'a Graph,
     solution: &'a Solution,
@@ -142,25 +154,67 @@ pub(crate) fn collect<'a>(
 ) -> Vec<Finding<'a>> {
     let mut findings: Vec<Finding<'a>> = Vec::new();
     let mut index: Map<(&str, &str), usize> = Map::default();
-    for (id, body, categories) in reportable(graph, solution, args) {
+    for (id, body, categories) in considered(graph, solution, args) {
         let name = reported_name(body, args);
         let key = (body.krate.as_str(), name);
-        if let Some(&at) = index.get(&key) {
-            let finding = &mut findings[at];
-            finding.ids.push(id);
-            finding.categories = finding.categories.union(categories);
+        let at = if let Some(&at) = index.get(&key) {
+            at
         } else {
             index.insert(key, findings.len());
             findings.push(Finding {
                 krate: &body.krate,
                 name,
-                ids: vec![id],
-                categories,
+                ids: Vec::new(),
+                categories: CategorySet::EMPTY,
+                written: CategorySet::EMPTY,
+                instantiated: None,
             });
+            findings.len().saturating_sub(1)
+        };
+        let Some(finding) = findings.get_mut(at) else {
+            continue;
+        };
+        finding.ids.push(id);
+        if body.key.is_open() {
+            finding.written = finding.written.union(categories);
+        } else {
+            let held = finding.instantiated.unwrap_or(CategorySet::EMPTY);
+            finding.instantiated = Some(held.union(categories));
         }
     }
+    for finding in &mut findings {
+        finding.categories = match (args.generics, finding.instantiated) {
+            (Generics::Instantiated, Some(instantiated)) => instantiated,
+            (_, instantiated) => finding
+                .written
+                .union(instantiated.unwrap_or(CategorySet::EMPTY)),
+        };
+    }
+    findings.retain(|finding| !finding.categories.is_empty());
     findings.sort_by(|a, b| a.name.cmp(b.name));
     findings
+}
+
+/// Writes the functions the artifact reaches a panic from that the report
+/// does not name them with.
+fn missed_prose(graph: &Graph, missed: &[Missed], out: &mut String) {
+    if missed.is_empty() {
+        return;
+    }
+    out.push_str(
+        "The compiled artifact reaches panics the analysis did not report:\n\n",
+    );
+    for entry in missed {
+        let body = graph.body(entry.id);
+        let _ = writeln!(out, "{}", body.display);
+        if let Some(loc) = &body.loc {
+            let _ = writeln!(out, "    defined at {loc}");
+        }
+        for set in &entry.reaches {
+            let _ = writeln!(out, "    {}", set.names().join(", or "));
+        }
+        out.push('\n');
+    }
 }
 
 /// Writes the human readable report.
@@ -215,6 +269,10 @@ fn human(
         out.push('\n');
     }
 
+    if let Some(verdicts) = verdicts {
+        missed_prose(graph, &verdicts.missed(graph, solution), out);
+    }
+
     let _ =
         writeln!(out, "Run `panicgraph why <function>` to see a call path.");
 }
@@ -260,6 +318,9 @@ fn header(graph: &Graph, args: &Args, found: usize, out: &mut String) {
         );
         let _ =
             writeln!(out, "    standard library   {}", config.std_mode.name());
+        if let Some(level) = config.mir_opt_level {
+            let _ = writeln!(out, "    mir opt level      {level}");
+        }
     }
     let suppressed = if args.suppress.is_empty() {
         "nothing".to_owned()
@@ -277,6 +338,7 @@ fn header(graph: &Graph, args: &Args, found: usize, out: &mut String) {
 /// Writes the machine readable report.
 fn json(
     graph: &Graph,
+    solution: &Solution,
     findings: &[Finding<'_>],
     args: &Args,
     verdicts: Option<&Verdicts>,
@@ -311,11 +373,31 @@ fn json(
             item
         })
         .collect();
-    let doc = serde_json::json!({
+    let mut doc = serde_json::json!({
         "config": graph.config(),
         "analysed": graph.len(),
         "findings": items,
     });
+    if let Some(verdicts) = verdicts {
+        let missed: Vec<serde_json::Value> = verdicts
+            .missed(graph, solution)
+            .iter()
+            .map(|entry| {
+                let body = graph.body(entry.id);
+                serde_json::json!({
+                    "function": reported_name(body, args),
+                    "crate": body.krate,
+                    "location": body.loc.as_ref().map(ToString::to_string),
+                    "reaches": entry
+                        .reaches
+                        .iter()
+                        .map(|set| set.names())
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        doc["missed"] = missed.into();
+    }
     out.push_str(&serde_json::to_string_pretty(&doc)?);
     out.push('\n');
     Ok(())

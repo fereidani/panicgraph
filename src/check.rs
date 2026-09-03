@@ -246,8 +246,10 @@ pub fn write_baseline(
         "version": BASELINE_VERSION,
         "profile": args.profile,
         "std_mode": args.std_mode.name(),
+        "mir_opt_level": args.mir_opt_level,
         "suppressed": args.suppress.names(),
         "closures": args.closures.name(),
+        "generics": args.generics.name(),
         "all_crates": args.all_crates,
         "static_only": args.static_only,
         "candidates": args.candidates,
@@ -342,6 +344,14 @@ pub fn read_baseline(
 /// decides which checks exist, and the suppression policy decides which are
 /// reported. A baseline written under any other answer describes a
 /// different question, so comparing against it means nothing.
+/// Names a MIR optimization level for a message.
+fn describe_level(level: Option<u8>) -> String {
+    level.map_or_else(
+        || "the profile's own mir opt level".to_owned(),
+        |level| format!("mir opt level {level}"),
+    )
+}
+
 fn settings_agree(doc: &Value, args: &Args) -> Result<()> {
     let field = |name: &str| {
         doc.get(name)
@@ -360,6 +370,16 @@ fn settings_agree(doc: &Value, args: &Args) -> Result<()> {
         std_mode == args.std_mode.name(),
         "it was written against the {std_mode} standard library, not {}",
         args.std_mode.name()
+    );
+    let level = doc
+        .get("mir_opt_level")
+        .and_then(Value::as_u64)
+        .and_then(|level| u8::try_from(level).ok());
+    ensure!(
+        level == args.mir_opt_level,
+        "it was written at {}, not {}",
+        describe_level(level),
+        describe_level(args.mir_opt_level)
     );
     let recorded = doc.get("suppressed").and_then(Value::as_array).map_or(
         CategorySet::EMPTY,
@@ -384,6 +404,16 @@ fn settings_agree(doc: &Value, args: &Args) -> Result<()> {
         closures == args.closures.name(),
         "it was written with closures reporting as {closures}, not {}",
         args.closures.name()
+    );
+    let generics = doc
+        .get("generics")
+        .and_then(Value::as_str)
+        .unwrap_or("written");
+    ensure!(
+        generics == args.generics.name(),
+        "it was written with generic functions reporting as {generics}, \
+         not {}",
+        args.generics.name()
     );
     let flag =
         |name: &str| doc.get(name).and_then(Value::as_bool).unwrap_or_default();

@@ -52,7 +52,7 @@ pub fn collect(args: &Args) -> Result<Vec<Artifact>> {
     let root = crate_root(args)?;
     let layout = prepare(&root, &driver, args)?;
 
-    build(args, &driver, &root, &layout)?;
+    build(args, &driver, &root, &layout, false)?;
     let mut artifacts = load(&layout.out)?;
 
     if artifacts.is_empty() {
@@ -60,8 +60,22 @@ pub fn collect(args: &Args) -> Result<Vec<Artifact>> {
         // wrapper never runs and records nothing. Discarding the analysis
         // build is the only way to observe a crate that is already cached.
         clear(&layout.target)?;
-        build(args, &driver, &root, &layout)?;
+        build(args, &driver, &root, &layout, false)?;
         artifacts = load(&layout.out)?;
+    }
+
+    if args.with_tests {
+        // The tests need the dev-dependencies and may not build at all,
+        // and what they add is more instantiations rather than the crate
+        // itself, so a failure is said and the analysis goes on without.
+        if let Err(err) = build(args, &driver, &root, &layout, true) {
+            eprintln!(
+                "warning: the test targets could not be built, so their \
+                 instantiations are left out: {err:#}"
+            );
+        } else {
+            artifacts = load(&layout.out)?;
+        }
     }
 
     if artifacts.is_empty() {
@@ -121,12 +135,13 @@ fn rustc_version() -> Result<Option<String>> {
     Ok((!line.is_empty()).then_some(line))
 }
 
-/// Runs one analysis build.
+/// Runs one analysis build, of the crate itself or of its test targets.
 fn build(
     args: &Args,
     driver: &Path,
     root: &Path,
     layout: &Layout,
+    tests: bool,
 ) -> Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(root)
@@ -136,6 +151,12 @@ fn build(
         .arg("--target-dir")
         .arg(&layout.target);
 
+    // Benches are left out: one without the harness is an ordinary
+    // binary, and everything in it would then be reported as the crate's
+    // own.
+    if tests {
+        cmd.arg("--tests");
+    }
     if let Some(pkg) = &args.package {
         cmd.arg("--package").arg(pkg);
     }
@@ -146,14 +167,18 @@ fn build(
             .arg(host_triple()?);
     }
 
-    // Cargo probes the compiler with a crate read from standard input, so
-    // whatever the caller left on it would become that crate. The build
-    // reads nothing from it, so it is closed here rather than inherited.
-    cmd.stdin(std::process::Stdio::null())
+    // The build reads nothing from standard input, so it is handed a pipe
+    // with nothing behind it rather than what the caller left there, and
+    // rather than the null device, which is not on every machine what it
+    // should be.
+    cmd.stdin(std::process::Stdio::piped())
         .env("RUSTC_WRAPPER", driver)
         .env("PANICGRAPH_OUT", &layout.out)
         .env("PANICGRAPH_PROFILE", &args.profile)
         .env("PANICGRAPH_STD_MODE", args.std_mode.name());
+    if let Some(level) = args.mir_opt_level {
+        cmd.env("PANICGRAPH_MIR_OPT_LEVEL", level.to_string());
+    }
     if let Some(toolchain) = TOOLCHAIN {
         cmd.env("RUSTUP_TOOLCHAIN", toolchain);
     }
@@ -161,9 +186,13 @@ fn build(
         cmd.env("LD_LIBRARY_PATH", path);
     }
 
-    let status = cmd
-        .status()
+    let mut child = cmd
+        .spawn()
         .context("could not run cargo; is it on the PATH?")?;
+    // Closing the writing end at once is what makes the pipe read as
+    // empty: nothing is ever written, and a reader sees the end.
+    drop(child.stdin.take());
+    let status = child.wait().context("could not wait for cargo")?;
     if !status.success() {
         bail!("the analysis build failed; the errors above are from cargo");
     }
@@ -190,10 +219,12 @@ fn prepare(root: &Path, driver: &Path, args: &Args) -> Result<Layout> {
     // those would silently report one crate's panics against another's.
     let base = root.join("target").join("panicgraph");
     let slot = format!(
-        "{}-{}-{}",
+        "{}-{}-{}{}{}",
         args.profile,
         args.std_mode.name(),
         args.package.as_deref().unwrap_or("all"),
+        mir_opt_suffix(args),
+        if args.with_tests { "-tests" } else { "" },
     );
     let (target, shared) = analysis_target(root, args)?;
     let layout = Layout {
@@ -347,11 +378,23 @@ fn prune_stale(base: &Path, layout: &Layout) {
 /// describe one crate.
 fn analysis_target(root: &Path, args: &Args) -> Result<(PathBuf, bool)> {
     let base = root.join("target").join("panicgraph");
+    let local = base.join(format!("build{}", mir_opt_suffix(args)));
     Ok(match args.std_mode {
-        StdMode::Full => shared_build_dir()?
-            .map_or_else(|| (base.join("build"), false), |tree| (tree, true)),
-        StdMode::Shipped => (base.join("build"), false),
+        StdMode::Full => shared_build_dir(args)?
+            .map_or_else(|| (local.clone(), false), |tree| (tree, true)),
+        StdMode::Shipped => (local, false),
     })
+}
+
+/// What a build at a chosen MIR optimization level is named apart by.
+///
+/// The level changes every body the analysis reads, so a tree built at one
+/// level is never read as another's; the default level names nothing, so
+/// a run that asks for nothing lands where it always did.
+fn mir_opt_suffix(args: &Args) -> String {
+    args.mir_opt_level
+        .map(|level| format!("-mir{level}"))
+        .unwrap_or_default()
 }
 
 /// The shared tree a rebuilt standard library is compiled into.
@@ -364,7 +407,7 @@ fn analysis_target(root: &Path, args: &Args) -> Result<(PathBuf, bool)> {
 /// # Errors
 ///
 /// Returns an error when the compiler's version cannot be read at all.
-fn shared_build_dir() -> Result<Option<PathBuf>> {
+fn shared_build_dir(args: &Args) -> Result<Option<PathBuf>> {
     let base = env::var_os("PANICGRAPH_CACHE")
         .map(PathBuf::from)
         .or_else(|| {
@@ -390,7 +433,10 @@ fn shared_build_dir() -> Result<Option<PathBuf>> {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    Ok(Some(base.join(format!("build-{fingerprint}"))))
+    Ok(Some(base.join(format!(
+        "build-{fingerprint}{}",
+        mir_opt_suffix(args)
+    ))))
 }
 
 /// Reads every artifact in a directory.
