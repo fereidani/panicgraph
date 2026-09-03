@@ -841,6 +841,26 @@ pub fn must_take_four(v: &[u8]) -> u8 {
     v[0]
 }
 
+/// Reads one of the first sixteen entries of a table. The read is only in
+/// range for a table that long, which is the caller's to supply.
+#[inline(never)]
+fn sixteenth_of(table: &[u8], at: usize) -> u8 {
+    table[at & 15]
+}
+
+/// Clean. A byte string is a slice whose length is written into the
+/// constant, so it is sixteen long where the callee reads it.
+pub fn clean_constant_table(at: usize) -> u8 {
+    const TABLE: &[u8] = b"0123456789abcdef";
+    sixteenth_of(TABLE, at)
+}
+
+/// Reaches `index`. The table handed over is shorter than the read reaches.
+pub fn must_short_constant_table(at: usize) -> u8 {
+    const TABLE: &[u8] = b"01234567";
+    sixteenth_of(TABLE, at)
+}
+
 /// Clean. The slice was made of an array, so it carries the length that
 /// array's type states and the callee's own check is settled.
 pub fn clean_pass_array_of_four(v: &[u8; 4]) -> u8 {
@@ -1291,6 +1311,85 @@ pub fn clean_index_after_scan(v: &[u8], stop: u8) -> u8 {
         at += 1;
     }
     if at < v.len() { v[at] } else { 0 }
+}
+
+/// Clean. The offset is inside the slice, so raising it by four cannot
+/// wrap, and the guard then leaves four bytes past it inside the slice, of
+/// which the read reaches for the last.
+pub fn clean_reach_within_guard(v: &[u8], at: usize) -> u8 {
+    if at <= v.len() && at + 4 <= v.len() {
+        v[at + 3]
+    } else {
+        0
+    }
+}
+
+/// Reaches `index`. Without the first guard the sum can wrap round to a
+/// small number, pass the check, and leave the read at the far end.
+pub fn must_reach_under_wrapping_guard(v: &[u8], at: usize) -> u8 {
+    if at + 4 <= v.len() { v[at + 3] } else { 0 }
+}
+
+/// Reaches `index`. The guard leaves four bytes and the read wants a fifth.
+pub fn must_reach_past_guard(v: &[u8], at: usize) -> u8 {
+    if at <= v.len() && at + 4 <= v.len() {
+        v[at + 4]
+    } else {
+        0
+    }
+}
+
+/// Clean. Sixteen bytes past the counter are inside the slice on every
+/// turn, and no read reaches that far.
+pub fn clean_window_of_sixteen(v: &[u8]) -> u32 {
+    let mut i = 0;
+    let mut acc = 0u32;
+    while i + 16 <= v.len() {
+        acc = acc.wrapping_add(
+            u32::from(v[i]) ^ u32::from(v[i + 3]) ^ u32::from(v[i + 15]),
+        );
+        i += 16;
+    }
+    acc
+}
+
+/// Reaches `index`. The guard leaves sixteen bytes and the read wants the
+/// seventeenth.
+pub fn must_window_past_sixteen(v: &[u8]) -> u32 {
+    let mut i = 0;
+    let mut acc = 0u32;
+    while i + 16 <= v.len() {
+        acc = acc.wrapping_add(u32::from(v[i + 16]));
+        i += 16;
+    }
+    acc
+}
+
+/// Steps a counter through a pointer, so a caller holding the pointer
+/// cannot know what the counter holds afterwards.
+#[inline(never)]
+fn bump_by_pointer(at: &mut usize) {
+    *at = at.wrapping_add(1);
+}
+
+/// Clean. The guard and the read come before anyone takes the address of
+/// the counter, so what the guard proved is still standing at the read.
+pub fn clean_guard_before_borrow(v: &[u8], mut at: usize) -> u8 {
+    let byte = if at < v.len() { v[at] } else { 0 };
+    bump_by_pointer(&mut at);
+    byte
+}
+
+/// Reaches `index`. The address of the counter is out before the guard,
+/// and the call between the guard and the read can move it.
+pub fn must_guard_across_borrow(v: &[u8], mut at: usize) -> u8 {
+    let held = &mut at;
+    if *held < v.len() {
+        bump_by_pointer(held);
+        v[at]
+    } else {
+        0
+    }
 }
 
 /// Reaches `index`. Stepping by two can walk over the end.

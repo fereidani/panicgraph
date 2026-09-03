@@ -6,6 +6,7 @@
 //! answers first where one holds for every implementation the resolution
 //! can reach, since it costs nothing to read.
 
+use panicgraph::util::Map;
 use rustc_middle::{
     mir::{self, TerminatorKind},
     ty::{self, Instance, Ty, TypeVisitableExt, TypingEnv},
@@ -15,7 +16,7 @@ use rustc_span::{Spanned, sym};
 use crate::{
     fold::{Folder, Reach},
     sinks::SinkTable,
-    state::{State, put},
+    state::{Path, State, put},
     value::{self, Bounds, Fact, Known, LenRel, Ranks, Value},
 };
 
@@ -89,6 +90,31 @@ impl<'tcx> Returns<'tcx> {
     }
 }
 
+/// What folding a callee once found, kept for every later call that hands
+/// it the same claims.
+///
+/// A body folded against one entry state answers the same way every time,
+/// and the same few bodies are folded from everywhere: the index check the
+/// standard library writes sits under every slice read in a crate. Keeping
+/// the answer is what lets a chain of calls be followed further without
+/// paying for each link at each site.
+#[derive(Debug, Clone)]
+pub struct Summary<'tcx> {
+    /// What every path out of the callee leaves in the return place.
+    pub left: Fact<'tcx>,
+    /// What it leaves in the places below the return place.
+    pub returned: Vec<(Path, Fact<'tcx>)>,
+    /// Whether the callee, walked with these claims, can still raise.
+    pub quiet: bool,
+}
+
+/// What a summary is kept under: the body, how many more calls the walk
+/// may read below it, and what the call site told it.
+pub type Key<'tcx> = (Instance<'tcx>, u32, State<'tcx>);
+
+/// Every summary the extraction has found so far.
+pub type Cache<'tcx> = Map<Key<'tcx>, Summary<'tcx>>;
+
 /// What folding a callee at one call site found.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Found<'tcx> {
@@ -138,6 +164,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         args: &[Spanned<mir::Operand<'tcx>>],
         destination: mir::Place<'tcx>,
         after: &mut State<'tcx>,
+        cache: &mut Cache<'tcx>,
     ) -> Found<'tcx> {
         let Some(ty) = self.ty_of(func) else {
             return Found::default();
@@ -145,7 +172,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         if let Some(left) = self.contracted(state, ty, args, destination) {
             return Found { left, quiet: false };
         }
-        self.folded(state, ty, args, destination, after)
+        self.folded(state, ty, args, destination, after, cache)
     }
 
     /// The value a call returns by the contract of what it calls.
@@ -253,7 +280,9 @@ impl<'tcx> Folder<'_, 'tcx> {
     ///
     /// The walk is bounded twice over. `DEPTH` caps how far a chain of
     /// calls is followed, which bounds the stack, and the budget is spent
-    /// across every callee one body reaches, which bounds the work.
+    /// across every callee one body reaches, which bounds the work. A
+    /// callee already folded against the same claims, with as many calls
+    /// left to read below it, is answered from the cache and costs nothing.
     fn folded(
         &mut self,
         state: &State<'tcx>,
@@ -261,6 +290,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         args: &[Spanned<mir::Operand<'tcx>>],
         destination: mir::Place<'tcx>,
         after: &mut State<'tcx>,
+        cache: &mut Cache<'tcx>,
     ) -> Found<'tcx> {
         let Some(callee) = self.target(func) else {
             return Found::default();
@@ -280,13 +310,33 @@ impl<'tcx> Folder<'_, 'tcx> {
             self.budget,
         );
         let entry = self.carried(state, &folder, args);
-        let reach = folder.run(entry);
-        self.budget = folder.budget;
-        self.handed_back(&folder, destination, after);
-        Found {
-            left: folder.returns.claim(),
-            quiet: self.silent(&folder, &reach),
+        let key = (callee, DEPTH.saturating_sub(folder.depth), entry);
+        if let Some(known) = cache.get(&key) {
+            let known = known.clone();
+            self.handed_back(&known.returned, destination, after);
+            return Found {
+                left: known.left,
+                quiet: known.quiet,
+            };
         }
+        let reach = folder.run(key.2.clone(), cache);
+        self.budget = folder.budget;
+        let summary = Summary {
+            left: folder.returns.claim(),
+            returned: std::mem::take(&mut folder.returned),
+            quiet: self.silent(&folder, &reach),
+        };
+        self.handed_back(&summary.returned, destination, after);
+        let found = Found {
+            left: summary.left,
+            quiet: summary.quiet,
+        };
+        // A walk cut short answered for the budget it had rather than for
+        // the body, so it is not an answer another site can reuse.
+        if folder.complete {
+            cache.insert(key, summary);
+        }
+        found
     }
 
     /// The body a call runs, when this walk may read it.
@@ -500,14 +550,14 @@ impl<'tcx> Folder<'_, 'tcx> {
     /// the call.
     fn handed_back(
         &self,
-        callee: &Folder<'_, 'tcx>,
+        returned: &[(Path, Fact<'tcx>)],
         destination: mir::Place<'tcx>,
         after: &mut State<'tcx>,
     ) {
         if !destination.projection.is_empty() {
             return;
         }
-        for (path, fact) in &callee.returned {
+        for (path, fact) in returned {
             if *fact == Fact::default() || !path.portable() {
                 continue;
             }
@@ -695,7 +745,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         let bound = |operand: &mir::Operand<'tcx>| {
             let fact = self.fact(state, operand);
             match fact.value {
-                Some(Value::Length(of)) => Ranks::of(LenRel::AtMost, of),
+                Some(Value::Length(of)) => Ranks::of(LenRel::AT_MOST, of),
                 _ => fact.order,
             }
         };

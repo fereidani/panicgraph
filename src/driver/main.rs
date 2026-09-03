@@ -9,8 +9,10 @@
 extern crate rustc_abi;
 extern crate rustc_driver;
 extern crate rustc_hir;
+extern crate rustc_index;
 extern crate rustc_interface;
 extern crate rustc_middle;
+extern crate rustc_mir_dataflow;
 extern crate rustc_span;
 
 mod extract;
@@ -38,6 +40,9 @@ const PROFILE: &str = "PANICGRAPH_PROFILE";
 
 /// Which standard library the front end arranged for.
 const STD_MODE: &str = "PANICGRAPH_STD_MODE";
+
+/// The MIR optimization level the front end asked for, if any.
+const MIR_OPT_LEVEL: &str = "PANICGRAPH_MIR_OPT_LEVEL";
 
 struct PanicGraph;
 
@@ -133,7 +138,13 @@ fn build_config(tcx: TyCtxt<'_>) -> BuildConfig {
             .overflow_checks
             .unwrap_or(debug_assertions),
         std_mode,
+        mir_opt_level: mir_opt_level(),
     }
+}
+
+/// The MIR optimization level the front end asked for, if it asked.
+fn mir_opt_level() -> Option<u8> {
+    std::env::var(MIR_OPT_LEVEL).ok()?.parse().ok()
 }
 
 /// Asks the real compiler where its sysroot is.
@@ -160,12 +171,20 @@ fn main() -> std::process::ExitCode {
     }
 
     // Cargo learns about the target by compiling an empty crate it names
-    // on standard input. The probe never needs what is there, and reading
-    // it would turn anything a caller left on it into the crate, so the
-    // empty source is taken from the null device instead.
-    for arg in &mut args {
-        if arg == "-" {
-            *arg = "/dev/null".to_owned();
+    // on standard input, which it opens on the null device. That device is
+    // not always what it should be: on a machine where it has become an
+    // ordinary file, the probe reads whatever was last written there as
+    // the crate. A file the driver empties itself is empty for certain.
+    let probe = args
+        .iter()
+        .any(|arg| arg == "-")
+        .then(empty_source)
+        .flatten();
+    if let Some(path) = &probe {
+        for arg in &mut args {
+            if arg == "-" {
+                path.to_string_lossy().as_ref().clone_into(arg);
+            }
         }
     }
 
@@ -173,6 +192,21 @@ fn main() -> std::process::ExitCode {
     // so concrete functions become opaque and the panics inside them are
     // invisible.
     args.push("-Zalways-encode-mir".to_owned());
+
+    // A level the front end asked for applies to every crate the build
+    // compiles, so a body read out of a dependency was optimized the same
+    // way as one of the crate under analysis.
+    if let Some(level) = mir_opt_level() {
+        args.push(format!("-Zmir-opt-level={level}"));
+    }
+
+    // A test crate is read for the instantiations it makes of the
+    // library's generic functions, and inlining would fold those into the
+    // tests, which are not reported. The tests are not what is measured,
+    // so keeping their calls as calls costs the analysis nothing.
+    if args.iter().any(|arg| arg == "--test") {
+        args.push("-Zinline-mir=no".to_owned());
+    }
 
     // The crate under analysis is the leaf of the build, so nothing ever
     // inlines from it, and marking its functions inlinable only makes
@@ -184,7 +218,21 @@ fn main() -> std::process::ExitCode {
         args.push("-Zcross-crate-inline-threshold=never".to_owned());
     }
 
-    rustc_driver::catch_with_exit_code(|| {
+    let code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&args, &mut PanicGraph);
-    })
+    });
+    if let Some(path) = &probe {
+        // The file was only ever the probe's input, so it is not needed
+        // once the probe has run; a leftover is a nuisance, not a fault.
+        let _ = std::fs::remove_file(path);
+    }
+    code
+}
+
+/// An empty source file for the compiler probe to read.
+fn empty_source() -> Option<PathBuf> {
+    let path = std::env::temp_dir()
+        .join(format!("panicgraph-probe-{}.rs", std::process::id()));
+    std::fs::write(&path, b"").ok()?;
+    Some(path)
 }

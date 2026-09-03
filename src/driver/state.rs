@@ -41,10 +41,14 @@ const PRECISE: u32 = 2;
 /// climbs it, or the bound stops being a proof.
 pub const STEPS: usize = 2 * 2 * (PRECISE as usize + STOPS + 2) + NAMING_PLANES;
 
-/// How many planes of a fact name a local or a tag rather than a range.
+/// How many times the planes of a fact that name a local or a tag rather
+/// than a range can change between them.
 ///
-/// Each can change to a different answer once and then to none at all.
-const NAMING_PLANES: usize = 14;
+/// Each of the six that name one thing can change to a different answer
+/// once and then to none at all. Each of the two orderings a fact keeps
+/// against a slice can shrink exactly [`PRECISE`] times, be pushed twice
+/// by widening, and then go, so those two are counted at five apiece.
+const NAMING_PLANES: usize = 6 * 2 + 2 * (PRECISE as usize + 3);
 
 /// What every local is known about at one point.
 pub type State<'tcx> = Vec<Fact<'tcx>>;
@@ -334,6 +338,7 @@ pub fn learn<'tcx>(
         }
         return;
     }
+    let over = state.get(local.as_usize()).and_then(|slot| slot.over);
     let Some(slot) = state.get_mut(local.as_usize()) else {
         return;
     };
@@ -347,19 +352,28 @@ pub fn learn<'tcx>(
             // one every reading of it starts with, and a guard says more.
             let trivial = matches!(
                 (slot.value, slot.order.first()),
-                (Some(Value::Length(mine)), Some((LenRel::AtMost, held)))
-                    if mine == held
+                (Some(Value::Length(mine)), Some((held, named)))
+                    if mine == named && held == LenRel::AT_MOST
             );
             if trivial {
                 slot.order = Ranks::of(rel, of);
             } else {
                 slot.order.add(rel, of);
             }
+            // A value reached from another by a constant carries the
+            // guard back to it: what holds of `i + 16` holds of `i` with
+            // sixteen more to spare.
+            if let Some((base, step)) = over
+                && let Ok(step) = u64::try_from(step)
+                && let Some(under) = state.get_mut(base.as_usize())
+            {
+                under.order.add(rel.lowered(step), of);
+            }
         }
         // A value at most a length and not equal to it is below it.
         Taught::Apart(of) => {
-            if slot.order.against(of) == Some(LenRel::AtMost) {
-                slot.order.add(LenRel::Below, of);
+            if slot.order.against(of) == Some(LenRel::AT_MOST) {
+                slot.order.add(LenRel::BELOW, of);
             }
         }
         // A slice this local merely holds the length of was handled above.
@@ -764,21 +778,6 @@ pub fn sweep_indexed(
 ) {
     for (slot, path) in places.each() {
         if path.indexed_by(local) {
-            forget(state, slot);
-        }
-    }
-}
-
-/// Forgets every place a write through a pointer could reach.
-///
-/// That is every place read through a pointer, and every place inside a
-/// local whose address was taken, since a pointer can only be aimed at one
-/// of those.
-pub fn sweep_aliased(state: &mut State<'_>, places: &Places, escaped: &[bool]) {
-    for (slot, path) in places.each() {
-        if path.behind_pointer()
-            || escaped.get(path.base.as_usize()).copied().unwrap_or(true)
-        {
             forget(state, slot);
         }
     }

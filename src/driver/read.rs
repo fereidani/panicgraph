@@ -11,6 +11,7 @@ use rustc_middle::{
     mir::{self, BinOp},
     ty::{self, Instance, Ty, TyCtxt, TypeVisitableExt, TypingEnv},
 };
+use rustc_span::DUMMY_SP;
 
 use crate::{
     fold::Folder,
@@ -360,6 +361,10 @@ impl<'tcx> Folder<'_, 'tcx> {
     ///
     /// It is only recorded where the sum stayed inside its type, so the
     /// claim is the arithmetic one rather than what the machine wraps to.
+    /// The range of the value shows that where it has one; where it has
+    /// none, being ordered under a slice does instead, since a slice of
+    /// sized elements holds at most half the addresses there are and a
+    /// value under its length has that much room above it.
     fn raised(
         &self,
         state: &State<'tcx>,
@@ -368,7 +373,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         right: Fact<'tcx>,
         value: Option<Value<'tcx>>,
     ) -> Option<(mir::Local, u128)> {
-        if op != BinOp::Add || !matches!(value, Some(Value::Within(_))) {
+        if op != BinOp::Add {
             return None;
         }
         let step = right.value?.exact()?;
@@ -379,7 +384,51 @@ impl<'tcx> Folder<'_, 'tcx> {
         else {
             return None;
         };
+        let left = self.fact(state, &pair.0);
+        let kept = matches!(value, Some(Value::Within(_)))
+            || self.under_memory(left, step);
+        if !kept {
+            return None;
+        }
         Some((root_of(state, self.slot_of(place)?), step.bits))
+    }
+
+    /// Whether adding a constant to a value ordered under a slice's length
+    /// stays inside the type.
+    ///
+    /// A slice of sized elements is at most half the address space long,
+    /// so a value at most its length has the other half to spare, and a
+    /// constant below that cannot carry the sum round.
+    fn under_memory(&self, left: Fact<'tcx>, step: Known<'tcx>) -> bool {
+        let Some(shift) = step.width.checked_sub(1) else {
+            return false;
+        };
+        if step.bits > 1u128 << shift {
+            return false;
+        }
+        left.order.each().any(|(_, of)| self.sized_elements(of))
+    }
+
+    /// Whether the slice behind a local has elements that take up space,
+    /// which is what bounds how long it can be.
+    fn sized_elements(&self, of: mir::Local) -> bool {
+        let Some(decl) = self.mir.local_decls.get(of) else {
+            return false;
+        };
+        let Some(ty) = self.monomorphize(decl.ty) else {
+            return false;
+        };
+        let (ty::Ref(_, inner, _) | ty::RawPtr(inner, _)) = ty.kind() else {
+            return false;
+        };
+        match inner.kind() {
+            ty::Str => true,
+            ty::Slice(element) => self
+                .tcx
+                .layout_of(self.env.as_query_input(*element))
+                .is_ok_and(|layout| layout.size.bytes() > 0),
+            _ => false,
+        }
     }
 
     /// How the result of an operator is ordered against a slice's length.
@@ -400,13 +449,13 @@ impl<'tcx> Folder<'_, 'tcx> {
         match op {
             BinOp::Rem => match right.value {
                 Some(Value::Length(of)) if self.unsigned(&pair.0) => {
-                    Ranks::of(LenRel::Below, of)
+                    Ranks::of(LenRel::BELOW, of)
                 }
                 _ => Ranks::none_held(),
             },
             BinOp::Div => match left.value {
                 Some(Value::Length(of)) if self.unsigned(&pair.1) => {
-                    Ranks::of(LenRel::AtMost, of)
+                    Ranks::of(LenRel::AT_MOST, of)
                 }
                 _ => Ranks::none_held(),
             },
@@ -418,10 +467,10 @@ impl<'tcx> Folder<'_, 'tcx> {
 
     /// How an addition leaves a value ordered against a slice's length.
     ///
-    /// A value below a length is at most that length once one is added to
-    /// it, which is what the read of everything past a byte asks. The sum
-    /// cannot wrap: the length itself lies inside the type, so a value
-    /// below it has room for one more.
+    /// A value with room to spare under a length keeps what is left of
+    /// that room once a constant is added to it, which is what the read of
+    /// everything past a byte asks. The sum cannot wrap: the length itself
+    /// lies inside the type, and the value stays under it.
     fn lengthened(left: Fact<'tcx>, right: Fact<'tcx>) -> Ranks {
         let mut ranks = Ranks::none_held();
         let Some(added) = right.value.and_then(Value::exact) else {
@@ -430,11 +479,12 @@ impl<'tcx> Folder<'_, 'tcx> {
         if added.is_signed() {
             return ranks;
         }
+        let Ok(added) = u64::try_from(added.bits) else {
+            return ranks;
+        };
         for (rel, of) in left.order.each() {
-            match (rel, added.bits) {
-                (held, 0) => ranks.add(held, of),
-                (LenRel::Below, 1) => ranks.add(LenRel::AtMost, of),
-                _ => {}
+            if let Some(left) = rel.raised(added) {
+                ranks.add(left, of);
             }
         }
         ranks
@@ -459,7 +509,7 @@ impl<'tcx> Folder<'_, 'tcx> {
             return ranks;
         };
         let held = match (left.order.is_empty(), left.value) {
-            (true, Some(Value::Length(of))) => Ranks::of(LenRel::AtMost, of),
+            (true, Some(Value::Length(of))) => Ranks::of(LenRel::AT_MOST, of),
             _ => left.order,
         };
         if taken.is_signed() || held.is_empty() {
@@ -472,8 +522,11 @@ impl<'tcx> Folder<'_, 'tcx> {
         if under {
             return ranks;
         }
+        let Ok(taken) = u64::try_from(taken.bits) else {
+            return ranks;
+        };
         for (rel, of) in held.each() {
-            ranks.add(if taken.bits == 0 { rel } else { LenRel::Below }, of);
+            ranks.add(rel.lowered(taken), of);
         }
         ranks
     }
@@ -577,7 +630,7 @@ impl<'tcx> Folder<'_, 'tcx> {
     /// weaker of them rather than on nothing.
     pub fn measuring(value: Value<'tcx>) -> Fact<'tcx> {
         let order = match value {
-            Value::Length(of) => Ranks::of(LenRel::AtMost, of),
+            Value::Length(of) => Ranks::of(LenRel::AT_MOST, of),
             _ => Ranks::none_held(),
         };
         Fact {
@@ -622,6 +675,9 @@ impl<'tcx> Folder<'_, 'tcx> {
                 held
             }
             mir::Operand::Constant(konst) => {
+                if let Some(sliced) = self.sliced(konst) {
+                    return sliced;
+                }
                 let tag = self.variant_of(konst);
                 self.constant(konst).map(Value::Exact).map_or_else(
                     || Fact {
@@ -697,10 +753,11 @@ impl<'tcx> Folder<'_, 'tcx> {
         if extent.hi.is_signed() {
             return held;
         }
-        let top = match rel {
-            LenRel::Below => extent.hi.predecessor(),
-            LenRel::AtMost => Some(extent.hi),
-        };
+        let top = extent
+            .hi
+            .bits
+            .checked_sub(u128::from(rel.short))
+            .map(|bits| Known { bits, ..extent.hi });
         let Some(bound) = top.and_then(|hi| Bounds::new(extent.hi.zero(), hi))
         else {
             return held;
@@ -791,25 +848,96 @@ impl<'tcx> Folder<'_, 'tcx> {
         Some(scalar.try_to_scalar_int().ok()?.to_bits(size))
     }
 
-    /// Evaluates a constant for the arguments this body was reached with.
+    /// How long the slice a constant refers to is.
+    ///
+    /// A byte string, or a slice a constant item holds, carries its length
+    /// as the metadata the compiler laid down beside the pointer, so a
+    /// check written against that length is settled the way one against
+    /// an array's is, and the reference itself is an address.
+    fn sliced(&self, konst: &mir::ConstOperand<'tcx>) -> Option<Fact<'tcx>> {
+        let ty = self.monomorphize(konst.const_.ty())?;
+        let ty::Ref(_, inner, _) = ty.kind() else {
+            return None;
+        };
+        if !matches!(inner.kind(), ty::Slice(_) | ty::Str) {
+            return None;
+        }
+        let konst = self.resolved(konst)?;
+        // A literal is laid down with its length beside it. A constant
+        // item of slice type is laid down as memory holding the wide
+        // pointer, so its length is the word after the pointer.
+        let bits = match konst.eval(self.tcx, self.env, DUMMY_SP).ok()? {
+            mir::ConstValue::Slice { meta, .. } => u128::from(meta),
+            mir::ConstValue::Indirect { alloc_id, offset } => {
+                self.metadata_at(alloc_id, offset)?
+            }
+            _ => return None,
+        };
+        let ty = self.tcx.types.usize;
+        let end = Known {
+            bits,
+            ty,
+            width: self.width(ty)?,
+        };
+        Some(Fact {
+            extent: Bounds::new(end, end),
+            address: true,
+            ..Fact::default()
+        })
+    }
+
+    /// The length half of a wide pointer a constant holds in memory.
+    fn metadata_at(
+        &self,
+        alloc_id: mir::interpret::AllocId,
+        offset: rustc_abi::Size,
+    ) -> Option<u128> {
+        let mir::interpret::GlobalAlloc::Memory(alloc) =
+            self.tcx.global_alloc(alloc_id)
+        else {
+            return None;
+        };
+        let size = self.tcx.data_layout.pointer_size();
+        let at = offset.checked_add(size, &self.tcx)?;
+        let scalar = alloc
+            .inner()
+            .read_scalar(
+                &self.tcx,
+                mir::interpret::alloc_range(at, size),
+                false,
+            )
+            .ok()?;
+        Some(scalar.try_to_scalar_int().ok()?.to_bits(size))
+    }
+
+    /// A constant written in the body, resolved for the arguments the body
+    /// was reached with.
     ///
     /// A body still carrying parameters has no value for a constant written
     /// against one: `<T as SizedTypeProperties>::SIZE` is exactly what the
     /// interesting checks compare against, and it has none until `T` has
     /// one. A constant that names no parameter is the same in every
     /// instantiation, so it is read where it stands.
+    fn resolved(
+        &self,
+        konst: &mir::ConstOperand<'tcx>,
+    ) -> Option<mir::Const<'tcx>> {
+        if self.inst.args.has_param() {
+            if konst.const_.has_param() {
+                return None;
+            }
+            return Some(konst.const_);
+        }
+        instantiate(self.tcx, self.inst, self.env, konst.const_)
+    }
+
+    /// Evaluates an integer constant for the arguments this body was
+    /// reached with.
     pub(crate) fn constant(
         &self,
         konst: &mir::ConstOperand<'tcx>,
     ) -> Option<Known<'tcx>> {
-        let konst = if self.inst.args.has_param() {
-            if konst.const_.has_param() {
-                return None;
-            }
-            konst.const_
-        } else {
-            instantiate(self.tcx, self.inst, self.env, konst.const_)?
-        };
+        let konst = self.resolved(konst)?;
         let ty = konst.ty();
         let width = self.width(ty)?;
         let bits = konst.try_eval_bits(self.tcx, self.env)?;

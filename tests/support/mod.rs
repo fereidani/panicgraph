@@ -145,6 +145,7 @@ pub fn graph(bodies: Vec<Body>) -> Graph {
             debug_assertions: false,
             overflow_checks: false,
             std_mode: StdMode::Shipped,
+            mir_opt_level: None,
         },
         bodies,
     }])

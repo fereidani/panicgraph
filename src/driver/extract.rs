@@ -1,10 +1,11 @@
 //! Walks MIR and records what each function can panic with, and who it calls.
 
 use panicgraph::{
-    Body, CallSite, Category, EdgeKind, FuncKey, Guard, Loc, PanicSite,
-    Reified, Termination, UnwindOrigin,
+    Body, CallSite, Category, EdgeKind, FuncKey, Guard, Loc, OPEN_PREFIX,
+    PanicSite, Reified, Termination, UnwindOrigin,
     util::{Map, Set},
 };
+use rustc_hir::def_id::DefId;
 use rustc_middle::{
     middle::codegen_fn_attrs::CodegenFnAttrFlags,
     mir::{
@@ -18,6 +19,7 @@ use crate::{
     fold,
     read::instantiate,
     sinks::{Sink, SinkTable},
+    summary::Cache,
 };
 
 /// One function to analyse, together with the environment its generic
@@ -105,6 +107,17 @@ impl Raw<'_> {
 pub struct Extractor<'tcx> {
     tcx: TyCtxt<'tcx>,
     sinks: SinkTable,
+    /// What folding each callee against each set of claims found, shared
+    /// by every body so a chain of calls is read once rather than at every
+    /// site that reaches it.
+    cache: Cache<'tcx>,
+    /// The name of the library the package under analysis builds, which
+    /// is what a test crate's instantiations of its generic functions are
+    /// recognised by.
+    package_lib: Option<String>,
+    /// Whether the crate being compiled is an integration test or a bench,
+    /// which links the library rather than being it.
+    integration: bool,
     bodies: Vec<Body>,
     seen: Set<String>,
     reified: Vec<Reified>,
@@ -125,6 +138,12 @@ impl<'tcx> Extractor<'tcx> {
         Self {
             tcx,
             sinks: SinkTable::default(),
+            cache: Cache::default(),
+            package_lib: std::env::var("CARGO_PKG_NAME")
+                .ok()
+                .map(|name| name.replace('-', "_")),
+            // Cargo sets this for integration tests and benches alone.
+            integration: std::env::var_os("CARGO_TARGET_TMPDIR").is_some(),
             bodies: Vec::new(),
             seen: Set::default(),
             reified: Vec::new(),
@@ -186,7 +205,7 @@ impl<'tcx> Extractor<'tcx> {
     fn build(&mut self, work: Work<'tcx>, key: FuncKey) -> Vec<Work<'tcx>> {
         let inst = work.inst;
         let did = inst.def_id();
-        let display = self.tcx.def_path_str(did);
+        let display = self.display_of(did);
         let krate = self.tcx.crate_name(did.krate).to_string();
         if !Self::has_mir_body(self.tcx, inst) {
             let mut body = Body::opaque(key, display, krate);
@@ -198,7 +217,7 @@ impl<'tcx> Extractor<'tcx> {
             // against the crate that declares it, so the two facts have to
             // agree: a foreign item declared here reports the local crate
             // name, and saying it is not local contradicts that.
-            body.local = did.is_local();
+            body.local = self.reported(inst);
             // A function the compiler guarantees does not unwind raises no
             // panic even though its body is unavailable. Allocator shims are
             // the common case.
@@ -229,9 +248,57 @@ impl<'tcx> Extractor<'tcx> {
             calls,
             opaque: false,
             foreign: false,
-            local: did.is_local(),
+            local: self.reported(inst),
         });
         raw.successors
+    }
+
+    /// Whether a function is reported as the crate under analysis's own.
+    ///
+    /// In a test crate the functions defined locally are the tests and the
+    /// crate's own code compiled again for them, and neither is what was
+    /// asked about: the second is already reported from the build that is.
+    /// What such a crate adds is the instantiations it makes of the
+    /// library's generic functions, which the library's own build could
+    /// only read as written. Those belong to the library, whether it is
+    /// compiled again for its unit tests or linked by an integration test,
+    /// and are reported as its own. A closure is judged by the function it
+    /// is written in, so one inside a test stays out. An integration test
+    /// may be named after the package it tests, so there the library is
+    /// only ever the crate linked in, never the test crate itself.
+    fn reported(&self, inst: Instance<'tcx>) -> bool {
+        let did = inst.def_id();
+        if !self.tcx.sess.opts.test {
+            return did.is_local();
+        }
+        if self.integration && did.is_local() {
+            return false;
+        }
+        let root = self.tcx.typeck_root_def_id(did);
+        self.of_package(did) && self.tcx.generics_of(root).count() > 0
+    }
+
+    /// Whether a function belongs to the library the package builds.
+    fn of_package(&self, did: DefId) -> bool {
+        self.package_lib.as_deref()
+            == Some(self.tcx.crate_name(did.krate).as_str())
+    }
+
+    /// The path a function reports under.
+    ///
+    /// A function of the library reached from one of its test crates is
+    /// named the way the library's own build names it, without the crate
+    /// in front of its paths, so the two reports of one function fall
+    /// under one name.
+    fn display_of(&self, did: DefId) -> String {
+        let path = self.tcx.def_path_str(did);
+        if did.is_local() || !self.of_package(did) {
+            return path;
+        }
+        match &self.package_lib {
+            Some(lib) => path.replace(&format!("{lib}::"), ""),
+            None => path,
+        }
     }
 
     /// The environment types in this body must be normalized against.
@@ -255,7 +322,8 @@ impl<'tcx> Extractor<'tcx> {
             inst: work.inst,
             env: Self::env_for(work),
         };
-        let reach = fold::reachable(self.tcx, cx.inst, cx.env, mir);
+        let reach =
+            fold::reachable(self.tcx, cx.inst, cx.env, mir, &mut self.cache);
         let mut raw = Raw::default();
         for (bb, data) in mir.basic_blocks.iter_enumerated() {
             if !reach.is_live(bb) {
@@ -987,7 +1055,7 @@ impl<'tcx> Extractor<'tcx> {
             // A symbol name only exists once the generic arguments are
             // concrete, so a generic body is keyed by its path instead.
             return Some(format!(
-                "generic:{}",
+                "{OPEN_PREFIX}{}",
                 self.tcx.def_path_str(inst.def_id())
             ));
         }

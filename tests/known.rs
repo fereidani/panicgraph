@@ -116,6 +116,12 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_masked_switch", "explicit"),
     ("must_vector_index", "index"),
     ("must_index_after_le", "index"),
+    ("must_short_constant_table", "index"),
+    ("sixteenth_of", "index"),
+    ("must_reach_under_wrapping_guard", "index"),
+    ("must_reach_past_guard", "index"),
+    ("must_window_past_sixteen", "index"),
+    ("must_guard_across_borrow", "index"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -198,6 +204,10 @@ const MUST_BE_CLEAN_IN_RELEASE: &[&str] = &[
     "clean_scan_until",
     "clean_scan_break",
     "clean_index_after_scan",
+    "clean_constant_table",
+    "clean_reach_within_guard",
+    "clean_window_of_sixteen",
+    "clean_guard_before_borrow",
 ];
 
 /// The functions that cannot panic and that the analysis cannot yet say so

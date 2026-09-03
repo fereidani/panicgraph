@@ -10,7 +10,7 @@ use rustc_middle::{
 };
 
 /// A value the folder is certain of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Known<'tcx> {
     /// The value, zero extended from the bit pattern of its type.
     pub bits: u128,
@@ -244,7 +244,7 @@ impl Known<'_> {
 const RANKS: usize = 2;
 
 /// How a value is ordered against the lengths of slices.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Ranks {
     held: [Option<(LenRel, mir::Local)>; RANKS],
 }
@@ -294,9 +294,7 @@ impl Ranks {
         for slot in &mut self.held {
             match slot {
                 Some((held, named)) if *named == of => {
-                    if rel == LenRel::Below {
-                        *held = rel;
-                    }
+                    *held = held.sharper(rel);
                     return;
                 }
                 Some(_) => {}
@@ -323,17 +321,40 @@ impl Ranks {
         let mut ranks = Self::default();
         for (rel, of) in self.each() {
             if let Some(held) = other.against(of) {
-                ranks.add(if rel == held { rel } else { LenRel::AtMost }, of);
+                ranks.add(rel.weaker(held), of);
             } else if theirs {
-                ranks.add(LenRel::AtMost, of);
+                ranks.add(LenRel::AT_MOST, of);
             }
         }
         if mine {
             for (_, of) in other.each() {
                 if self.against(of).is_none() {
-                    ranks.add(LenRel::AtMost, of);
+                    ranks.add(LenRel::AT_MOST, of);
                 }
             }
+        }
+        ranks
+    }
+
+    /// The claims widened away from the ones they replaced.
+    ///
+    /// A claim with less to spare than before is still shrinking, and a
+    /// loop that takes a step off it on every turn would shrink it once
+    /// per turn. It is pushed at once to the one claim an index check
+    /// still reads, or to nothing to spare when even that has gone.
+    pub fn widened(self, from: Self) -> Self {
+        let mut ranks = Self::default();
+        for (rel, of) in self.each() {
+            let shrinking =
+                from.against(of).is_some_and(|was| rel.short < was.short);
+            let kept = if shrinking {
+                LenRel {
+                    short: rel.short.min(1),
+                }
+            } else {
+                rel
+            };
+            ranks.add(kept, of);
         }
         ranks
     }
@@ -434,7 +455,7 @@ pub const fn truncate(bits: u128, width: u32) -> u128 {
 }
 
 /// An inclusive range a value is known to lie in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Bounds<'tcx> {
     pub lo: Known<'tcx>,
     pub hi: Known<'tcx>,
@@ -484,13 +505,57 @@ impl<'tcx> Bounds<'tcx> {
     }
 }
 
-/// How a value relates to the length of a slice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LenRel {
-    /// Strictly less than the length, which is what an index check asks.
-    Below,
+/// How a value is ordered against the length of a slice.
+///
+/// The value is at most the length less `short`. Nothing short is what a
+/// range end check asks, and one short is what an index check asks, since
+/// a value below the length is at most one short of it. A guard written
+/// against the value raised by a constant leaves the constant here, which
+/// is what carries `i + 16 <= len` down to `v[i + 3]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LenRel {
+    pub short: u64,
+}
+
+impl LenRel {
     /// At most the length, which is what a range end check asks.
-    AtMost,
+    pub const AT_MOST: Self = Self { short: 0 };
+    /// Below the length, which is what an index check asks.
+    pub const BELOW: Self = Self { short: 1 };
+
+    /// Whether the value is strictly below the length.
+    pub const fn is_below(self) -> bool {
+        self.short >= 1
+    }
+
+    /// The claim that says more of the two.
+    pub fn sharper(self, other: Self) -> Self {
+        Self {
+            short: self.short.max(other.short),
+        }
+    }
+
+    /// The claim both agree on, which is what two arms leave behind.
+    pub fn weaker(self, other: Self) -> Self {
+        Self {
+            short: self.short.min(other.short),
+        }
+    }
+
+    /// The claim after the value is raised by a constant, when what was to
+    /// spare covers it.
+    pub fn raised(self, by: u64) -> Option<Self> {
+        self.short.checked_sub(by).map(|short| Self { short })
+    }
+
+    /// The claim after a constant is taken off the value, which leaves it
+    /// that much further under the length. Saturating keeps the claim a
+    /// weaker one rather than a wrong one.
+    pub const fn lowered(self, by: u64) -> Self {
+        Self {
+            short: self.short.saturating_add(by),
+        }
+    }
 }
 
 /// What a local is known about.
@@ -498,7 +563,7 @@ pub enum LenRel {
 /// A branch teaches the arm it guards something its condition never states
 /// outright: past `if rhs != 0`, the divisor is not zero, which is the fact
 /// the division's own check is asking for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Value<'tcx> {
     /// Exactly this value.
     Exact(Known<'tcx>),
@@ -518,7 +583,7 @@ pub enum Value<'tcx> {
 /// link of sameness is a plane of its own for the same reason: a copy whose
 /// value is already known still has to name its source, or a fact the
 /// source learns later never reaches the checks that read the copy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Fact<'tcx> {
     /// What the value is.
     pub value: Option<Value<'tcx>>,
@@ -664,6 +729,7 @@ impl<'tcx> Fact<'tcx> {
                     .and_then(Value::bounds),
                 _ => None,
             },
+            order: self.order.widened(from.order),
             ..self
         }
     }
@@ -866,8 +932,10 @@ pub const fn stepped(op: mir::BinOp, step: u128) -> Option<bool> {
 pub enum Against<'tcx> {
     /// A constant value.
     Constant(Known<'tcx>),
-    /// The length of the slice behind a local.
-    Length(mir::Local),
+    /// A quantity measured against the length of the slice behind a local:
+    /// the length itself, with nothing to spare, or a value already known
+    /// to sit that far under it.
+    Length(mir::Local, LenRel),
     /// The quantity read from a place, named by the slot that place is
     /// recorded at.
     ///
@@ -915,8 +983,8 @@ pub fn fact_of(
     let op = if holds { op } else { negated(op) };
     match against {
         Against::Constant(k) => constant_fact(op, k).map(Taught::Value),
-        Against::Length(of) => length_fact(op, of, true),
-        Against::Place(of) => length_fact(op, of, false),
+        Against::Length(of, under) => length_fact(op, of, true, under),
+        Against::Place(of) => length_fact(op, of, false, LenRel::AT_MOST),
     }
 }
 
@@ -938,18 +1006,22 @@ fn constant_fact(op: mir::BinOp, k: Known<'_>) -> Option<Value<'_>> {
 /// The fact a comparison against a slice length leaves behind.
 ///
 /// Only the two orderings a bounds check can consume are kept. The rest say
-/// something, but nothing this pass reads.
-/// `measures` says whether the quantity is a slice's length. The claims
-/// that pair two slices are only about lengths, so a quantity named by the
-/// place it was read from carries the orderings and nothing more.
+/// something, but nothing this pass reads. `under` is what the quantity
+/// compared against has to spare under the length itself, which the value
+/// measured inherits: below a value with nothing to spare is one short of
+/// the length. `measures` says whether the quantity is a slice's length.
+/// The claims that pair two slices are only about lengths, so a quantity
+/// named by the place it was read from carries the orderings and nothing
+/// more.
 const fn length_fact<'tcx>(
     op: mir::BinOp,
     of: mir::Local,
     measures: bool,
+    under: LenRel,
 ) -> Option<Taught<'tcx>> {
     match op {
-        mir::BinOp::Lt => Some(Taught::Order(LenRel::Below, of)),
-        mir::BinOp::Le => Some(Taught::Order(LenRel::AtMost, of)),
+        mir::BinOp::Lt => Some(Taught::Order(under.lowered(1), of)),
+        mir::BinOp::Le => Some(Taught::Order(under, of)),
         mir::BinOp::Eq if measures => Some(Taught::Alike(of)),
         mir::BinOp::Ne if measures => Some(Taught::Apart(of)),
         _ => None,
@@ -1032,9 +1104,11 @@ fn measured_against(
     let rel = measured
         .and_then(named)
         .or_else(|| right.same.and_then(named))?;
-    match (rel, op) {
-        (LenRel::Below, Lt | Le) | (LenRel::AtMost, Le) => Some(true),
-        (LenRel::Below, Ge | Gt) | (LenRel::AtMost, Gt) => Some(false),
+    match op {
+        Le => Some(true),
+        Gt => Some(false),
+        Lt if rel.is_below() => Some(true),
+        Ge if rel.is_below() => Some(false),
         _ => None,
     }
 }

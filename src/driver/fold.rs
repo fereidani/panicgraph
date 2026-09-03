@@ -17,19 +17,21 @@
 //! so `right.max(1)` is known nonzero and the division below it raises
 //! nothing.
 
+use rustc_index::bit_set::DenseBitSet;
 use rustc_middle::{
     mir::{self, BasicBlock, BinOp, TerminatorKind, UnwindAction},
     ty::{self, Instance, Ty, TyCtxt, TypingEnv},
 };
+use rustc_mir_dataflow::{Analysis, Results, impls::MaybeBorrowedLocals};
 
 use crate::{
     state::{
         Compared, Path, Places, READINGS, STEPS, State, Subject, Work,
-        escaping, forget, put, refined, retire, root_of, sweep_aliased,
-        sweep_base, sweep_indexed, unwind_to, writes,
+        escaping, forget, put, refined, retire, root_of, sweep_base,
+        sweep_indexed, unwind_to, writes,
     },
-    summary::{BUDGET, Returns, portable},
-    value::{self, Against, Fact, Known, Ranks, Thresholds, Value},
+    summary::{BUDGET, Cache, Returns, portable},
+    value::{self, Against, Fact, Known, LenRel, Ranks, Thresholds, Value},
 };
 
 /// What one instantiation of a body reaches.
@@ -84,10 +86,11 @@ pub fn reachable<'tcx>(
     inst: Instance<'tcx>,
     env: TypingEnv<'tcx>,
     mir: &mir::Body<'tcx>,
+    cache: &mut Cache<'tcx>,
 ) -> Reach {
     let mut folder = Folder::new(tcx, inst, env, mir, 0, BUDGET);
     let entry = folder.blank();
-    folder.run(entry)
+    folder.run(entry, cache)
 }
 
 /// What one side of a comparison measures the other against, with the local
@@ -110,7 +113,16 @@ pub struct Folder<'a, 'tcx> {
     pub inst: Instance<'tcx>,
     pub env: TypingEnv<'tcx>,
     pub mir: &'a mir::Body<'tcx>,
+    /// Locals a pointer is taken of somewhere in the body, other than a
+    /// shared one nothing is written through.
     pub escaped: Vec<bool>,
+    /// Where in the body a pointer to each local may exist, block by
+    /// block, as the compiler's own borrow tracking has it.
+    borrows: Results<'tcx, MaybeBorrowedLocals>,
+    /// The locals a pointer may be aimed at where the walk stands now. A
+    /// claim about a local is only read while nothing points at it, so a
+    /// guard proved before the first borrow still counts until then.
+    borrowed: DenseBitSet<mir::Local>,
     /// The places this body is tracked at, past its locals.
     pub places: Places,
     /// How many callees deep this body sits below the one being analysed.
@@ -125,6 +137,9 @@ pub struct Folder<'a, 'tcx> {
     /// caller reading a field of what it was handed reads the value the
     /// body put there.
     pub returned: Vec<(Path, Fact<'tcx>)>,
+    /// Whether the walk reached its fixpoint rather than being cut short,
+    /// so what it found describes the body and not the budget.
+    pub complete: bool,
 }
 
 impl<'a, 'tcx> Folder<'a, 'tcx> {
@@ -143,17 +158,21 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         // could reach is swept where the write happens instead.
         escaped
             .resize(mir.local_decls.len().saturating_add(places.len()), false);
+        let borrows = MaybeBorrowedLocals.iterate_to_fixpoint(tcx, mir, None);
         Self {
             tcx,
             inst,
             env,
             mir,
             escaped,
+            borrows,
+            borrowed: DenseBitSet::new_empty(mir.local_decls.len()),
             places,
             depth,
             budget,
             returns: Returns::default(),
             returned: Vec::new(),
+            complete: false,
         }
     }
 
@@ -176,12 +195,33 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
 
     /// Whether a write through a pointer could land on a place.
     fn aliased(&self, path: Path) -> bool {
-        path.behind_pointer()
-            || self
-                .escaped
-                .get(path.base.as_usize())
-                .copied()
-                .unwrap_or(true)
+        path.behind_pointer() || self.escapes(path.base)
+    }
+
+    /// Forgets every place a write through a pointer could reach, and
+    /// every local one could be aimed at.
+    ///
+    /// That is every place read through a pointer, every place inside a
+    /// local whose address has been taken, and such a local itself, since
+    /// a pointer can only be aimed at one of those.
+    fn sweep_aliased(&self, state: &mut State<'tcx>) {
+        for (slot, path) in self.places.each() {
+            if self.aliased(path) {
+                forget(state, slot);
+            }
+        }
+        for local in self.mir.local_decls.indices() {
+            if self.escapes(local) {
+                forget(state, local);
+            }
+        }
+    }
+
+    /// Moves the borrow tracking to the start of a block.
+    fn arrive(&mut self, bb: BasicBlock) {
+        if let Some(entry) = self.borrows.entry_states.get(bb) {
+            self.borrowed.clone_from(entry);
+        }
     }
 
     /// Whether a statement can change what a slot holds.
@@ -210,14 +250,31 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         }
     }
 
-    /// Whether a pointer could be aimed at a local, so its value is never
-    /// assumed. A local the walk has never heard of is treated as escaping.
+    /// Whether a pointer could be aimed at a local where the walk stands,
+    /// so its value is never assumed there. A local the walk has never
+    /// heard of is treated as escaping.
+    ///
+    /// The address has to have been taken somewhere in the body, other
+    /// than by a shared reference nothing is written through, and a
+    /// pointer has to be able to exist here: before the first borrow the
+    /// local is as good as any other.
     pub fn escapes(&self, local: mir::Local) -> bool {
-        self.escaped.get(local.as_usize()).copied().unwrap_or(true)
+        let Some(taken) = self.escaped.get(local.as_usize()) else {
+            return true;
+        };
+        if !*taken {
+            return false;
+        }
+        local.as_usize() >= self.borrowed.domain_size()
+            || self.borrowed.contains(local)
     }
 
     /// Runs the walk to a fixpoint.
-    pub fn run(&mut self, entry: State<'tcx>) -> Reach {
+    pub fn run(
+        &mut self,
+        entry: State<'tcx>,
+        cache: &mut Cache<'tcx>,
+    ) -> Reach {
         let blocks = self.mir.basic_blocks.len();
         let locals =
             self.mir.local_decls.len().saturating_add(self.places.len());
@@ -239,6 +296,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             .saturating_add(1);
         for _ in 0..bound {
             if work.is_drained() {
+                self.complete = true;
                 return reach;
             }
             if self.budget == 0 {
@@ -246,7 +304,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             }
             self.budget = self.budget.saturating_sub(1);
             if let Some((bb, state)) = work.pop() {
-                self.visit(bb, state, &mut reach, &mut work);
+                self.visit(bb, state, &mut reach, &mut work, cache);
             }
         }
         // The bound is a proof rather than a guess, so exhausting it means
@@ -305,6 +363,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         mut state: State<'tcx>,
         reach: &mut Reach,
         work: &mut Work<'tcx>,
+        cache: &mut Cache<'tcx>,
     ) {
         // A block is visited again whenever a further predecessor makes its
         // state less definite, and the last visit is the one that holds. A
@@ -313,22 +372,41 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         // block once another path reaches it with a different value.
         mark(&mut reach.settled, bb, false);
         mark(&mut reach.quiet, bb, false);
+        self.arrive(bb);
         // The body outlives the walk, so reading it through a copy of the
         // reference leaves the walk free to record what it finds.
         let mir: &'a mir::Body<'tcx> = self.mir;
         let block = &mir.basic_blocks[bb];
-        for stmt in &block.statements {
+        for (index, stmt) in block.statements.iter().enumerate() {
             if !self.statement(&mut state, stmt) {
                 // An assumption this build contradicts. The compiler drops
                 // the block, so nothing it leads to runs either.
                 return;
             }
+            let at = mir::Location {
+                block: bb,
+                statement_index: index,
+            };
+            self.borrows.analysis.apply_primary_statement_effect(
+                &mut self.borrowed,
+                stmt,
+                at,
+            );
         }
         mark(&mut reach.live, bb, true);
         let Some(term) = &block.terminator else {
             return;
         };
-        self.terminator(bb, &term.kind, state, reach, work);
+        let at = mir::Location {
+            block: bb,
+            statement_index: block.statements.len(),
+        };
+        self.borrows.analysis.apply_primary_terminator_effect(
+            &mut self.borrowed,
+            term,
+            at,
+        );
+        self.terminator(bb, &term.kind, state, reach, work, cache);
     }
 
     /// Applies one statement, returning whether the block still runs.
@@ -408,7 +486,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                     }
                 } else {
                     // Copying between pointers lands wherever one is aimed.
-                    sweep_aliased(state, &self.places, &self.escaped);
+                    self.sweep_aliased(state);
                 }
             }
             mir::StatementKind::FakeRead(..)
@@ -542,7 +620,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         }
         sweep_indexed(state, &self.places, place.local);
         if place.is_indirect() {
-            sweep_aliased(state, &self.places, &self.escaped);
+            self.sweep_aliased(state);
         }
     }
 
@@ -554,6 +632,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         state: State<'tcx>,
         reach: &mut Reach,
         work: &mut Work<'tcx>,
+        cache: &mut Cache<'tcx>,
     ) {
         match kind {
             TerminatorKind::Goto { target } => work.merge(*target, state),
@@ -593,6 +672,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 state,
                 reach,
                 work,
+                cache,
             ),
             TerminatorKind::Drop {
                 place,
@@ -605,7 +685,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 self.overwrite(&mut after, place);
                 // Glue runs a body this walk did not read, and it holds a
                 // pointer to what it drops.
-                sweep_aliased(&mut after, &self.places, &self.escaped);
+                self.sweep_aliased(&mut after);
                 work.merge(*target, after.clone());
                 if let Some(drop) = *drop {
                     work.merge(drop, after.clone());
@@ -854,18 +934,20 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         state: State<'tcx>,
         reach: &mut Reach,
         work: &mut Work<'tcx>,
+        cache: &mut Cache<'tcx>,
     ) {
         let mut after = state.clone();
         let target = self.slot_of(&call.destination);
         self.overwrite(&mut after, &call.destination);
         // What the callee was handed a pointer to is not read by this walk.
-        sweep_aliased(&mut after, &self.places, &self.escaped);
+        self.sweep_aliased(&mut after);
         let found = self.inspect(
             &state,
             call.func,
             call.args,
             call.destination,
             &mut after,
+            cache,
         );
         if found.quiet {
             mark(&mut reach.quiet, bb, true);
@@ -888,7 +970,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             // cleanup block either. The destination is left alone: a call
             // that unwound never wrote one.
             let mut unwound = state;
-            sweep_aliased(&mut unwound, &self.places, &self.escaped);
+            self.sweep_aliased(&mut unwound);
             work.merge(cleanup, unwound);
         }
     }
@@ -1024,7 +1106,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             if measured.source == Some(of) {
                 return false;
             }
-            if let Against::Length(len) = measured.against
+            if let Against::Length(len, _) = measured.against
                 && len == of
             {
                 return false;
@@ -1039,7 +1121,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                     || measured.source.is_some_and(|of| self.touches(s, of))
                     || match measured.against {
                         Against::Constant(_) => false,
-                        Against::Length(of) | Against::Place(of) => {
+                        Against::Length(of, _) | Against::Place(of) => {
                             self.touches(s, of)
                         }
                     })
@@ -1071,7 +1153,9 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         }
         let held = self.slot_read(operand)?;
         match self.fact(state, operand).value {
-            Some(Value::Length(of)) => Some((Against::Length(of), Some(held))),
+            Some(Value::Length(of)) => {
+                Some((Against::Length(of, LenRel::AT_MOST), Some(held)))
+            }
             // A local the walk has settled measures the same as the
             // constant that could have been written in its place, which is
             // how a value the caller passed in is read.
@@ -1104,9 +1188,10 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     /// The length an operand is itself measured by.
     ///
     /// A value below one that is itself measured against a length is below
-    /// that length too, which is what a pair of guards written one inside
-    /// the other proves. Only the two operators that carry over are read:
-    /// the rest say nothing about the length.
+    /// that length too, with whatever the first had to spare, which is what
+    /// a pair of guards written one inside the other proves. Only the two
+    /// operators that carry over are read: the rest say nothing about the
+    /// length.
     fn chained_to(
         &self,
         state: &State<'tcx>,
@@ -1117,8 +1202,8 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             return None;
         }
         let held = self.slot_read(operand)?;
-        let (_, of) = self.fact(state, operand).order.first()?;
-        Some((Against::Length(of), Some(held)))
+        let (under, of) = self.fact(state, operand).order.first()?;
+        Some((Against::Length(of, under), Some(held)))
     }
 
     /// The end of an operand's range that an operator reads.
