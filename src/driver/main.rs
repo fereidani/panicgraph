@@ -159,6 +159,16 @@ fn main() -> std::process::ExitCode {
         args.push(format!("--sysroot={root}"));
     }
 
+    // Cargo learns about the target by compiling an empty crate it names
+    // on standard input. The probe never needs what is there, and reading
+    // it would turn anything a caller left on it into the crate, so the
+    // empty source is taken from the null device instead.
+    for arg in &mut args {
+        if arg == "-" {
+            *arg = "/dev/null".to_owned();
+        }
+    }
+
     // Without this, dependencies keep MIR only for generic and small items,
     // so concrete functions become opaque and the panics inside them are
     // invisible.

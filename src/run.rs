@@ -146,7 +146,11 @@ fn build(
             .arg(host_triple()?);
     }
 
-    cmd.env("RUSTC_WRAPPER", driver)
+    // Cargo probes the compiler with a crate read from standard input, so
+    // whatever the caller left on it would become that crate. The build
+    // reads nothing from it, so it is closed here rather than inherited.
+    cmd.stdin(std::process::Stdio::null())
+        .env("RUSTC_WRAPPER", driver)
         .env("PANICGRAPH_OUT", &layout.out)
         .env("PANICGRAPH_PROFILE", &args.profile)
         .env("PANICGRAPH_STD_MODE", args.std_mode.name());
