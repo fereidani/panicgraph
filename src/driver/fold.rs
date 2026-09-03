@@ -350,6 +350,12 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                     // A link to the place being written says nothing.
                     fact.same = None;
                 }
+                if fact.over.is_some_and(|(of, _)| Some(of) == target) {
+                    // Neither does being reached from the value the write
+                    // replaces: a counter stepped in place is not one step
+                    // above itself.
+                    fact.over = None;
+                }
                 if let Some(slot) = target {
                     put(state, slot, fact);
                 }

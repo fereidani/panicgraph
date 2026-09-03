@@ -1270,6 +1270,29 @@ pub fn clean_scan_until(v: &[u8], stop: u8) -> &[u8] {
     &v[..at]
 }
 
+/// Clean. The counter leaves the loop either at the end or at the byte it
+/// was looking for, and both are inside the slice.
+pub fn clean_scan_break(v: &[u8], stop: u8) -> &[u8] {
+    let mut at = 0;
+    while at < v.len() {
+        if v[at] == stop {
+            break;
+        }
+        at += 1;
+    }
+    &v[..at]
+}
+
+/// Clean. What the loop proves about the counter is still standing at the
+/// read written after it, once the guard there rules out the end.
+pub fn clean_index_after_scan(v: &[u8], stop: u8) -> u8 {
+    let mut at = 0;
+    while at < v.len() && v[at] != stop {
+        at += 1;
+    }
+    if at < v.len() { v[at] } else { 0 }
+}
+
 /// Reaches `index`. Stepping by two can walk over the end.
 pub fn must_scan_by_two(v: &[u8], stop: u8) -> &[u8] {
     let mut at = 0;

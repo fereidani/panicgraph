@@ -195,6 +195,9 @@ const MUST_BE_CLEAN_IN_RELEASE: &[&str] = &[
     "clean_vector_index_guard",
     "clean_deque_index_guard",
     "clean_string_index_guard",
+    "clean_scan_until",
+    "clean_scan_break",
+    "clean_index_after_scan",
 ];
 
 /// The functions that cannot panic and that the analysis cannot yet say so
@@ -204,12 +207,7 @@ const MUST_BE_CLEAN_IN_RELEASE: &[&str] = &[
 /// clean, and what is missing is a rule that proves it without leaning on
 /// one that is unsound. The test insists they are still reported, so that
 /// whoever supplies the missing rule is told to move the entry.
-const NOT_SETTLED: &[&str] = &[
-    // The counter is at most the length at every turn of the loop, but the
-    // walk loses that where the two ways into the loop meet, and the slice
-    // the counter ends up cutting is what reads it.
-    "clean_scan_until",
-];
+const NOT_SETTLED: &[&str] = &[];
 
 /// The functions that must stay clean in a debug build as well.
 ///

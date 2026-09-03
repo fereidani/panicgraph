@@ -645,13 +645,20 @@ impl<'tcx> Fact<'tcx> {
     }
 
     /// The fact widened away from the one it replaced.
+    ///
+    /// Only an end that moved is pushed out. A claim that is the same on
+    /// both sides has nothing to widen and stands as it is, whatever kind
+    /// of claim it is: a length or a value ruled out has no range to push,
+    /// and giving it up would lose a bound the loop never threatened.
     pub fn widened(self, from: Self, stops: &Thresholds) -> Self {
         Self {
             value: match (self.value, from.value) {
+                (Some(now), Some(was)) if now == was => Some(now),
                 (Some(now), Some(was)) => now.widened(was, stops),
                 _ => None,
             },
             extent: match (self.extent, from.extent) {
+                (Some(now), Some(was)) if now == was => Some(now),
                 (Some(now), Some(was)) => Value::Within(now)
                     .widened(Value::Within(was), stops)
                     .and_then(Value::bounds),
