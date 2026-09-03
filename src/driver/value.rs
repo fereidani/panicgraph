@@ -237,13 +237,33 @@ impl Known<'_> {
     }
 }
 
-/// How many slices one value's ordering is kept against.
+/// A distance cut down to what a claim can count, which weakens the claim
+/// rather than wronging it: less to spare is still to spare.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the value is checked against the counter's range first"
+)]
+const fn clipped(by: u64) -> u32 {
+    if by > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        by as u32
+    }
+}
+
+/// How many quantities one value's ordering is kept against.
 ///
 /// Two is what `min(a.len(), b.len())` leaves behind: the answer is inside
-/// both slices, and a read of either has to find its own claim.
-const RANKS: usize = 2;
+/// both slices, and a read of either has to find its own claim. A third
+/// seat is for the plain value a guard measures against on top of those,
+/// which is a length's own local as often as not.
+const RANKS: usize = 3;
 
-/// How a value is ordered against the lengths of slices.
+/// How a value is ordered against other quantities.
+///
+/// Each claim names a local. One holding a slice stands for the length of
+/// that slice; any other stands for the number it holds, so a guard between
+/// two values the walk cannot settle still orders the pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Ranks {
     held: [Option<(LenRel, mir::Local)>; RANKS],
@@ -505,16 +525,17 @@ impl<'tcx> Bounds<'tcx> {
     }
 }
 
-/// How a value is ordered against the length of a slice.
+/// How a value is ordered against another quantity: the length of a slice,
+/// or a number another local or place holds.
 ///
-/// The value is at most the length less `short`. Nothing short is what a
+/// The value is at most the quantity less `short`. Nothing short is what a
 /// range end check asks, and one short is what an index check asks, since
 /// a value below the length is at most one short of it. A guard written
 /// against the value raised by a constant leaves the constant here, which
 /// is what carries `i + 16 <= len` down to `v[i + 3]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LenRel {
-    pub short: u64,
+    pub short: u32,
 }
 
 impl LenRel {
@@ -545,15 +566,17 @@ impl LenRel {
     /// The claim after the value is raised by a constant, when what was to
     /// spare covers it.
     pub fn raised(self, by: u64) -> Option<Self> {
+        let by = u32::try_from(by).ok()?;
         self.short.checked_sub(by).map(|short| Self { short })
     }
 
     /// The claim after a constant is taken off the value, which leaves it
     /// that much further under the length. Saturating keeps the claim a
-    /// weaker one rather than a wrong one.
+    /// weaker one rather than a wrong one, and so does cutting a constant
+    /// down to what the counter holds.
     pub const fn lowered(self, by: u64) -> Self {
         Self {
-            short: self.short.saturating_add(by),
+            short: self.short.saturating_add(clipped(by)),
         }
     }
 }
@@ -936,13 +959,15 @@ pub enum Against<'tcx> {
     /// the length itself, with nothing to spare, or a value already known
     /// to sit that far under it.
     Length(mir::Local, LenRel),
-    /// The quantity read from a place, named by the slot that place is
-    /// recorded at.
+    /// The number read from a place or held by a local, named by the slot
+    /// it is recorded at, and what that number has to spare under a third
+    /// quantity when it is itself measured.
     ///
     /// A container keeps its length as a field rather than as a slice's
     /// metadata, so this is how a guard on `v.len()` reaches the check that
-    /// reads the field again.
-    Place(mir::Local),
+    /// reads the field again, and how a guard between two plain values
+    /// reaches the check written between the ends of a range.
+    Place(mir::Local, LenRel),
 }
 
 /// The comparison operator with its operands exchanged.
@@ -984,7 +1009,7 @@ pub fn fact_of(
     match against {
         Against::Constant(k) => constant_fact(op, k).map(Taught::Value),
         Against::Length(of, under) => length_fact(op, of, true, under),
-        Against::Place(of) => length_fact(op, of, false, LenRel::AT_MOST),
+        Against::Place(of, under) => length_fact(op, of, false, under),
     }
 }
 
@@ -1091,7 +1116,6 @@ fn measured_against(
     left: Fact<'_>,
     right: Fact<'_>,
 ) -> Option<bool> {
-    use mir::BinOp::{Ge, Gt, Le, Lt};
     // The quantity on the right is named by the slice it measures and by
     // the place it was read from, and either name can carry the ordering,
     // so both are tried. A vector's length is both at once: the metadata of
@@ -1101,9 +1125,18 @@ fn measured_against(
         Some(Value::Length(of)) => Some(of),
         _ => None,
     };
+    // A slice as long as another is measured by the other's bounds too.
     let rel = measured
         .and_then(named)
-        .or_else(|| right.same.and_then(named))?;
+        .or_else(|| right.same.and_then(named))
+        .or_else(|| right.paired.and_then(named))?;
+    ordered_by(op, rel)
+}
+
+/// What a value known to sit under another says about a comparison between
+/// the two, read with the measured value on the left.
+pub const fn ordered_by(op: mir::BinOp, rel: LenRel) -> Option<bool> {
+    use mir::BinOp::{Ge, Gt, Le, Lt};
     match op {
         Le => Some(true),
         Gt => Some(false),

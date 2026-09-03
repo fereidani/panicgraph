@@ -122,6 +122,11 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_reach_past_guard", "index"),
     ("must_window_past_sixteen", "index"),
     ("must_guard_across_borrow", "index"),
+    ("must_range_without_order", "index"),
+    ("must_index_under_loose_chain", "index"),
+    ("must_after_call_that_cannot_return", "explicit"),
+    ("at_most_ten", "explicit"),
+    ("must_always_stub", "explicit"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -136,6 +141,7 @@ const MUST_NOT_PANIC: &[(&str, &str)] = &[
     ("must_dyn_speak", "explicit"),
     ("must_modulo_length", "index"),
     ("must_copy_into_prefix", "explicit"),
+    ("must_after_call_that_cannot_return", "index"),
 ];
 
 /// The functions that must be reported with nothing at all in a release
@@ -208,6 +214,9 @@ const MUST_BE_CLEAN_IN_RELEASE: &[&str] = &[
     "clean_reach_within_guard",
     "clean_window_of_sixteen",
     "clean_guard_before_borrow",
+    "clean_range_between_guards",
+    "clean_index_under_chained_bound",
+    "clean_index_of_paired_slice",
 ];
 
 /// The functions that cannot panic and that the analysis cannot yet say so
@@ -342,6 +351,37 @@ fn a_debug_build_still_folds_the_guards() {
              reported {categories:?}"
         );
     }
+}
+
+#[test]
+fn a_panic_every_call_reaches_is_reported_as_always() {
+    let doc = support::analyse_fixture_json("release", &[]);
+    let findings = doc["findings"].as_array().cloned().unwrap_or_default();
+    let always_of = |name: &str| -> Vec<String> {
+        findings
+            .iter()
+            .find(|f| f["function"] == name)
+            .and_then(|f| f["always"].as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        always_of("must_always_stub"),
+        vec!["explicit".to_owned()],
+        "a stub that panics on every call is always a panic"
+    );
+    assert!(
+        always_of("must_divide").is_empty(),
+        "a check that depends on the argument is not always a panic"
+    );
+    assert!(
+        always_of("must_after_call_that_cannot_return").is_empty(),
+        "a panic reached through a call is the callee's to call always"
+    );
 }
 
 #[test]

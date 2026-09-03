@@ -179,6 +179,11 @@ pub struct PanicSite {
     pub loc: Option<Loc>,
     /// When this site is reachable.
     pub guard: Guard,
+    /// True when every execution of the function raises here: no path
+    /// returns without passing through the site, no loop can spin
+    /// instead, and the check, where it is one, fails every time.
+    #[serde(default)]
+    pub certain: bool,
 }
 
 /// A call from one function to another.
@@ -207,6 +212,11 @@ pub struct CallSite {
     /// candidates can be matched to them.
     #[serde(default)]
     pub sig: Option<String>,
+    /// The type a candidate implementation is for, kept on the candidates
+    /// of a call through a trait object so the merge can drop those no
+    /// reachable code makes into an object.
+    #[serde(default)]
+    pub self_ty: Option<String>,
 }
 
 /// A function reified to a pointer somewhere in the reachable graph.
@@ -359,4 +369,9 @@ pub struct Artifact {
     /// The functions observed being reified to pointers.
     #[serde(default)]
     pub reified: Vec<Reified>,
+    /// The types observed being made into trait objects, by their rendered
+    /// names. A call through a trait object can only reach an
+    /// implementation for one of these.
+    #[serde(default)]
+    pub coerced: Vec<String>,
 }

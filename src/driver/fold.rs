@@ -39,6 +39,7 @@ pub struct Reach {
     live: Vec<bool>,
     settled: Vec<bool>,
     quiet: Vec<bool>,
+    failing: Vec<bool>,
 }
 
 /// Records a flag against one block, ignoring a block the walk does not
@@ -56,6 +57,7 @@ impl Reach {
             live: vec![true; blocks],
             settled: vec![false; blocks],
             quiet: vec![false; blocks],
+            failing: vec![false; blocks],
         }
     }
 
@@ -77,6 +79,11 @@ impl Reach {
     /// else, which is why the callee is still analysed on its own.
     pub fn is_quiet(&self, bb: BasicBlock) -> bool {
         self.quiet.get(bb.as_usize()).copied().unwrap_or(false)
+    }
+
+    /// Whether a block's `Assert` was proved to fail every time it runs.
+    pub fn is_failing(&self, bb: BasicBlock) -> bool {
+        self.failing.get(bb.as_usize()).copied().unwrap_or(false)
     }
 }
 
@@ -282,6 +289,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             live: vec![false; blocks],
             settled: vec![false; blocks],
             quiet: vec![false; blocks],
+            failing: vec![false; blocks],
         };
         let mut work = Work::new(blocks, self.stops());
         work.merge(mir::START_BLOCK, entry);
@@ -372,6 +380,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         // block once another path reaches it with a different value.
         mark(&mut reach.settled, bb, false);
         mark(&mut reach.quiet, bb, false);
+        mark(&mut reach.failing, bb, false);
         self.arrive(bb);
         // The body outlives the walk, so reading it through a copy of the
         // reference leaves the walk free to record what it finds.
@@ -705,6 +714,12 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 let held = Self::known_at(&state, mir::RETURN_PLACE);
                 self.returns = self.returns.met(Self::abroad(held));
             }
+            // What the callee hands back is returned to the caller in this
+            // body's place, so this is a way out that says nothing about
+            // the value.
+            TerminatorKind::TailCall { .. } => {
+                self.returns = self.returns.met(Fact::default());
+            }
             _ => Self::onward(kind, state, work),
         }
     }
@@ -957,7 +972,12 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         {
             put(&mut after, slot, found.left);
         }
-        if let Some(target) = call.target {
+        // A callee no path returns from under these arguments never comes
+        // back here, so nothing past the call runs on this path: the panic
+        // it raises instead is the call's own, recorded against it.
+        if let Some(target) = call.target
+            && found.returns
+        {
             work.merge(target, after);
         }
         // A callee that cannot raise cannot unwind, so nothing reaches the
@@ -999,8 +1019,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             TerminatorKind::UnwindResume
             | TerminatorKind::UnwindTerminate(_)
             | TerminatorKind::Unreachable
-            | TerminatorKind::CoroutineDrop
-            | TerminatorKind::TailCall { .. } => {}
+            | TerminatorKind::CoroutineDrop => {}
             // A yield or an inline assembly block writes through operands
             // this walk does not read, so nothing survives it.
             _ => {
@@ -1121,7 +1140,7 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                     || measured.source.is_some_and(|of| self.touches(s, of))
                     || match measured.against {
                         Against::Constant(_) => false,
-                        Against::Length(of, _) | Against::Place(of) => {
+                        Against::Length(of, _) | Against::Place(of, _) => {
                             self.touches(s, of)
                         }
                     })
@@ -1166,13 +1185,16 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         }
     }
 
-    /// What an operand measures, named by the place it was read from.
+    /// What an operand measures, named by the place or local it was read
+    /// from.
     ///
     /// A quantity the walk cannot settle is still one value, and a place
     /// read twice without a write in between reads the same both times.
     /// Naming the place is what carries a guard on a container's length
     /// field to the check that reads the field again, which is how a vector
-    /// indexed under `at < v.len()` folds.
+    /// indexed under `at < v.len()` folds. Naming a plain local does the
+    /// same for a guard between two values: `start <= end` is what the
+    /// check between the ends of `v[start..end]` asks.
     fn sited(
         &self,
         state: &State<'tcx>,
@@ -1180,18 +1202,28 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     ) -> Measured<'tcx> {
         let held = self.slot_read(operand)?;
         let of = root_of(state, held);
-        self.places
-            .path(of)
-            .map(|_| (Against::Place(of), Some(held)))
+        if self.places.path(of).is_none() && !self.counts(of) {
+            return None;
+        }
+        Some((Against::Place(of, LenRel::AT_MOST), Some(held)))
     }
 
-    /// The length an operand is itself measured by.
+    /// Whether a local holds a number another value can be ordered against.
+    fn counts(&self, local: mir::Local) -> bool {
+        self.mir
+            .local_decls
+            .get(local)
+            .and_then(|decl| self.monomorphize(decl.ty))
+            .is_some_and(|ty| matches!(ty.kind(), ty::Int(_) | ty::Uint(_)))
+    }
+
+    /// The quantity an operand is itself measured by.
     ///
     /// A value below one that is itself measured against a length is below
     /// that length too, with whatever the first had to spare, which is what
     /// a pair of guards written one inside the other proves. Only the two
     /// operators that carry over are read: the rest say nothing about the
-    /// length.
+    /// quantity.
     fn chained_to(
         &self,
         state: &State<'tcx>,
@@ -1203,7 +1235,12 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         }
         let held = self.slot_read(operand)?;
         let (under, of) = self.fact(state, operand).order.first()?;
-        Some((Against::Length(of, under), Some(held)))
+        let against = if self.slice_behind(of) {
+            Against::Length(of, under)
+        } else {
+            Against::Place(of, under)
+        };
+        Some((against, Some(held)))
     }
 
     /// The end of an operand's range that an operator reads.
@@ -1336,7 +1373,10 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
                 work.merge(target, state);
             }
             // The check fails every time, so only the panic path continues.
-            Some(_) => unwind_to(unwind, state, work),
+            Some(_) => {
+                mark(&mut reach.failing, bb, true);
+                unwind_to(unwind, state, work);
+            }
             None => {
                 work.merge(
                     target,

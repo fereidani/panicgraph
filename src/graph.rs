@@ -5,8 +5,10 @@
 //! state in flat vectors.
 
 use crate::{
-    model::{Artifact, Body, BuildConfig, CallSite, FuncKey, Reified},
-    util::Map,
+    model::{
+        Artifact, Body, BuildConfig, CallSite, EdgeKind, FuncKey, Reified,
+    },
+    util::{Map, Set},
 };
 
 /// A dense index into [`Graph`].
@@ -54,6 +56,7 @@ impl Graph {
             config: None,
         };
         let mut reified: Vec<Reified> = Vec::new();
+        let mut coerced: Set<String> = Set::default();
         for artifact in artifacts {
             if graph.config.is_none() {
                 graph.config = Some(artifact.config.clone());
@@ -62,8 +65,10 @@ impl Graph {
                 graph.insert_body(body);
             }
             reified.extend(artifact.reified);
+            coerced.extend(artifact.coerced);
         }
         graph.expand_fn_pointers(&reified);
+        graph.narrow_candidates(&coerced);
         graph.materialize_missing_callees();
         graph.build_reverse_edges();
         graph
@@ -96,6 +101,27 @@ impl Graph {
                 }
             }
             body.calls.extend(extra);
+        }
+    }
+
+    /// Drops the candidates of a call through a trait object whose type no
+    /// reachable code makes into an object.
+    ///
+    /// An implementation can only be behind a trait object if some code
+    /// turned a pointer to its type into one to the trait, and the driver
+    /// records every place that happens. The unresolved edge stays either
+    /// way: a candidate narrows what the call could be, it does not close
+    /// the set.
+    fn narrow_candidates(&mut self, coerced: &Set<String>) {
+        for body in &mut self.bodies {
+            body.calls.retain(|call| {
+                !(call.candidate
+                    && call.kind == EdgeKind::Vtable
+                    && call
+                        .self_ty
+                        .as_ref()
+                        .is_some_and(|ty| !coerced.contains(ty)))
+            });
         }
     }
 

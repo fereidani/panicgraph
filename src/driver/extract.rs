@@ -66,6 +66,9 @@ impl At {
 struct Raw<'tcx> {
     sites: Vec<PanicSite>,
     site_blocks: Vec<BasicBlock>,
+    /// Whether each site raises whenever its block runs, rather than only
+    /// when a check in the block fails.
+    site_fires: Vec<bool>,
     calls: Vec<CallSite>,
     call_blocks: Vec<BasicBlock>,
     unwind_edges: Vec<(UnwindOrigin, BasicBlock)>,
@@ -79,10 +82,11 @@ impl Raw<'_> {
     /// The origin names the entry by its position, so the index has to be
     /// read before the push, and every caller has to go through here for
     /// the two vectors to stay in step.
-    fn add_site(&mut self, at: At, site: PanicSite) {
+    fn add_site(&mut self, at: At, site: PanicSite, fires: bool) {
         let index = u32::try_from(self.sites.len()).unwrap_or(u32::MAX);
         self.sites.push(site);
         self.site_blocks.push(at.bb);
+        self.site_fires.push(fires);
         self.record_unwind(UnwindOrigin::Site(index), at.unwind);
     }
 
@@ -122,6 +126,8 @@ pub struct Extractor<'tcx> {
     seen: Set<String>,
     reified: Vec<Reified>,
     reified_seen: Set<(FuncKey, String)>,
+    /// The types reachable code makes into trait objects.
+    coerced: Set<String>,
 }
 
 /// What the extractor found in one crate.
@@ -130,6 +136,8 @@ pub struct Extraction {
     pub bodies: Vec<Body>,
     /// Every function observed being reified to a pointer.
     pub reified: Vec<Reified>,
+    /// Every type observed being made into a trait object.
+    pub coerced: Vec<String>,
 }
 
 impl<'tcx> Extractor<'tcx> {
@@ -148,6 +156,7 @@ impl<'tcx> Extractor<'tcx> {
             seen: Set::default(),
             reified: Vec::new(),
             reified_seen: Set::default(),
+            coerced: Set::default(),
         }
     }
 
@@ -166,9 +175,13 @@ impl<'tcx> Extractor<'tcx> {
             }
             queue.extend(self.build(work, FuncKey(key)));
         }
+        let mut coerced: Vec<String> = self.coerced.into_iter().collect();
+        // Sorted so two runs describe one build the same way.
+        coerced.sort();
         Extraction {
             bodies: self.bodies,
             reified: self.reified,
+            coerced,
         }
     }
 
@@ -337,6 +350,7 @@ impl<'tcx> Extractor<'tcx> {
             }
             for stmt in &data.statements {
                 self.note_reified(&mut raw, cx, stmt);
+                self.note_coerced(cx, stmt, mir);
             }
             let Some(term) = &data.terminator else {
                 continue;
@@ -350,7 +364,7 @@ impl<'tcx> Extractor<'tcx> {
                         continue;
                     }
                     let at = At::new(bb, *unwind, info);
-                    self.push_assert(&mut raw, at, msg);
+                    self.push_assert(&mut raw, at, msg, reach.is_failing(bb));
                 }
                 TerminatorKind::Call {
                     func,
@@ -380,11 +394,43 @@ impl<'tcx> Extractor<'tcx> {
                 _ => {}
             }
         }
+        Self::settle_certain(&mut raw, mir, &reach);
         raw
     }
 
+    /// Marks the sites every execution of the body raises at.
+    ///
+    /// A site is certain when it raises whenever its block runs and no
+    /// execution gets round the block: no path from the entry reaches a
+    /// way out of the body without passing through it, and no path can go
+    /// round in a loop instead, which is as far as a walk that does not
+    /// prove loops terminate can go.
+    fn settle_certain(
+        raw: &mut Raw<'tcx>,
+        mir: &mir::Body<'tcx>,
+        reach: &fold::Reach,
+    ) {
+        for (index, site) in raw.sites.iter_mut().enumerate() {
+            let fires = raw.site_fires.get(index).copied().unwrap_or(false);
+            let Some(&bb) = raw.site_blocks.get(index) else {
+                continue;
+            };
+            // A cleanup block runs only while another panic unwinds, so a
+            // site in one is never the whole story of a call.
+            site.certain = fires
+                && !mir.basic_blocks[bb].is_cleanup
+                && unavoidable(mir, reach, bb);
+        }
+    }
+
     /// Records a compiler inserted check as a panic site.
-    fn push_assert<O>(&self, raw: &mut Raw<'tcx>, at: At, msg: &AssertKind<O>) {
+    fn push_assert<O>(
+        &self,
+        raw: &mut Raw<'tcx>,
+        at: At,
+        msg: &AssertKind<O>,
+        fails: bool,
+    ) {
         if !self.tcx.sess.overflow_checks() && msg.is_optional_overflow_check()
         {
             // Codegen drops these outright in a build without overflow
@@ -401,8 +447,9 @@ impl<'tcx> Extractor<'tcx> {
             sink: None,
             loc: self.loc_of(at.span),
             guard: Guard::default(),
+            certain: false,
         };
-        raw.add_site(at, site);
+        raw.add_site(at, site, fails);
     }
 
     /// Records a call, either as a panic site or as a graph edge.
@@ -432,6 +479,7 @@ impl<'tcx> Extractor<'tcx> {
                 barrier: false,
                 candidate: false,
                 sig: Some(format!("{ty}")),
+                self_ty: None,
             };
             raw.add_call(at, site);
             return;
@@ -485,8 +533,9 @@ impl<'tcx> Extractor<'tcx> {
                     sink: Some("core::intrinsics::abort".to_owned()),
                     loc: self.loc_of(at.span),
                     guard: Guard::default(),
+                    certain: false,
                 };
-                raw.add_site(at, site);
+                raw.add_site(at, site, true);
             }
             // Other intrinsics are compiler defined operations. They cannot
             // call back into the program, so they add nothing to the graph,
@@ -614,8 +663,9 @@ impl<'tcx> Extractor<'tcx> {
                 sink: Some(path.clone()),
                 loc: self.loc_of(at.span),
                 guard: Guard::default(),
+                certain: false,
             };
-            raw.add_site(at, site);
+            raw.add_site(at, site, true);
         }
     }
 
@@ -771,8 +821,9 @@ impl<'tcx> Extractor<'tcx> {
                     sink: None,
                     loc: self.loc_of(at.span),
                     guard: Guard::default(),
+                    certain: false,
                 };
-                raw.add_site(at, site);
+                raw.add_site(at, site, true);
             }
             // The layout could not be computed, so neither answer is safe
             // to claim.
@@ -871,8 +922,51 @@ impl<'tcx> Extractor<'tcx> {
             barrier,
             candidate: false,
             sig: None,
+            self_ty: None,
         };
         raw.add_call(at, site);
+    }
+
+    /// Records a type being made into a trait object, so that a call
+    /// through one can name the implementations that can be behind it.
+    ///
+    /// Only reachable code is scanned, so a type no execution turns into an
+    /// object is never a candidate, however many implementations the trait
+    /// has. The object is made by unsizing a pointer to the type into one
+    /// to the trait, and the type is what that pointer points at.
+    fn note_coerced(
+        &mut self,
+        cx: Work<'tcx>,
+        stmt: &mir::Statement<'tcx>,
+        mir: &mir::Body<'tcx>,
+    ) {
+        let mir::StatementKind::Assign(pair) = &stmt.kind else {
+            return;
+        };
+        let mir::Rvalue::Cast(
+            mir::CastKind::PointerCoercion(
+                ty::adjustment::PointerCoercion::Unsize,
+                _,
+            ),
+            operand,
+            target,
+        ) = &pair.1
+        else {
+            return;
+        };
+        let Some(target) = self.normalize(cx, *target) else {
+            return;
+        };
+        let source = operand.ty(&mir.local_decls, self.tcx);
+        let Some(source) = self.normalize(cx, source) else {
+            return;
+        };
+        if !names_object(target) || names_object(source) {
+            return;
+        }
+        if let Some(pointee) = pointee_of(source) {
+            self.coerced.insert(format!("{pointee}"));
+        }
     }
 
     /// Records a function being turned into a pointer, so indirect calls
@@ -979,6 +1073,7 @@ impl<'tcx> Extractor<'tcx> {
                 barrier: false,
                 candidate: true,
                 sig: None,
+                self_ty: Some(format!("{}", trait_ref.self_ty())),
             };
             raw.add_call(at, site);
             raw.successors.push(Work {
@@ -1081,6 +1176,102 @@ impl<'tcx> Extractor<'tcx> {
             col: pos.col.0.saturating_add(1).try_into().unwrap_or(0),
         })
     }
+}
+
+/// Whether a type is or holds a trait object.
+fn names_object(ty: ty::Ty<'_>) -> bool {
+    ty.walk().any(|part| {
+        part.as_type()
+            .is_some_and(|inner| matches!(inner.kind(), ty::Dynamic(..)))
+    })
+}
+
+/// The type a pointer or a smart pointer points at.
+///
+/// A box names it outright, a reference or a raw pointer carries it, and
+/// any other pointer wrapper keeps it as its first type argument, wrapped
+/// once more where it is pinned.
+fn pointee_of(ty: ty::Ty<'_>) -> Option<ty::Ty<'_>> {
+    match ty.kind() {
+        ty::Ref(_, inner, _) | ty::RawPtr(inner, _) => Some(*inner),
+        ty::Adt(def, _) if def.is_box() => Some(ty.expect_boxed_ty()),
+        ty::Adt(_, args) => {
+            let inner = args.types().next()?;
+            match inner.kind() {
+                ty::Ref(..) | ty::RawPtr(..) => pointee_of(inner),
+                ty::Adt(def, _) if def.is_box() => pointee_of(inner),
+                _ => Some(inner),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether every execution of a body that gets past its entry runs one
+/// block.
+///
+/// Every path from the entry through live blocks is followed while it
+/// avoids the block. Reaching a way out of the body shows the block can
+/// be got round, and so does closing a loop, since a loop the walk cannot
+/// prove finite might spin instead. The walk enters each block once, so
+/// it is bounded by the edges of the body.
+fn unavoidable(
+    mir: &mir::Body<'_>,
+    reach: &fold::Reach,
+    avoid: BasicBlock,
+) -> bool {
+    const NEW: u8 = 0;
+    const OPEN: u8 = 1;
+    const DONE: u8 = 2;
+    let blocks = mir.basic_blocks.len();
+    let mut state = vec![NEW; blocks];
+    let mut stack: Vec<(BasicBlock, usize)> = vec![(mir::START_BLOCK, 0)];
+    if let Some(slot) = state.get_mut(mir::START_BLOCK.as_usize()) {
+        *slot = OPEN;
+    }
+    let edges: usize = mir
+        .basic_blocks
+        .iter()
+        .map(|data| data.terminator().successors().count())
+        .sum();
+    for _ in 0..edges.saturating_add(blocks).saturating_add(1) {
+        let Some(&(bb, next)) = stack.last() else {
+            return true;
+        };
+        let term = mir.basic_blocks[bb].terminator();
+        if matches!(
+            term.kind,
+            TerminatorKind::Return
+                | TerminatorKind::TailCall { .. }
+                | TerminatorKind::Yield { .. }
+        ) {
+            return false;
+        }
+        let Some(succ) = term.successors().nth(next) else {
+            if let Some(slot) = state.get_mut(bb.as_usize()) {
+                *slot = DONE;
+            }
+            stack.pop();
+            continue;
+        };
+        if let Some(top) = stack.last_mut() {
+            top.1 = next.saturating_add(1);
+        }
+        if succ == avoid || !reach.is_live(succ) {
+            continue;
+        }
+        match state.get(succ.as_usize()).copied() {
+            Some(OPEN) => return false,
+            Some(NEW) => {
+                if let Some(slot) = state.get_mut(succ.as_usize()) {
+                    *slot = OPEN;
+                }
+                stack.push((succ, 0));
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Maps a compiler inserted check to a reportable category.

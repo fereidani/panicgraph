@@ -118,6 +118,7 @@ fn site(
         sink: None,
         loc: None,
         guard,
+        certain: false,
     }
 }
 
@@ -132,6 +133,7 @@ fn call(callee: &str, guard: Guard) -> CallSite {
         barrier: false,
         candidate: false,
         sig: None,
+        self_ty: None,
     }
 }
 
@@ -139,6 +141,7 @@ fn call(callee: &str, guard: Guard) -> CallSite {
 pub fn graph(bodies: Vec<Body>) -> Graph {
     Graph::from_artifacts(vec![Artifact {
         reified: Vec::new(),
+        coerced: Vec::new(),
         krate: "test".to_owned(),
         config: BuildConfig {
             rustc: "test".to_owned(),

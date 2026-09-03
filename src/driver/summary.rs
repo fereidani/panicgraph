@@ -70,6 +70,13 @@ impl<'tcx> Returns<'tcx> {
         !self.walked
     }
 
+    /// Whether some path out of the body returns to the caller, as far as
+    /// the walk could see. A walk cut short may have missed one, so it is
+    /// read as though it had found one.
+    pub const fn came_back(self) -> bool {
+        self.walked || self.partial
+    }
+
     /// Gives up on saying anything about what the body leaves behind.
     pub const fn given_up() -> Self {
         Self {
@@ -108,6 +115,9 @@ pub struct Summary<'tcx> {
     pub returned: Vec<(Path, Fact<'tcx>)>,
     /// Whether the callee, walked with these claims, can still raise.
     pub quiet: bool,
+    /// Whether some path through the callee, walked with these claims,
+    /// returns to the caller.
+    pub returns: bool,
 }
 
 /// What a summary is kept under: the body, how many more calls the walk
@@ -118,12 +128,25 @@ pub type Key<'tcx> = (Instance<'tcx>, u32, State<'tcx>);
 pub type Cache<'tcx> = Map<Key<'tcx>, Summary<'tcx>>;
 
 /// What folding a callee at one call site found.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct Found<'tcx> {
     /// What every path out of the callee leaves behind.
     pub left: Fact<'tcx>,
     /// Whether the callee, walked with these arguments, can still raise.
     pub quiet: bool,
+    /// Whether the callee, walked with these arguments, can return at all.
+    /// A call nothing was found out about is read as one that does.
+    pub returns: bool,
+}
+
+impl Default for Found<'_> {
+    fn default() -> Self {
+        Self {
+            left: Fact::default(),
+            quiet: false,
+            returns: true,
+        }
+    }
 }
 
 /// What one argument of a call tells the parameter it becomes.
@@ -172,7 +195,11 @@ impl<'tcx> Folder<'_, 'tcx> {
             return Found::default();
         };
         if let Some(left) = self.contracted(state, ty, args, destination) {
-            return Found { left, quiet: false };
+            return Found {
+                left,
+                quiet: false,
+                returns: true,
+            };
         }
         self.folded(state, ty, args, destination, after, cache)
     }
@@ -319,6 +346,7 @@ impl<'tcx> Folder<'_, 'tcx> {
             return Found {
                 left: known.left,
                 quiet: known.quiet,
+                returns: known.returns,
             };
         }
         let reach = folder.run(key.2.clone(), cache);
@@ -327,11 +355,13 @@ impl<'tcx> Folder<'_, 'tcx> {
             left: folder.returns.claim(),
             returned: std::mem::take(&mut folder.returned),
             quiet: self.silent(&folder, &reach),
+            returns: folder.returns.came_back(),
         };
         self.handed_back(&summary.returned, destination, after);
         let found = Found {
             left: summary.left,
             quiet: summary.quiet,
+            returns: summary.returns,
         };
         // A walk cut short answered for the budget it had rather than for
         // the body, so it is not an answer another site can reuse.

@@ -746,8 +746,11 @@ impl<'tcx> Folder<'_, 'tcx> {
         let Some((rel, of)) = held.order.first() else {
             return held;
         };
-        let Some(extent) = state.get(of.as_usize()).and_then(|s| s.extent)
-        else {
+        // A slice is measured by how long it was found to be, and a number
+        // by the range it was found to lie in.
+        let Some(extent) = state.get(of.as_usize()).and_then(|slot| {
+            slot.extent.or_else(|| slot.value.and_then(Value::bounds))
+        }) else {
             return held;
         };
         if extent.hi.is_signed() {
@@ -1047,6 +1050,9 @@ impl<'tcx> Folder<'_, 'tcx> {
         if let Some(truth) = value::compare(op, left, right) {
             return self.boolean(truth).map(Value::Exact);
         }
+        if let Some(truth) = self.related(state, op, pair) {
+            return self.boolean(truth).map(Value::Exact);
+        }
         // A value nothing is known about still lies inside its own type,
         // and that alone settles a check written against the end of it:
         // nothing unsigned is below zero, which is what a range index turns
@@ -1080,6 +1086,81 @@ impl<'tcx> Folder<'_, 'tcx> {
             | BinOp::ShrUnchecked => self.shifted(state, op, pair, right),
             _ => None,
         }
+    }
+
+    /// Evaluates a comparison between two locals one of which was measured
+    /// against the other.
+    ///
+    /// A guard between two values the walk cannot settle still orders the
+    /// pair, and that ordering is what the check between the two ends of a
+    /// range asks. One step through a third value is followed as well: a
+    /// value under another that is itself under a third is under that
+    /// third, with both distances to spare.
+    fn related(
+        &self,
+        state: &State<'tcx>,
+        op: BinOp,
+        pair: &(mir::Operand<'tcx>, mir::Operand<'tcx>),
+    ) -> Option<bool> {
+        let left = self.root_slot(state, &pair.0)?;
+        let right = self.root_slot(state, &pair.1)?;
+        let of_right = self.names(state, &pair.1);
+        if let Some(rel) = Self::under(state, left, of_right) {
+            return value::ordered_by(op, rel);
+        }
+        let of_left = self.names(state, &pair.0);
+        let rel = Self::under(state, right, of_left)?;
+        value::ordered_by(value::mirrored(op), rel)
+    }
+
+    /// The locals a claim about an operand's quantity can be recorded
+    /// against: the local it was read from, and the slice it holds the
+    /// length of, since a claim against a length names the slice.
+    fn names(
+        &self,
+        state: &State<'tcx>,
+        operand: &mir::Operand<'tcx>,
+    ) -> [Option<mir::Local>; 2] {
+        let slice = match self.fact(state, operand).value {
+            Some(Value::Length(of)) => Some(of),
+            _ => None,
+        };
+        [self.root_slot(state, operand), slice]
+    }
+
+    /// How far under a quantity a local sits, read from the claims it holds
+    /// and one step through a local those name.
+    fn under(
+        state: &State<'tcx>,
+        measured: mir::Local,
+        of: [Option<mir::Local>; 2],
+    ) -> Option<LenRel> {
+        let against = |ranks: Ranks| {
+            of.iter().flatten().find_map(|name| ranks.against(*name))
+        };
+        let held = Self::known_at(state, measured).order;
+        if let Some(rel) = against(held) {
+            return Some(rel);
+        }
+        held.each().find_map(|(first, mid)| {
+            let second = against(state.get(mid.as_usize())?.order)?;
+            Some(first.lowered(u64::from(second.short)))
+        })
+    }
+
+    /// Whether a local holds a pointer to a slice, so that a claim naming it
+    /// is about how long the slice is rather than about a number it holds.
+    pub(crate) fn slice_behind(&self, local: mir::Local) -> bool {
+        let Some(decl) = self.mir.local_decls.get(local) else {
+            return false;
+        };
+        let Some(ty) = self.monomorphize(decl.ty) else {
+            return false;
+        };
+        let (ty::Ref(_, inner, _) | ty::RawPtr(inner, _)) = ty.kind() else {
+            return false;
+        };
+        matches!(inner.kind(), ty::Slice(_) | ty::Str)
     }
 
     /// The range a division or a remainder leaves behind.

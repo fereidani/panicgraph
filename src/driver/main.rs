@@ -82,6 +82,7 @@ fn emit(tcx: TyCtxt<'_>) -> std::io::Result<()> {
         config: build_config(tcx),
         bodies: extraction.bodies,
         reified: extraction.reified,
+        coerced: extraction.coerced,
     };
 
     let stamp = tcx.stable_crate_id(LOCAL_CRATE).as_u64();

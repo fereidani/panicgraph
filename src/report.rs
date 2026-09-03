@@ -253,6 +253,9 @@ fn human(
                     if let Some(loc) = site.1 {
                         let _ = write!(out, " at {loc}");
                     }
+                    if always(graph, solution, finding, category) {
+                        out.push_str(" (always)");
+                    }
                 }
                 None => {
                     let _ = write!(
@@ -281,6 +284,26 @@ fn human(
 
     let _ =
         writeln!(out, "Run `panicgraph why <function>` to see a call path.");
+}
+
+/// Whether every execution of the function raises this category itself.
+///
+/// A site the body cannot get round is a bug that shows on every call,
+/// where one behind a guard shows only for some argument, so the report
+/// says which it is.
+fn always(
+    graph: &Graph,
+    solution: &Solution,
+    finding: &Finding<'_>,
+    category: Category,
+) -> bool {
+    finding.ids.iter().any(|&id| {
+        let body = graph.body(id);
+        let activity = solution.activity(graph, id);
+        body.sites.iter().enumerate().any(|(i, site)| {
+            site.certain && site.category == category && activity.site(i)
+        })
+    })
 }
 
 /// The reason and place of a panic this function raises itself.
@@ -361,6 +384,15 @@ fn json(
                 "categories": f
                     .categories.names(),
             });
+            let certain: Vec<&str> = f
+                .categories
+                .iter()
+                .filter(|category| always(graph, solution, f, *category))
+                .map(Category::name)
+                .collect();
+            if !certain.is_empty() {
+                item["always"] = certain.into();
+            }
             if let Some(verdicts) = verdicts {
                 let verified: serde_json::Map<String, serde_json::Value> = f
                     .categories

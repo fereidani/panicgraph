@@ -67,11 +67,12 @@ pub struct Subject<'tcx> {
 /// How many readings of one comparison are kept.
 ///
 /// Each operand can be read as the measured side, and each side can be
-/// named by a constant, by a slice length, by a length it is itself below,
-/// or by the place it was read from. The readings describe one comparison
-/// from different sides and none stands for another, so all are kept
-/// rather than letting the first found take the only seat.
-pub const READINGS: usize = 6;
+/// named by a constant, by a slice length, by a quantity it is itself
+/// under, by an end of the other side's range, or by the place or local it
+/// was read from. The readings describe one comparison from different
+/// sides and none stands for another, so all are kept rather than letting
+/// the first found take the only seat.
+pub const READINGS: usize = 8;
 
 /// A comparison a branch turns into a fact about the local it measured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

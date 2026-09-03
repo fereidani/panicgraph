@@ -314,9 +314,21 @@ impl Speak for Loud {
 }
 
 /// Reaches `dyn-call` always, and `explicit` once candidates are followed:
-/// one implementation of the trait panics.
+/// one implementation of the trait panics, and the crate makes an object
+/// of that one.
 pub fn must_dyn_speak(s: &dyn Speak) -> u8 {
     s.speak()
+}
+
+/// Makes the loud implementation into an object, which is what lets a
+/// call through the trait name it as a candidate.
+pub fn loud_object() -> &'static dyn Speak {
+    &Loud
+}
+
+/// Clean. Always panics once called, and the report says so.
+pub fn must_always_stub() -> u32 {
+    unimplemented!()
 }
 
 /// The panicking target a reified pointer can name.
@@ -1390,6 +1402,58 @@ pub fn must_guard_across_borrow(v: &[u8], mut at: usize) -> u8 {
     } else {
         0
     }
+}
+
+/// Clean. The guard orders the two ends, which is what the check between
+/// them asks, and the end is inside the slice.
+pub fn clean_range_between_guards(v: &[u8], start: usize, end: usize) -> &[u8] {
+    if start <= end && end <= v.len() {
+        &v[start..end]
+    } else {
+        v
+    }
+}
+
+/// Reaches `index`. Nothing orders the start against the end.
+pub fn must_range_without_order(v: &[u8], start: usize, end: usize) -> &[u8] {
+    if end <= v.len() { &v[start..end] } else { v }
+}
+
+/// Clean. The index is below a bound that is itself at most the length,
+/// so it is below the length, one guard through the other.
+pub fn clean_index_under_chained_bound(v: &[u8], i: usize, n: usize) -> u8 {
+    if i < n && n <= v.len() { v[i] } else { 0 }
+}
+
+/// Reaches `index`. At most a bound that is at most the length leaves the
+/// index at the length itself.
+pub fn must_index_under_loose_chain(v: &[u8], i: usize, n: usize) -> u8 {
+    if i <= n && n <= v.len() { v[i] } else { 0 }
+}
+
+/// Clean. The index is below one slice, and the other is as long.
+pub fn clean_index_of_paired_slice(v: &[u8], w: &[u8], i: usize) -> u8 {
+    if i < v.len() && v.len() == w.len() {
+        w[i]
+    } else {
+        0
+    }
+}
+
+/// Refuses anything above ten, loudly.
+#[inline(never)]
+fn at_most_ten(x: u32) -> u32 {
+    if x > 10 {
+        panic!("too big");
+    }
+    x
+}
+
+/// Reaches `explicit` through the call and nothing past it: the callee
+/// cannot return for this argument, so the read after it never runs.
+pub fn must_after_call_that_cannot_return(v: &[u8]) -> u8 {
+    let n = at_most_ten(20);
+    v[n as usize]
 }
 
 /// Reaches `index`. Stepping by two can walk over the end.
