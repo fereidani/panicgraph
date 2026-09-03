@@ -26,8 +26,10 @@ use crate::{
 /// call sits shallow, but showing that a call raises nothing means reading
 /// every call it makes in turn, and the standard library reaches an unsafe
 /// primitive several wrappers down: `chunks_exact` calls a constructor
-/// which calls a split which calls the pointer arithmetic under it.
-pub const DEPTH: u32 = 3;
+/// which calls a split which calls the pointer arithmetic under it. A body
+/// is folded once for each set of claims it is handed and answered from
+/// the cache after that, which is what makes the deeper reading cheap.
+pub const DEPTH: u32 = 5;
 
 /// How many blocks folding one body may spend on the callees it reads
 /// values out of.
