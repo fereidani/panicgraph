@@ -46,8 +46,11 @@ use anyhow::Result;
 use crate::{
     Category, CategorySet, Graph,
     api::{FlameRow, children_of},
+    args::{Closures, Generics},
     palette::{Family, Palette, Theme, ink_on},
+    select::Selection,
     solve::Edges,
+    verify::{Verdict, Verdicts},
 };
 
 /// What the picture shows, and how.
@@ -55,8 +58,9 @@ use crate::{
 pub struct View {
     /// Categories assumed impossible.
     pub suppressed: CategorySet,
-    /// When set, the only categories drawn.
-    pub only: Option<CategorySet>,
+    /// Which functions show, under what names, and narrowed to which
+    /// categories.
+    pub selection: Selection,
     /// Which optional edges the solver follows.
     pub edges: Edges,
     /// Whether runs of single calls fold into one frame.
@@ -114,16 +118,27 @@ struct Frame {
 ///
 /// # Errors
 ///
+/// Verdicts, when the artifact was checked, are written on the panics they
+/// concern, in the words the report uses.
+///
+/// # Errors
+///
 /// Returns an error if the fixpoint does not converge or the palette file
 /// is not what the drawing expects.
-pub fn render(graph: &Graph, view: View, out: &mut String) -> Result<()> {
+pub fn render(
+    graph: &Graph,
+    view: View,
+    verdicts: Option<&Verdicts>,
+    out: &mut String,
+) -> Result<()> {
     let palette = Palette::load(view.theme)?;
     let rows = crate::api::flame_rows(
         graph,
         view.suppressed,
-        view.only,
+        view.selection,
         view.edges,
         view.fold,
+        verdicts,
     )?;
     let frames = layout(&rows, &palette);
     let depth = frames.iter().map(|f| f.depth).max().unwrap_or(0);
@@ -197,7 +212,7 @@ pub fn render(graph: &Graph, view: View, out: &mut String) -> Result<()> {
 }
 
 /// The assumptions the picture was drawn under, and what it was narrowed
-/// to, written out.
+/// or widened to, written out.
 fn policy(view: &View) -> String {
     let names = view.suppressed.names();
     let mut text = if names.is_empty() {
@@ -205,7 +220,8 @@ fn policy(view: &View) -> String {
     } else {
         format!("assuming impossible: {}", names.join(", "))
     };
-    if let Some(only) = view.only {
+    let selection = &view.selection;
+    if let Some(only) = selection.only {
         let shown = only.names();
         let _ = write!(
             text,
@@ -216,6 +232,15 @@ fn policy(view: &View) -> String {
                 shown.join(", ")
             }
         );
+    }
+    if selection.all_crates {
+        text.push_str("; dependencies included");
+    }
+    if selection.closures == Closures::Parent {
+        text.push_str("; closures folded into their parents");
+    }
+    if selection.generics == Generics::Instantiated {
+        text.push_str("; generic functions as instantiated");
     }
     text
 }
@@ -353,6 +378,15 @@ fn draw(
     } else {
         format!(", through {} more calls", row.elided.len())
     };
+    // The artifact's verdict, when it was checked, in the report's words.
+    let checked = row.verdict.map_or_else(String::new, |verdict| {
+        let word = match verdict {
+            Verdict::Confirmed => "confirmed in",
+            Verdict::Absent => "absent from",
+            Verdict::Unverified => "unverified in",
+        };
+        format!(", {word} the compiled artifact")
+    });
     // A panic takes its category's own step, which can be deep enough to
     // need the light ink; a call takes the tint of what lies beneath it,
     // which is always light enough for the ink the styling gives labels.
@@ -370,7 +404,7 @@ fn draw(
     // carry markup; the rest is generated from counts and fixed words.
     let name = escape(&row.name);
     let info = format!(
-        "{name} ({kind}, {} reachable, {share:.1}%{folded})",
+        "{name} ({kind}, {} reachable, {share:.1}%{folded}{checked})",
         frame.value
     );
     // The label is fitted here for a reader with scripting off, and the

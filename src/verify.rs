@@ -26,7 +26,8 @@ use crate::{
 };
 
 /// How a finding relates to the compiled artifact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Verdict {
     /// A matching panic entry point is reachable from the compiled code.
     Confirmed,

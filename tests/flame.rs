@@ -18,6 +18,7 @@ fn hop(id: usize, parent: Option<usize>, kind: &'static str) -> FlameRow {
         cleanup: false,
         elided: Vec::new(),
         value: 1,
+        verdict: None,
     }
 }
 

@@ -14,8 +14,10 @@ use crate::{
     Body, Category, CategorySet, EdgeKind, FuncId, Graph, Solution, Solver,
     Terminal,
     category::ALL,
+    select::Selection,
     solve::{Edges, Policy},
     util::{Map, Set},
+    verify::{Verdict, Verdicts},
     witness,
 };
 
@@ -321,7 +323,8 @@ pub fn flame(
     edges: Edges,
     fold: bool,
 ) -> Result<Value> {
-    let rows = flame_rows(g, suppressed, None, edges, fold)?;
+    let rows =
+        flame_rows(g, suppressed, Selection::default(), edges, fold, None)?;
     Ok(json!({ "nodes": rows }))
 }
 
@@ -347,13 +350,17 @@ pub struct FlameRow {
     pub elided: Vec<String>,
     /// Panics ending here, for a leaf.
     pub value: usize,
+    /// What the compiled artifact says of the panic, when it was checked.
+    pub verdict: Option<Verdict>,
 }
 
 /// Builds the tree, optionally folding runs of single calls.
 ///
-/// A selection narrows what is drawn, not what is assumed: the solver runs
-/// under the policy alone, so a path is kept or dropped for the same reasons
-/// as in the report, and only the categories selected are then drawn.
+/// The selection decides which functions the tree grows from and under what
+/// names, as it does for the report, and narrows what is drawn without
+/// touching what is assumed: the solver runs under the policy alone, so a
+/// path is kept or dropped for the same reasons as in the report. Verdicts,
+/// when the artifact was checked, are written on the panics they concern.
 ///
 /// # Errors
 ///
@@ -361,20 +368,21 @@ pub struct FlameRow {
 pub fn flame_rows(
     g: &Graph,
     suppressed: CategorySet,
-    only: Option<CategorySet>,
+    selection: Selection,
     edges: Edges,
     fold: bool,
+    verdicts: Option<&Verdicts>,
 ) -> Result<Vec<FlameRow>> {
     let solution = solved(g, suppressed, edges)?;
     let mut tree = Tree::new();
-    for (id, _) in g.locals() {
-        let enabled = solution.enabled(id);
-        let shown = only.map_or(enabled, |only| enabled.intersection(only));
-        for category in shown.iter() {
+    for (id, body) in selection.functions(g) {
+        for category in selection.shown(solution.enabled(id)).iter() {
             let Some(path) = witness::find(g, &solution, id, category) else {
                 continue;
             };
-            tree.insert(g, id, &path, category);
+            let verdict =
+                verdicts.map(|checked| checked.of(&body.key, category));
+            tree.insert(g, id, &path, category, selection, verdict);
         }
     }
     let rows = tree.rows;
@@ -479,6 +487,7 @@ impl Tree {
             cleanup: false,
             elided: Vec::new(),
             value: 0,
+            verdict: None,
         });
         self.index.insert(key, id);
         id
@@ -491,11 +500,13 @@ impl Tree {
         root: FuncId,
         path: &witness::Witness,
         category: Category,
+        selection: Selection,
+        verdict: Option<Verdict>,
     ) {
         // Nest the root under its module path. Without this the first row is
         // one sliver per function, which carries no shape; with it the row is
         // a handful of crates that can actually be read and zoomed into.
-        let display = &g.body(root).display;
+        let display = selection.name(g.body(root));
         let segments = split_path(display);
         let mut at = 0usize;
         let last = segments.len().saturating_sub(1);
@@ -505,9 +516,17 @@ impl Tree {
             self.rows[at].value += 1;
         }
         for hop in &path.hops {
-            let name = g.body(hop.callee).display.clone();
-            at = self.node(Some(at), name, None, hop.kind.name());
-            self.rows[at].value += 1;
+            let callee = g.body(hop.callee);
+            let name = selection.name(callee);
+            // A closure folded into its parent is a hop into the frame the
+            // path already stands in, so it adds no frame of its own; what
+            // it carries still belongs to the frame that stands.
+            let folded = name.len() < callee.display.len();
+            if !(folded && self.rows[at].name == name) {
+                at =
+                    self.node(Some(at), name.to_owned(), None, hop.kind.name());
+                self.rows[at].value += 1;
+            }
             self.rows[at].cleanup |= hop.cleanup;
         }
         let leaf = match path.terminal {
@@ -522,6 +541,23 @@ impl Tree {
             leaf,
         );
         self.rows[at].value += 1;
+        if let Some(verdict) = verdict {
+            self.rows[at].verdict = Some(agree(self.rows[at].verdict, verdict));
+        }
+    }
+}
+
+/// Combines the artifact's verdicts on the instantiations one leaf stands
+/// for: whichever the artifact confirms decides, and only unanimity can
+/// call it absent.
+const fn agree(held: Option<Verdict>, new: Verdict) -> Verdict {
+    match (held, new) {
+        (None, new) => new,
+        (Some(Verdict::Confirmed), _) | (_, Verdict::Confirmed) => {
+            Verdict::Confirmed
+        }
+        (Some(Verdict::Absent), Verdict::Absent) => Verdict::Absent,
+        _ => Verdict::Unverified,
     }
 }
 

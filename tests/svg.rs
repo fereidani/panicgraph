@@ -5,10 +5,13 @@
 mod support;
 
 use panicgraph::{
-    Body, Category, CategorySet,
+    Body, Category, CategorySet, FuncKey,
+    args::{Closures, Generics},
     palette::{Palette, Theme},
+    select::Selection,
     solve::Edges,
     svg::{self, View},
+    verify::Verdicts,
 };
 
 use crate::support::{BodyBuilder, graph};
@@ -22,7 +25,7 @@ fn body(name: &str, category: Category) -> Body {
 fn view() -> View {
     View {
         suppressed: CategorySet::EMPTY,
-        only: None,
+        selection: Selection::default(),
         edges: Edges::default(),
         fold: true,
         theme: Theme::Light,
@@ -36,10 +39,29 @@ fn render(bodies: Vec<Body>) -> String {
 
 /// Renders a graph of the given functions, seen the given way.
 fn render_view(bodies: Vec<Body>, view: View) -> String {
+    render_checked(bodies, view, None)
+}
+
+/// Renders a graph of the given functions, seen the given way, with the
+/// artifact's verdicts when there are any.
+fn render_checked(
+    bodies: Vec<Body>,
+    view: View,
+    verdicts: Option<&Verdicts>,
+) -> String {
     let mut out = String::new();
-    svg::render(&graph(bodies), view, &mut out)
+    svg::render(&graph(bodies), view, verdicts, &mut out)
         .expect("the graph should render");
     out
+}
+
+/// A view that shows the given selection.
+fn selecting(selection: Selection) -> View {
+    View {
+        selection,
+        fold: false,
+        ..view()
+    }
 }
 
 /// Removes the embedded styling and script, whose contents are not markup
@@ -259,10 +281,10 @@ fn a_selection_narrows_what_is_drawn_and_is_written_on_the_picture() {
 
     let some = render_view(
         bodies(),
-        View {
+        selecting(Selection {
             only: Some(CategorySet::single(Category::Unwrap)),
-            ..view()
-        },
+            ..Selection::default()
+        }),
     );
     assert!(some.contains("unwrap panic"), "the selection is drawn");
     assert!(!some.contains("index panic"), "the rest is not");
@@ -449,4 +471,138 @@ fn siblings_band_by_family_and_a_call_takes_the_tint_of_what_is_under_it() {
         calls.logic,
         "a tie between families goes to the one listed first"
     );
+}
+
+#[test]
+fn dependencies_are_drawn_only_when_asked_for() {
+    let bodies = || {
+        let mut dependency = body("serde::parse", Category::Unwrap);
+        dependency.local = false;
+        vec![body("parse", Category::Index), dependency]
+    };
+    let local = render_view(bodies(), selecting(Selection::default()));
+    assert!(
+        !local.contains("data-name=\"serde\""),
+        "a dependency stays out by default"
+    );
+    let all = render_view(
+        bodies(),
+        selecting(Selection {
+            all_crates: true,
+            ..Selection::default()
+        }),
+    );
+    assert!(
+        all.contains("data-name=\"serde\""),
+        "and comes in when asked"
+    );
+    assert!(
+        all.contains("dependencies included"),
+        "which the picture says under its title"
+    );
+    parse(&all);
+}
+
+#[test]
+fn a_closure_folds_into_its_parent_when_asked() {
+    let bodies = || {
+        vec![
+            BodyBuilder::new("run").calls("run::{closure#0}").build(),
+            body("run::{closure#0}", Category::Unwrap),
+        ]
+    };
+    let separate = render_view(bodies(), selecting(Selection::default()));
+    assert!(
+        separate.contains("data-name=\"run::{closure#0}\""),
+        "a closure is a function of its own by default"
+    );
+    let folded = render_view(
+        bodies(),
+        selecting(Selection {
+            closures: Closures::Parent,
+            ..Selection::default()
+        }),
+    );
+    assert!(
+        !folded.contains("{closure"),
+        "folded, the closure's name is gone"
+    );
+    assert_eq!(
+        folded.matches("data-name=\"run\"").count(),
+        1,
+        "the closure's panic joins the one frame its parent has"
+    );
+    assert!(
+        folded.contains("unwrap panic"),
+        "and the panic is still drawn"
+    );
+    assert!(folded.contains("closures folded into their parents"));
+    parse(&folded);
+}
+
+#[test]
+fn a_generic_function_shows_its_instantiations_when_asked() {
+    let bodies = || {
+        let mut written = body("gen", Category::Unwrap);
+        written.key = FuncKey("generic:gen".to_owned());
+        let mut instance = body("gen", Category::Index);
+        instance.key = FuncKey("gen<u8>".to_owned());
+        vec![written, instance]
+    };
+    let written = render_view(bodies(), selecting(Selection::default()));
+    assert!(
+        written.contains("unwrap panic") && written.contains("index panic"),
+        "as written, the body and its instantiation both show"
+    );
+    let instantiated = render_view(
+        bodies(),
+        selecting(Selection {
+            generics: Generics::Instantiated,
+            ..Selection::default()
+        }),
+    );
+    assert!(instantiated.contains("index panic"));
+    assert!(
+        !instantiated.contains("unwrap panic"),
+        "instantiated, the written body yields"
+    );
+    assert!(instantiated.contains("generic functions as instantiated"));
+    parse(&instantiated);
+}
+
+#[test]
+fn a_test_target_adds_instantiations_but_not_itself() {
+    let mut test = body("tests::it_works", Category::Unwrap);
+    test.from_tests = true;
+    let mut written = body("gen", Category::Unwrap);
+    written.key = FuncKey("generic:gen".to_owned());
+    let mut instance = body("gen", Category::Index);
+    instance.key = FuncKey("gen<u8>".to_owned());
+    instance.from_tests = true;
+    let out = render_view(
+        vec![test, written, instance],
+        selecting(Selection::default()),
+    );
+    assert!(!out.contains("it_works"), "a test is not drawn");
+    assert!(
+        out.contains("index panic"),
+        "an instantiation a test makes of the crate's own function is"
+    );
+}
+
+#[test]
+fn verdicts_are_written_on_the_panics_when_the_artifact_was_checked() {
+    let bodies = || vec![body("parse", Category::Unwrap)];
+    let unchecked = render_view(bodies(), view());
+    assert!(!unchecked.contains("compiled artifact"));
+    // An empty sweep settles nothing, which is a verdict of its own.
+    let checked = render_checked(bodies(), view(), Some(&Verdicts::default()));
+    assert!(
+        checked.contains(
+            "unwrap panic, 1 reachable, 100.0%, unverified in \
+                          the compiled artifact"
+        ),
+        "the verdict goes on the panic, in the report's words"
+    );
+    parse(&checked);
 }

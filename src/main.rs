@@ -9,6 +9,7 @@ use panicgraph::{
     args::{Args, Check, Cli, Command},
     check, report, run,
     solve::Edges,
+    verify::Verdicts,
 };
 
 /// Nothing to report.
@@ -52,14 +53,15 @@ fn dispatch() -> Result<u8> {
             // The drawing solves the graph for itself, so solving here as
             // well would run the fixpoint twice for one picture.
             let graph = Graph::from_artifacts(run::collect(&args)?);
+            let verdicts = sweep_if_asked(&args)?;
             let view = panicgraph::svg::View {
                 suppressed: args.suppress,
-                only: args.only,
+                selection: args.selection(),
                 edges: edges_of(&args),
                 fold: true,
                 theme: args.theme,
             };
-            panicgraph::svg::render(&graph, view, &mut out)?;
+            panicgraph::svg::render(&graph, view, verdicts.as_ref(), &mut out)?;
             EXIT_CLEAN
         }
         Command::Analyze => analyze(&args, &mut out)?,
@@ -131,14 +133,7 @@ fn listen(args: &Args) -> Result<()> {
 /// Runs the analysis and renders the report.
 fn analyze(args: &Args, out: &mut String) -> Result<u8> {
     let (graph, solution) = solve(args)?;
-    let verdicts = if args.verify {
-        Some(panicgraph::verify::sweep(
-            &run::build_tree(args)?,
-            &args.profile,
-        )?)
-    } else {
-        None
-    };
+    let verdicts = sweep_if_asked(args)?;
     report::analysis(&graph, &solution, args, verdicts.as_ref(), out)?;
     // The hint is prose, so it belongs only in the rendering that is prose.
     // Appending it to json left the output unparseable.
@@ -154,6 +149,16 @@ fn analyze(args: &Args, out: &mut String) -> Result<u8> {
     } else {
         EXIT_CLEAN
     })
+}
+
+/// Checks the findings against the compiled artifact, when that was asked
+/// for.
+fn sweep_if_asked(args: &Args) -> Result<Option<Verdicts>> {
+    if !args.verify {
+        return Ok(None);
+    }
+    let tree = run::build_tree(args)?;
+    Ok(Some(panicgraph::verify::sweep(&tree, &args.profile)?))
 }
 
 /// The edge policy the arguments describe.
