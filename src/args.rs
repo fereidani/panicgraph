@@ -41,7 +41,9 @@ const HELP_TEMPLATE: &str = "\
 #[derive(Debug, Parser)]
 #[command(name = "panicgraph", version, about, long_about = None)]
 #[command(after_help = SELECTOR_HELP, help_template = HELP_TEMPLATE)]
-#[command(disable_version_flag = true)]
+// The version flag is global, so it reaches the subcommands, and they need
+// a version of their own to print for it.
+#[command(disable_version_flag = true, propagate_version = true)]
 pub struct Cli {
     /// What to do. Reports the findings when omitted.
     #[command(subcommand)]
