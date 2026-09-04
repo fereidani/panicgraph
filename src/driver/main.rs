@@ -44,6 +44,10 @@ const STD_MODE: &str = "PANICGRAPH_STD_MODE";
 /// The MIR optimization level the front end asked for, if any.
 const MIR_OPT_LEVEL: &str = "PANICGRAPH_MIR_OPT_LEVEL";
 
+/// Set by the front end when the build is the standard library's own
+/// workspace.
+const LIBRARY_WORKSPACE: &str = "PANICGRAPH_LIBRARY_WORKSPACE";
+
 struct PanicGraph;
 
 impl Callbacks for PanicGraph {
@@ -199,6 +203,14 @@ fn main() -> std::process::ExitCode {
     // way as one of the crate under analysis.
     if let Some(level) = mir_opt_level() {
         args.push(format!("-Zmir-opt-level={level}"));
+    }
+
+    // The library's own build compiles every crate in its workspace with
+    // unmarked items forced unstable. Without that a crate vendored into
+    // the library carries no stability at all, and the library's stable
+    // const functions are refused for calling into it.
+    if std::env::var_os(LIBRARY_WORKSPACE).is_some() {
+        args.push("-Zforce-unstable-if-unmarked".to_owned());
     }
 
     // A test crate is read for the instantiations it makes of the

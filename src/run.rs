@@ -35,6 +35,27 @@ struct Layout {
     shared: bool,
 }
 
+/// The crate under analysis and the tree it is built in.
+struct Workspace {
+    /// The directory the analysis build runs in.
+    root: PathBuf,
+    /// Whether the tree is the standard library's own workspace.
+    ///
+    /// The library's build applies rules of its own to every crate in the
+    /// workspace, and the analysis build has to apply the same or the
+    /// library does not compile.
+    library: bool,
+}
+
+impl Workspace {
+    /// Locates the crate under analysis and tells which tree it is in.
+    fn locate(args: &Args) -> Result<Self> {
+        let root = crate_root(args)?;
+        let library = is_library_workspace(&root)?;
+        Ok(Self { root, library })
+    }
+}
+
 /// Builds the crate under the wrapper and returns every artifact produced.
 ///
 /// # Errors
@@ -49,10 +70,10 @@ pub fn collect(args: &Args) -> Result<Vec<Artifact>> {
     // tool was started: the artifacts would be written one tree deeper than
     // they are read back from, and the run would either report nothing or
     // report whatever an earlier run left behind.
-    let root = crate_root(args)?;
-    let layout = prepare(&root, &driver, args)?;
+    let workspace = Workspace::locate(args)?;
+    let layout = prepare(&workspace.root, &driver, args)?;
 
-    build(args, &driver, &root, &layout, false)?;
+    build(args, &driver, &workspace, &layout, false)?;
     let mut artifacts = load(&layout.out)?;
 
     if artifacts.is_empty() {
@@ -60,7 +81,7 @@ pub fn collect(args: &Args) -> Result<Vec<Artifact>> {
         // wrapper never runs and records nothing. Discarding the analysis
         // build is the only way to observe a crate that is already cached.
         clear(&layout.target)?;
-        build(args, &driver, &root, &layout, false)?;
+        build(args, &driver, &workspace, &layout, false)?;
         artifacts = load(&layout.out)?;
     }
 
@@ -68,7 +89,7 @@ pub fn collect(args: &Args) -> Result<Vec<Artifact>> {
         // The tests need the dev-dependencies and may not build at all,
         // and what they add is more instantiations rather than the crate
         // itself, so a failure is said and the analysis goes on without.
-        if let Err(err) = build(args, &driver, &root, &layout, true) {
+        if let Err(err) = build(args, &driver, &workspace, &layout, true) {
             eprintln!(
                 "warning: the test targets could not be built, so their \
                  instantiations are left out: {err:#}"
@@ -96,6 +117,76 @@ fn crate_root(args: &Args) -> Result<PathBuf> {
                 .with_context(|| format!("could not resolve {}", dir.display()))
         },
     )
+}
+
+/// Whether a directory builds in the standard library's own workspace.
+///
+/// Cargo names the workspace manifest, and the manifest says. A manifest
+/// cargo cannot read fails the build itself, with cargo's own diagnosis,
+/// so it is not judged here.
+fn is_library_workspace(root: &Path) -> Result<bool> {
+    let mut cmd = cargo(root);
+    cmd.args(["locate-project", "--workspace", "--message-format", "plain"]);
+    let out = cmd
+        .output()
+        .context("could not run cargo; is it on the PATH?")?;
+    if !out.status.success() {
+        return Ok(false);
+    }
+    let path =
+        String::from_utf8(out.stdout).context("cargo printed invalid utf-8")?;
+    let path = path.trim();
+    if path.is_empty() {
+        return Ok(false);
+    }
+    let manifest = fs::read_to_string(path)
+        .with_context(|| format!("could not read {path}"))?;
+    Ok(is_library_manifest(&manifest))
+}
+
+/// The table in which the standard library's workspace replaces the shim
+/// crate its vendored dependencies name with the one in its own tree.
+const PATCH_TABLE: &str = "patch.crates-io";
+
+/// The same patch, written as a table of its own.
+const PATCH_ENTRY: &str = "patch.crates-io.rustc-std-workspace-core";
+
+/// The shim crate the library's vendored dependencies stand on.
+const LIBRARY_SHIM: &str = "rustc-std-workspace-core";
+
+/// Whether a workspace manifest is the standard library's own.
+///
+/// The crates vendored into the library depend on a shim crate that the
+/// library's workspace, and nothing else, patches in from its own tree.
+/// Depending on the shim is what a vendored crate does, so only the patch
+/// tells. The manifest is scanned by table rather than parsed, since two
+/// names in one table are all there is to find.
+#[must_use]
+pub fn is_library_manifest(manifest: &str) -> bool {
+    let mut patching = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix('[') {
+            let table = rest.split(']').next().unwrap_or_default();
+            if spells(table, PATCH_ENTRY) {
+                return true;
+            }
+            patching = spells(table, PATCH_TABLE);
+        } else if patching {
+            let key = line.split('=').next().unwrap_or_default();
+            if spells(key, LIBRARY_SHIM) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether a name in a manifest reads as `name` once quoting is dropped.
+fn spells(text: &str, name: &str) -> bool {
+    text.chars()
+        .filter(|c| !matches!(c, '"' | '\'' | ' ' | '\t'))
+        .eq(name.chars())
 }
 
 /// Where the analysis build for these settings compiles into.
@@ -139,13 +230,12 @@ fn rustc_version() -> Result<Option<String>> {
 fn build(
     args: &Args,
     driver: &Path,
-    root: &Path,
+    workspace: &Workspace,
     layout: &Layout,
     tests: bool,
 ) -> Result<()> {
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(root)
-        .arg("build")
+    let mut cmd = cargo(&workspace.root);
+    cmd.arg("build")
         .arg("--profile")
         .arg(cargo_profile(&args.profile))
         .arg("--target-dir")
@@ -188,8 +278,8 @@ fn build(
     if let Some(level) = args.mir_opt_level {
         cmd.env("PANICGRAPH_MIR_OPT_LEVEL", level.to_string());
     }
-    if let Some(toolchain) = TOOLCHAIN {
-        cmd.env("RUSTUP_TOOLCHAIN", toolchain);
+    if workspace.library {
+        cmd.env("PANICGRAPH_LIBRARY_WORKSPACE", "1");
     }
     if let Some(path) = library_path()? {
         cmd.env("LD_LIBRARY_PATH", path);
@@ -550,6 +640,16 @@ fn rustc_field(label: &str) -> Result<Option<String>> {
         .find_map(|l| l.strip_prefix(label))
         .map(str::trim)
         .map(str::to_owned))
+}
+
+/// A cargo command in a directory, pinned to this tool's toolchain.
+fn cargo(dir: &Path) -> Command {
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(dir);
+    if let Some(toolchain) = TOOLCHAIN {
+        cmd.env("RUSTUP_TOOLCHAIN", toolchain);
+    }
+    cmd
 }
 
 /// Runs the compiler pinned to this tool's toolchain and returns its output.
