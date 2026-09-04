@@ -139,7 +139,12 @@ fn every_frame_carries_a_title_so_it_reads_without_script() {
     let frames = out.matches("<g class=\"f\"").count();
     let titles = out.matches("<title>").count();
     assert!(frames > 0);
-    assert_eq!(frames, titles, "a frame with no title is mute when hovered");
+    // The mark carries the one title that is not a frame's.
+    assert_eq!(
+        frames + 1,
+        titles,
+        "a frame with no title is mute when hovered"
+    );
 }
 
 #[test]
@@ -260,4 +265,29 @@ fn the_picture_is_as_wide_as_the_window() {
             assert!(value.ends_with('%'), "{tag} is sized in pixels");
         }
     }
+}
+
+#[test]
+fn the_picture_is_signed_with_the_project_mark() {
+    let out = render(vec![body("parse", Category::Unwrap)]);
+    let lockup = include_str!("../assets/panicgraph-lockup.svg");
+    // The mark is the one the interactive view shows, stroke for stroke.
+    let strokes = values_of(lockup, "d");
+    assert!(!strokes.is_empty(), "the lockup draws its mark with paths");
+    for stroke in strokes {
+        assert!(
+            out.contains(&format!("d=\"{stroke}\"")),
+            "the stroke {stroke} is missing from the mark"
+        );
+    }
+    assert!(out.contains(">PanicGraph<"), "the name goes with the mark");
+    assert!(
+        out.contains(&format!("href=\"{}\"", env!("CARGO_PKG_REPOSITORY"))),
+        "the mark links to the project"
+    );
+    assert!(
+        out.contains(&format!("PanicGraph {}", env!("CARGO_PKG_VERSION"))),
+        "the tooltip names the version that drew the file"
+    );
+    parse(&out);
 }

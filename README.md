@@ -315,7 +315,9 @@ itself when scripting is off. It is as wide as the window it is opened in:
 the frames stretch, the text keeps its size, and the labels are fitted
 again whenever the window changes, so a wide screen shows more names. With
 scripting off it is the 1200 pixel drawing flame graph tools have always
-made, scaled as a whole to fit.
+made, scaled as a whole to fit. The mark in the corner links to the project
+and names the version that drew the file, for a reader handed the picture
+alone.
 
 Clicking a frame zooms into it: the path it sits on stays in view as full
 width bars and everything the frame does not contain goes, so what is left

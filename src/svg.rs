@@ -19,6 +19,11 @@
 //! again whenever the width changes. What is written into the file is fitted
 //! for the width flame graph tools draw at, which is the picture a viewer
 //! without scripting shows, scaled as a whole to fit.
+//!
+//! The project's mark sits in the corner, at the height of a control, so it
+//! says what drew the file without competing with the title. It links to the
+//! project and names the version, so a file handed on alone still says where
+//! it came from.
 
 // Laying out a drawing means turning counts into coordinates. The counts are
 // frame and panic totals, which stay many orders of magnitude below the point
@@ -41,8 +46,8 @@ use crate::{
 const ROW: f64 = 17.0;
 /// Gap between frames, so neighbours stay separable.
 const GAP: f64 = 1.0;
-/// Space above the frames for the title, the policy it was drawn under,
-/// and the controls.
+/// Space above the frames for the mark, the title, the policy it was drawn
+/// under, and the controls.
 const HEAD: f64 = 62.0;
 /// Space below the frames for the hovered frame's details.
 const FOOT: f64 = 34.0;
@@ -116,6 +121,7 @@ pub fn render(
     let total = frames.first().map_or(1, |f| f.value.max(1));
 
     header(WIDTH, height, out);
+    out.push_str(BRAND);
     // Whatever belongs to the middle or the right edge is placed as a share
     // of the width, or as an offset back from the edge, so it follows the
     // window rather than the width the file was fitted for.
@@ -132,9 +138,11 @@ pub fn render(
          class=\"note\">{}</text>",
         escape(&policy(suppressed))
     );
+    // The zoom control stays at the left, where flame graphs keep it, after
+    // the mark.
     let _ = writeln!(
         out,
-        "<text id=\"unzoom\" x=\"10\" y=\"22\" class=\"ctl\">Reset \
+        "<text id=\"unzoom\" x=\"150\" y=\"22\" class=\"ctl\">Reset \
          Zoom</text>"
     );
     let _ = writeln!(
@@ -382,6 +390,32 @@ fn header(width: f64, height: f64, out: &mut String) {
     );
 }
 
+/// The project's mark and name, for the corner of the picture.
+///
+/// This is the lockup the interactive view shows, drawn at the height of a
+/// control so it reads as a signature rather than a heading, and linked to
+/// the project. Its tooltip names the version, so a reader handed the file
+/// alone can still find where it came from.
+const BRAND: &str = concat!(
+    "<a class=\"brand\" href=\"",
+    env!("CARGO_PKG_REPOSITORY"),
+    "\" target=\"_blank\">\n<title>Drawn by PanicGraph ",
+    env!("CARGO_PKG_VERSION"),
+    "</title>\n",
+    // The lockup is drawn in a 300 by 64 box, shown here 24 high.
+    "<g fill=\"none\" transform=\"translate(10 6) scale(0.375)\">\n",
+    "<path d=\"M6 14H58M6 32H58M6 50H58\" stroke=\"#2E2B27\" \
+     stroke-opacity=\"0.32\" stroke-width=\"2\"/>\n",
+    "<path d=\"M13 14H26V32H44V50\" stroke=\"#2E2B27\" stroke-width=\"4.5\" \
+     stroke-linecap=\"square\"/>\n",
+    "<circle cx=\"13\" cy=\"14\" r=\"3.5\" fill=\"#2E2B27\"/>\n",
+    "<circle cx=\"44\" cy=\"50\" r=\"7\" fill=\"#E8A33D\"/>\n",
+    "<circle cx=\"44\" cy=\"50\" r=\"7\" fill=\"none\" stroke=\"#2E2B27\" \
+     stroke-width=\"3\"/>\n",
+    "<text x=\"76\" y=\"42\" fill=\"#2E2B27\">PanicGraph</text>\n",
+    "</g>\n</a>\n",
+);
+
 /// Styling, kept inside the document so the file stands alone.
 const STYLE: &str = r#"<style>
   text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -393,6 +427,10 @@ const STYLE: &str = r#"<style>
   .ctl { fill: #0b0b0b; cursor: pointer; display: none; }
   .ctl.on { display: inline; }
   .ctl:hover { text-decoration: underline; }
+  .brand text { font-family: "Space Grotesk", "Helvetica Neue", Helvetica,
+    Arial, sans-serif; font-size: 34px; font-weight: 600;
+    letter-spacing: -0.8px; }
+  .brand:hover { opacity: 0.7; }
   .l { font-size: 10px; fill: #0b0b0b; pointer-events: none; }
   .f rect { stroke-width: 1; }
   .f:hover rect { opacity: 0.72; cursor: pointer; }
