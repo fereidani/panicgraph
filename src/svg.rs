@@ -12,11 +12,18 @@
 //! the frame in view as full width bars and hides what the frame does not
 //! contain, so the picture stays a picture of one path. Searching colours
 //! what matched and says how much of the whole it accounts for.
+//!
+//! The picture is as wide as the window it is opened in. Frames are placed
+//! as shares of the width rather than at pixels, so they stretch with the
+//! window while the text keeps its size, and the script fits every label
+//! again whenever the width changes. What is written into the file is fitted
+//! for the width flame graph tools draw at, which is the picture a viewer
+//! without scripting shows, scaled as a whole to fit.
 
 // Laying out a drawing means turning counts into coordinates. The counts are
 // frame and panic totals, which stay many orders of magnitude below the point
 // where a double stops representing an integer exactly, and the results are
-// rounded to a tenth of a pixel on the way out.
+// rounded on the way out.
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
@@ -39,13 +46,20 @@ const GAP: f64 = 1.0;
 const HEAD: f64 = 62.0;
 /// Space below the frames for the hovered frame's details.
 const FOOT: f64 = 34.0;
-/// Width of the drawing.
+/// Width the picture is fitted for before any script runs.
+///
+/// Frames are placed as shares of this width and stretch with the window in
+/// a browser, where the script fits the labels again. Without scripting the
+/// drawing is scaled as a whole, so this is also how wide it is when opened
+/// in a viewer, and it is the width the flame graph tools readers know draw
+/// at.
 const WIDTH: f64 = 1200.0;
 /// Rough width of one character at the label size, for fitting text.
 const CHAR: f64 = 5.9;
 /// Narrowest frame that can carry a label.
 const MIN_LABEL: f64 = 28.0;
-/// Narrowest frame that is drawn at all.
+/// Narrowest frame that is drawn at all, at the width the picture is fitted
+/// for.
 ///
 /// A frame thinner than this is a sliver no reader can hover or click, and
 /// dropping it with everything under it keeps a wide graph a file that can
@@ -102,19 +116,20 @@ pub fn render(
     let total = frames.first().map_or(1, |f| f.value.max(1));
 
     header(WIDTH, height, out);
+    // Whatever belongs to the middle or the right edge is placed as a share
+    // of the width, or as an offset back from the edge, so it follows the
+    // window rather than the width the file was fitted for.
     let _ = writeln!(
         out,
-        "<text id=\"title\" x=\"{:.1}\" y=\"22\" text-anchor=\"middle\" \
-         class=\"title\">Reachable panics</text>",
-        WIDTH / 2.0
+        "<text id=\"title\" x=\"50%\" y=\"22\" text-anchor=\"middle\" \
+         class=\"title\">Reachable panics</text>"
     );
     // The policy belongs on the picture. A flame graph of what can panic
     // says nothing definite without the assumptions it was drawn under.
     let _ = writeln!(
         out,
-        "<text id=\"subtitle\" x=\"{:.1}\" y=\"38\" \
-         text-anchor=\"middle\" class=\"note\">{}</text>",
-        WIDTH / 2.0,
+        "<text id=\"subtitle\" x=\"50%\" y=\"38\" text-anchor=\"middle\" \
+         class=\"note\">{}</text>",
         escape(&policy(suppressed))
     );
     let _ = writeln!(
@@ -124,9 +139,8 @@ pub fn render(
     );
     let _ = writeln!(
         out,
-        "<text id=\"search\" x=\"{:.1}\" y=\"22\" text-anchor=\"end\" \
-         class=\"ctl on\">Search</text>",
-        WIDTH - 10.0
+        "<text id=\"search\" x=\"100%\" dx=\"-10\" y=\"22\" \
+         text-anchor=\"end\" class=\"ctl on\">Search</text>"
     );
     let _ = writeln!(
         out,
@@ -143,9 +157,8 @@ pub fn render(
     );
     let _ = writeln!(
         out,
-        "<text id=\"matched\" x=\"{:.1}\" y=\"{:.1}\" \
+        "<text id=\"matched\" x=\"100%\" dx=\"-10\" y=\"{:.1}\" \
          text-anchor=\"end\" class=\"note\"> </text>",
-        WIDTH - 10.0,
         height - 12.0
     );
 
@@ -228,6 +241,14 @@ fn layout(rows: &[FlameRow]) -> Vec<Frame> {
     frames
 }
 
+/// A distance across the drawing, as the share of the width it takes.
+///
+/// Frames are placed in these shares rather than at pixels, which is what
+/// lets them stretch to the window.
+fn percent(units: f64) -> f64 {
+    100.0 * units / WIDTH
+}
+
 /// Writes one frame.
 fn draw(frame: &Frame, row: &FlameRow, total: usize, out: &mut String) {
     let y = (frame.depth as f64).mul_add(ROW, HEAD);
@@ -253,7 +274,9 @@ fn draw(frame: &Frame, row: &FlameRow, total: usize, out: &mut String) {
     );
     // The label is fitted here for a reader with scripting off, and the
     // whole name is kept beside it so the script can fit it again whenever
-    // zooming changes how much room the frame has.
+    // the window or a zoom changes how much room the frame has. Every frame
+    // carries a label element, empty when there is no room yet, so one that
+    // gains room later has somewhere to write its name.
     let _ = writeln!(
         out,
         "<g class=\"f\" data-name=\"{name}\" data-info=\"{info}\" \
@@ -266,9 +289,10 @@ fn draw(frame: &Frame, row: &FlameRow, total: usize, out: &mut String) {
     let _ = writeln!(out, "<title>{info}</title>");
     let _ = writeln!(
         out,
-        "<rect x=\"{:.1}\" y=\"{y:.1}\" width=\"{width:.1}\" \
+        "<rect x=\"{:.4}%\" y=\"{y:.1}\" width=\"{:.4}%\" \
          height=\"{:.1}\" fill=\"{}\"{} rx=\"2\"/>",
-        frame.x,
+        percent(frame.x),
+        percent(width),
         ROW - GAP,
         family(row.category),
         if row.cleanup {
@@ -277,16 +301,18 @@ fn draw(frame: &Frame, row: &FlameRow, total: usize, out: &mut String) {
             ""
         }
     );
-    if width > MIN_LABEL {
+    let label = if width > MIN_LABEL {
         let room = ((width - 8.0) / CHAR) as usize;
-        let _ = writeln!(
-            out,
-            "<text x=\"{:.1}\" y=\"{:.1}\" class=\"l\">{}</text>",
-            frame.x + 4.0,
-            y + ROW / 2.0 + 3.0,
-            escape(&tail(&row.name, room, row.elided.len()))
-        );
-    }
+        escape(&tail(&row.name, room, row.elided.len()))
+    } else {
+        String::new()
+    };
+    let _ = writeln!(
+        out,
+        "<text x=\"{:.4}%\" dx=\"4\" y=\"{:.1}\" class=\"l\">{label}</text>",
+        percent(frame.x),
+        y + ROW / 2.0 + 3.0,
+    );
     out.push_str("</g>\n");
 }
 
@@ -334,11 +360,17 @@ fn escape(text: &str) -> String {
 }
 
 /// Writes the document head, its styling, and the script that explores it.
+///
+/// The document takes the whole width of whatever holds it, and its viewBox
+/// names the width the labels were fitted for. The script drops the viewBox
+/// once the file is open, which lets the frames spread to the window at
+/// their own text size; without the script it stays, and the drawing is
+/// scaled as a whole to fit.
 fn header(width: f64, height: f64, out: &mut String) {
     let _ = writeln!(out, "<?xml version=\"1.0\" standalone=\"no\"?>");
     let _ = writeln!(
         out,
-        "<svg version=\"1.1\" width=\"{width:.0}\" height=\"{height:.0}\" \
+        "<svg version=\"1.1\" width=\"100%\" height=\"{height:.0}\" \
          viewBox=\"0 0 {width:.0} {height:.0}\" \
          xmlns=\"http://www.w3.org/2000/svg\" onload=\"init()\">"
     );
@@ -351,7 +383,7 @@ fn header(width: f64, height: f64, out: &mut String) {
 }
 
 /// Styling, kept inside the document so the file stands alone.
-const STYLE: &str = r"<style>
+const STYLE: &str = r#"<style>
   text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .title { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 15px;
     font-weight: 600; fill: #0b0b0b; cursor: pointer; }
@@ -369,7 +401,7 @@ const STYLE: &str = r"<style>
   /* Magenta belongs to no category, so a match is never read as one. */
   .match rect { fill: #e600e6; }
 </style>
-";
+"#;
 
 /// The script that makes the picture explorable.
 ///
@@ -380,10 +412,16 @@ const STYLE: &str = r"<style>
 const SCRIPT: &str = r#"<script type="text/ecmascript"><![CDATA[
 var frames = [], base = [], detail = null, note = null;
 var unzoombtn = null, searchbtn = null, matchedtxt = null;
-var width = 0, searching = "";
+var width = 0, pixel = 1, searching = "";
 
 function init() {
-  width = document.documentElement.width.baseVal.value;
+  var svg = document.documentElement;
+  /* The frames are placed as shares of the width, so with the viewBox gone
+     they spread to the window while the text keeps its size. The viewBox
+     is read first: it names the width the file was laid out at, which is
+     the unit every position below is written in. */
+  width = svg.viewBox.baseVal.width;
+  svg.removeAttribute("viewBox");
   detail = document.getElementById("detail");
   note = document.getElementById("note");
   unzoombtn = document.getElementById("unzoom");
@@ -392,11 +430,10 @@ function init() {
   frames = Array.prototype.slice.call(
     document.getElementById("frames").children);
   frames.forEach(function (g) {
+    var x = +g.getAttribute("data-x"), w = +g.getAttribute("data-w");
     base.push({
-      x: +g.getAttribute("data-x"),
-      w: +g.getAttribute("data-w"),
-      y: +g.getAttribute("data-y"),
-      hidden: false, above: false, hit: false
+      x: x, w: w, y: +g.getAttribute("data-y"),
+      cx: x, cw: w, hidden: false, above: false, hit: false
     });
     g.addEventListener("mouseover", function () {
       detail.textContent = g.getAttribute("data-info");
@@ -417,6 +454,8 @@ function init() {
       prompt_for_search();
     }
   });
+  window.addEventListener("resize", refit);
+  refit();
   var asked = /[?&]s=([^&]*)/.exec(window.location.search);
   if (asked) search(decodeURIComponent(asked[1].replace(/\+/g, " ")));
 }
@@ -433,9 +472,9 @@ function zoom(target) {
     b.hidden = b.x + b.w <= at.x + 0.01 || b.x >= at.x + at.w - 0.01;
     b.above = !b.hidden && b.y < at.y;
     if (b.above) {
-      place(g, 0, width);
+      place(g, b, 0, width);
     } else if (!b.hidden) {
-      place(g, (b.x - at.x) * scale, b.w * scale);
+      place(g, b, (b.x - at.x) * scale, b.w * scale);
     }
     paint(g, b);
   });
@@ -448,7 +487,7 @@ function unzoom() {
     var b = base[j];
     b.hidden = false;
     b.above = false;
-    place(g, b.x, b.w);
+    place(g, b, b.x, b.w);
     paint(g, b);
   });
   show(unzoombtn, false);
@@ -465,21 +504,40 @@ function paint(g, b) {
   g.setAttribute("class", cls);
 }
 
-/* Moves one frame, and fits its label to the room it now has. */
-function place(g, x, w) {
+/* Moves one frame, and fits its label to the room it now has. Where the
+   frame stands is kept, so the label can be fitted again on its own when
+   the window changes width. */
+function place(g, b, x, w) {
+  b.cx = x;
+  b.cw = w;
   var r = g.getElementsByTagName("rect")[0];
-  r.setAttribute("x", x.toFixed(1));
-  r.setAttribute("width", Math.max(w - 1, 0.6).toFixed(1));
-  var t = g.getElementsByTagName("text")[0];
-  if (!t) return;
-  t.setAttribute("x", (x + 4).toFixed(1));
-  if (w <= 28) {
-    t.style.display = "none";
-    return;
-  }
-  t.style.display = "";
-  t.textContent = tail(g.getAttribute("data-name"),
-    Math.floor((w - 8) / 5.9), +g.getAttribute("data-more"));
+  r.setAttribute("x", percent(x));
+  r.setAttribute("width", percent(Math.max(w - 1, 0.6)));
+  g.getElementsByTagName("text")[0].setAttribute("x", percent(x));
+  fit(g, w);
+}
+
+/* A distance across the drawing, as the share of the width it takes. */
+function percent(units) {
+  return (100 * units / width).toFixed(4) + "%";
+}
+
+/* Writes the label a frame has room for, in the pixels it has now. */
+function fit(g, w) {
+  var px = w * pixel;
+  g.getElementsByTagName("text")[0].textContent = px <= 28 ? "" :
+    tail(g.getAttribute("data-name"), Math.floor((px - 8) / 5.9),
+      +g.getAttribute("data-more"));
+}
+
+/* Fits every label to the room its frame has in the window as it stands.
+   Runs once the file is open and again whenever the window changes width,
+   which the labels written into the file could not know about. */
+function refit() {
+  pixel = document.documentElement.getBoundingClientRect().width / width;
+  frames.forEach(function (g, j) {
+    if (!base[j].hidden) fit(g, base[j].cw);
+  });
 }
 
 /* Keeps the end of a path, which is the part that identifies it. */

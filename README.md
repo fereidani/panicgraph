@@ -311,7 +311,11 @@ panicgraph --format svg > panics.svg
 
 The file carries its own styling and behaviour, so it opens from disk with
 nothing else present, and every frame keeps a title so it still explains
-itself when scripting is off.
+itself when scripting is off. It is as wide as the window it is opened in:
+the frames stretch, the text keeps its size, and the labels are fitted
+again whenever the window changes, so a wide screen shows more names. With
+scripting off it is the 1200 pixel drawing flame graph tools have always
+made, scaled as a whole to fit.
 
 Clicking a frame zooms into it: the path it sits on stays in view as full
 width bars and everything the frame does not contain goes, so what is left

@@ -83,6 +83,20 @@ fn parse(text: &str) {
     assert_eq!(depth, 0, "every element should be closed");
 }
 
+/// Every value the named attribute takes anywhere in the text.
+fn values_of<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
+    let key = format!(" {name}=\"");
+    let mut values = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(&key) {
+        let value = &rest[start + key.len()..];
+        let end = value.find('"').expect("an attribute value ends");
+        values.push(&value[..end]);
+        rest = &value[end..];
+    }
+    values
+}
+
 #[test]
 fn the_document_stands_alone() {
     let out = render(vec![body("parse", Category::Unwrap)]);
@@ -147,7 +161,9 @@ fn an_empty_graph_still_renders() {
 #[test]
 fn the_picture_carries_the_controls_it_describes() {
     let out = render(vec![body("parse", Category::Unwrap)]);
-    for id in ["title", "subtitle", "unzoom", "search", "matched", "detail"] {
+    for id in [
+        "title", "subtitle", "unzoom", "search", "matched", "detail", "note",
+    ] {
         assert!(
             out.contains(&format!("id=\"{id}\"")),
             "the {id} element is what the script reads and writes"
@@ -198,5 +214,50 @@ fn a_frame_carries_what_the_script_zooms_and_searches_with() {
             frames,
             "every frame needs {attribute} for the script to place it again"
         );
+    }
+}
+
+#[test]
+fn the_picture_is_as_wide_as_the_window() {
+    let out = render(vec![
+        body("parse", Category::Unwrap),
+        body("read", Category::Index),
+    ]);
+    assert!(
+        out.contains("<svg version=\"1.1\" width=\"100%\""),
+        "the drawing takes the width of whatever holds it"
+    );
+    assert!(
+        out.contains("viewBox=\"0 0 1200 "),
+        "and names the width it was fitted for, which a viewer without \
+         scripting scales as a whole"
+    );
+
+    // Every frame is placed as a share of the width, never at a pixel, so
+    // it stretches with the window, and every frame has a label element to
+    // write its name into once it has the room.
+    let frames = out.matches("<g class=\"f\"").count();
+    assert!(frames > 0);
+    let rects: Vec<&str> = out
+        .lines()
+        .filter(|line| line.starts_with("<rect x="))
+        .collect();
+    let labels: Vec<&str> = out
+        .lines()
+        .filter(|line| {
+            line.starts_with("<text x=") && line.contains("class=\"l\"")
+        })
+        .collect();
+    assert_eq!(rects.len(), frames, "one rect per frame");
+    assert_eq!(labels.len(), frames, "one label per frame");
+    for tag in rects.iter().chain(&labels) {
+        for value in values_of(tag, "x") {
+            assert!(value.ends_with('%'), "{tag} is placed at a pixel");
+        }
+    }
+    for tag in &rects {
+        for value in values_of(tag, "width") {
+            assert!(value.ends_with('%'), "{tag} is sized in pixels");
+        }
     }
 }
