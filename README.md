@@ -373,21 +373,24 @@ crate under analysis:
 ```
 S=$(rustc +nightly --print sysroot)
 cp -r "$S/lib/rustlib/src/rust/library" ./std-src
-RUSTC_BOOTSTRAP=1 panicgraph --manifest-dir std-src -p core
-RUSTC_BOOTSTRAP=1 panicgraph --manifest-dir std-src -p alloc
-RUSTFLAGS=-Zforce-unstable-if-unmarked RUSTC_BOOTSTRAP=1 \
-  panicgraph --manifest-dir std-src -p std --features panic-unwind
+rm std-src/.cargo/config.toml
+panicgraph --manifest-dir std-src -p core
+panicgraph --manifest-dir std-src -p alloc
+panicgraph --manifest-dir std-src -p std --features panic-unwind
 ```
 
-The copy keeps the analysis build out of the toolchain's tree. The library
-uses unstable features only the bootstrap may use, which `RUSTC_BOOTSTRAP`
-allows. `std` is built the way the bootstrap builds it: its panic runtime
-is a dependency behind the `panic-unwind` feature, and without it the
-compiler injects the toolchain's own runtime, whose `core` then clashes
-with the one being built; and the flag lets the stable parts of `std` lean
-on the unstable crates under them. `std` has dependencies on crates.io,
-and the copy's `.cargo/config.toml` points at a vendor directory the
-component does not ship, so remove that file first for `std`.
+The copy keeps the analysis build out of the toolchain's tree, and its
+`.cargo/config.toml` goes because it points at a vendor directory the
+component does not ship. The workspace is recognised as the library's own
+by the shim crate it patches in, and every crate in it is compiled the way
+the library's build compiles them, with whatever carries no stability
+forced unstable; that is what lets the stable parts of `std` lean on the
+crates vendored under them. Neither `RUSTC_BOOTSTRAP` nor any `RUSTFLAGS`
+is needed: the tool runs on nightly, where the library's unstable features
+are allowed, and it passes the flag the library's own build passes. `std`
+is built with its panic runtime as a dependency, behind the `panic-unwind`
+feature: without it the compiler injects the toolchain's own runtime,
+whose `core` then clashes with the one being built.
 
 ## Measuring precision over a corpus
 
