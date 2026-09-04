@@ -507,7 +507,7 @@ function zoom(target) {
   var at = base[i], span = at.w || 1, scale = width / span;
   frames.forEach(function (g, j) {
     var b = base[j];
-    b.hidden = b.x + b.w <= at.x + 0.01 || b.x >= at.x + at.w - 0.01;
+    b.hidden = !(inside(b, at) || inside(at, b));
     b.above = !b.hidden && b.y < at.y;
     if (b.above) {
       place(g, b, 0, width);
@@ -518,6 +518,15 @@ function zoom(target) {
   });
   show(unzoombtn, true);
   if (searching) search(searching);
+}
+
+/* Whether one frame lies within another's span. Frames nest or stand
+   apart and never overlap, so the centre of the inner one decides, and
+   the rounding the positions are written with cannot carry a centre across
+   an edge the way it can an end. */
+function inside(inner, outer) {
+  var centre = inner.x + inner.w / 2;
+  return centre >= outer.x && centre <= outer.x + outer.w;
 }
 
 function unzoom() {
