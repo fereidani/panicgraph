@@ -52,13 +52,13 @@ fn dispatch() -> Result<u8> {
             // The drawing solves the graph for itself, so solving here as
             // well would run the fixpoint twice for one picture.
             let graph = Graph::from_artifacts(run::collect(&args)?);
-            panicgraph::svg::render(
-                &graph,
-                args.suppress,
-                edges_of(&args),
-                true,
-                &mut out,
-            )?;
+            let view = panicgraph::svg::View {
+                suppressed: args.suppress,
+                edges: edges_of(&args),
+                fold: true,
+                theme: args.theme,
+            };
+            panicgraph::svg::render(&graph, view, &mut out)?;
             EXIT_CLEAN
         }
         Command::Analyze => analyze(&args, &mut out)?,

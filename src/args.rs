@@ -9,6 +9,8 @@ use anyhow::Context;
 use anyhow::{Result, bail};
 use clap::{Args as Group, Parser, Subcommand, ValueEnum};
 
+#[cfg(feature = "svg")]
+use crate::palette::Theme;
 use crate::{CategorySet, StdMode, parse_selector};
 
 /// Trailing help that explains the shared vocabulary once.
@@ -88,6 +90,16 @@ pub struct Cli {
     #[cfg(feature = "svg")]
     #[arg(long, global = true, conflicts_with_all = ["format", "json"])]
     pub svg: bool,
+
+    /// The colours the flame graph is drawn in.
+    #[cfg(feature = "svg")]
+    #[arg(long, value_enum, value_name = "NAME", global = true)]
+    pub theme: Option<Theme>,
+
+    /// Draw the flame graph in dark colours; the same as `--theme dark`.
+    #[cfg(feature = "svg")]
+    #[arg(long, global = true, conflicts_with = "theme")]
+    pub dark: bool,
 }
 
 /// Which crate, and how it is built.
@@ -464,6 +476,9 @@ pub struct Args {
     pub generics: Generics,
     /// Output rendering.
     pub format: Format,
+    /// The colours the drawing is made in.
+    #[cfg(feature = "svg")]
+    pub theme: Theme,
     /// Ignore vtable and function pointer edges.
     pub static_only: bool,
     /// Follow candidate targets for dyn and function pointer calls.
@@ -495,6 +510,8 @@ impl Cli {
         let listen = self.listen.as_deref().map(listen_addr).transpose()?;
         let only = self.policy.only.as_deref().map(selector).transpose()?;
         let format = self.rendering();
+        #[cfg(feature = "svg")]
+        let theme = self.colours(format)?;
         let command = self.command.unwrap_or(Command::Analyze);
         // A drawing is a picture of the whole graph, so it is the report
         // and nothing else. Rendering prose instead would answer a question
@@ -536,6 +553,8 @@ impl Cli {
             with_tests: self.scope.with_tests,
             generics: self.policy.generics,
             format,
+            #[cfg(feature = "svg")]
+            theme,
             static_only: self.policy.static_only,
             candidates: self.policy.candidates,
             verify: self.policy.verify,
@@ -557,6 +576,28 @@ impl Cli {
             return Format::Svg;
         }
         if self.json { Format::Json } else { self.format }
+    }
+
+    /// The colours asked for, which only a drawing can take.
+    #[cfg(feature = "svg")]
+    fn colours(&self, format: Format) -> Result<Theme> {
+        let asked = if self.dark {
+            Some("--dark")
+        } else if self.theme.is_some() {
+            Some("--theme")
+        } else {
+            None
+        };
+        if let Some(flag) = asked
+            && format != Format::Svg
+        {
+            bail!("`{flag}` colours the flame graph, so it goes with `--svg`");
+        }
+        Ok(if self.dark {
+            Theme::Dark
+        } else {
+            self.theme.unwrap_or_default()
+        })
     }
 }
 

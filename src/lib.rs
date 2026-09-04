@@ -22,6 +22,9 @@ pub mod witness;
 pub mod api;
 pub mod args;
 pub mod check;
+/// The colours the view and the drawing share, so it is built with either.
+#[cfg(any(feature = "serve", feature = "svg"))]
+pub mod palette;
 pub mod report;
 pub mod run;
 #[cfg(feature = "serve")]

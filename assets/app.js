@@ -10,20 +10,27 @@
  */
 const { createApp, ref, computed, watch, onMounted, nextTick } = Vue;
 
-/* Three colour families, because an icicle places arbitrary cells side by
- * side and only three categorical slots clear the all-pairs colour-vision
- * floors. The finer 17-category detail lives in labels, tooltips and the
- * table, never in colour alone. */
-const FAMILY = {
-  logic: ['index', 'overflow', 'divide-by-zero', 'remainder-by-zero', 'unwrap',
-          'explicit', 'str-boundary', 'borrow', 'poison'],
-  alloc: ['capacity-overflow', 'alloc-failure', 'refcount-overflow'],
-  unsure: ['unknown', 'ub-check', 'fmt', 'null-deref', 'misaligned-ref',
-           'foreign', 'dyn-call', 'fn-pointer', 'generic-bound'],
-};
+/* The colours come from the palette file the standalone drawing embeds, so
+ * a category is the same colour here and there. Three hue families carry
+ * identity, because an icicle places arbitrary cells side by side and only
+ * three categorical slots clear the all-pairs colour-vision floors; within
+ * a family each category has a step of its own on the family's hue, and a
+ * call is tinted by the family most of the panics under it belong to. The
+ * exact category lives in labels, tooltips and the table, never in colour
+ * alone. Loaded before the app mounts, so nothing is drawn in a colour
+ * that is about to change. */
+let PALETTE = null;
 const FAMILY_OF = {};
-for (const [family, names] of Object.entries(FAMILY)) {
-  for (const name of names) FAMILY_OF[name] = family;
+function adoptPalette(palette) {
+  PALETTE = palette;
+  for (const [family, names] of Object.entries(palette.families)) {
+    for (const name of names) FAMILY_OF[name] = family;
+  }
+}
+/* The colours of the theme the page is in. */
+function colours() {
+  const dark = document.documentElement.dataset.theme === 'dark';
+  return PALETTE[dark ? 'dark' : 'light'];
 }
 const FAMILY_LABEL = {
   logic: 'Logic and bounds',
@@ -51,9 +58,9 @@ function luminance(hex) {
 }
 
 /* Picks whichever ink actually contrasts better against the fill rather than
-   guessing from a lightness threshold. Every step in the current palette is
-   mid-range, so the dark ink wins on all of them by a wide margin, but the
-   comparison keeps that true if the palette is ever swapped. */
+   guessing from a lightness threshold. The deeper steps of each family take
+   the light ink and the rest the dark one, and the comparison keeps every
+   label readable if the palette is ever re-stepped. */
 function inkOn(fill) {
   const contrast = ink => {
     const a = luminance(fill);
@@ -63,8 +70,25 @@ function inkOn(fill) {
   return contrast('#0b0b0b') >= contrast('#ffffff') ? '#0b0b0b' : '#ffffff';
 }
 function familyColor(family) {
-  return cssVar(family === 'alloc' ? '--series-alloc'
-    : family === 'unsure' ? '--series-unsure' : '--series-logic');
+  const set = colours().family;
+  return set[family] || set.unsure;
+}
+/* A panic frame takes its category's own step; a call takes the tint of
+   the family most of the panics beneath it belong to. */
+function fillOf(d) {
+  const c = colours();
+  if (d.data.category) return c.panic[d.data.category] || familyColor(d.family);
+  return c.call[d.family] || c.call.none;
+}
+/* Writes the theme's chart colours where the page styling reads them, so
+   the keys, bars and outlines beside the chart match it. */
+function applyPalette() {
+  const c = colours();
+  const root = document.documentElement.style;
+  root.setProperty('--series-logic', c.family.logic);
+  root.setProperty('--series-alloc', c.family.alloc);
+  root.setProperty('--series-unsure', c.family.unsure);
+  root.setProperty('--gate', c.gate);
 }
 
 async function getJson(path) {
@@ -224,16 +248,14 @@ const IcicleChart = {
         .attr('width', cellWidth)
         .attr('height', ROW - GAP)
         .attr('rx', d => (cellWidth(d) < 8 ? 1 : 3))
-        .attr('fill', d => d.data.category
-          ? familyColor(d.family)
-          : cssVar('--neutral-mark'))
+        .attr('fill', d => fillOf(d))
         // A query dims what it did not match rather than recolouring what it
         // did, so a matched frame still shows which kind of panic it is.
         .attr('fill-opacity', d => (!match || match(d) ? 1 : 0.16))
         // A cleanup frame runs only while an earlier panic unwinds. That is a
         // reachability condition, drawn as a gate, and deliberately unlike the
         // dispatch uncertainty carried by vtable and unresolved edges.
-        .attr('stroke', d => d.data.cleanup ? cssVar('--gate') : 'none')
+        .attr('stroke', d => d.data.cleanup ? colours().gate : 'none')
         .attr('stroke-dasharray', d => d.data.cleanup ? '3 2' : null)
         .attr('stroke-width', d => d.data.cleanup ? 1.5 : 0);
 
@@ -259,9 +281,7 @@ const IcicleChart = {
       cells.filter(d => cellWidth(d) > MIN_LABEL)
         .append('text')
         .attr('class', 'frame-label')
-        .attr('fill', d => d.data.category
-          ? inkOn(familyColor(d.family))
-          : secondary)
+        .attr('fill', d => d.data.category ? inkOn(fillOf(d)) : secondary)
         .attr('x', 6).attr('y', ROW / 2 + 1)
         .attr('dominant-baseline', 'middle')
         .attr('fill-opacity', d => (!match || match(d) ? 1 : 0.3))
@@ -425,7 +445,7 @@ function escapeHtml(text) {
 
 /* ------------------------------------------------------------------- app */
 
-createApp({
+const App = {
   components: { IcicleChart },
   setup() {
     const graph = ref(null);
@@ -463,6 +483,7 @@ createApp({
 
     function applyTheme(next) {
       document.documentElement.dataset.theme = next;
+      applyPalette();
       try {
         localStorage.setItem('panicgraph-theme', next);
       } catch (err) {
@@ -665,9 +686,11 @@ createApp({
     }
 
     function familyOf(name) { return FAMILY_OF[name] || 'unsure'; }
+    /* The category's own step, so the list beside the chart is keyed the
+       way the chart is coloured. Reads the theme so it follows a toggle. */
     function familyStyle(name) {
-      return { background: `var(--series-${familyOf(name) === 'logic' ? 'logic'
-        : familyOf(name) === 'alloc' ? 'alloc' : 'unsure'})` };
+      const set = PALETTE[theme.value === 'dark' ? 'dark' : 'light'];
+      return { background: set.panic[name] || set.family[familyOf(name)] };
     }
 
     onMounted(async () => {
@@ -963,4 +986,14 @@ reaches, so it reports where it stopped seeing rather than a way to fail.">
     </div>
   </section>
 </main>`,
-}).mount('#app');
+};
+
+getJson('/palette.json')
+  .then(palette => {
+    adoptPalette(palette);
+    createApp(App).mount('#app');
+  })
+  .catch(err => {
+    document.getElementById('app').textContent =
+      `The palette could not be loaded: ${err.message}`;
+  });

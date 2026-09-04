@@ -1,0 +1,117 @@
+{
+  "families": {
+    "logic": [
+      "unwrap",
+      "str-boundary",
+      "overflow",
+      "borrow",
+      "index",
+      "poison",
+      "divide-by-zero",
+      "remainder-by-zero",
+      "explicit"
+    ],
+    "alloc": [
+      "alloc-failure",
+      "capacity-overflow",
+      "refcount-overflow"
+    ],
+    "unsure": [
+      "fmt",
+      "fn-pointer",
+      "unknown",
+      "ub-check",
+      "null-deref",
+      "generic-bound",
+      "misaligned-ref",
+      "dyn-call",
+      "foreign"
+    ]
+  },
+  "light": {
+    "page": "#fcfcfb",
+    "ink": "#0b0b0b",
+    "label": "#52514e",
+    "muted": "#78766f",
+    "gate": "#8a5a00",
+    "match": "#e600e6",
+    "brand": "#2e2b27",
+    "family": {
+      "logic": "#2a78d6",
+      "alloc": "#eb6834",
+      "unsure": "#1baf7a"
+    },
+    "call": {
+      "none": "#cbc8c1",
+      "logic": "#b5cae6",
+      "alloc": "#e3bfb2",
+      "unsure": "#afd2c0"
+    },
+    "panic": {
+      "unwrap": "#7ab2fc",
+      "str-boundary": "#5ca3ff",
+      "overflow": "#4894f5",
+      "borrow": "#3986e5",
+      "index": "#2a78d6",
+      "poison": "#196ac7",
+      "divide-by-zero": "#005cb8",
+      "remainder-by-zero": "#0050a1",
+      "explicit": "#00448b",
+      "alloc-failure": "#fd8456",
+      "capacity-overflow": "#eb6834",
+      "refcount-overflow": "#d25118",
+      "fmt": "#47cc95",
+      "fn-pointer": "#34bd87",
+      "unknown": "#1baf7a",
+      "ub-check": "#0ba26f",
+      "null-deref": "#0f9366",
+      "generic-bound": "#11865c",
+      "misaligned-ref": "#027952",
+      "dyn-call": "#066c49",
+      "foreign": "#085f40"
+    }
+  },
+  "dark": {
+    "page": "#1a1a19",
+    "ink": "#ffffff",
+    "label": "#c3c2b7",
+    "muted": "#8d8b81",
+    "gate": "#c98500",
+    "match": "#e600e6",
+    "brand": "#f2eee7",
+    "family": {
+      "logic": "#3987e5",
+      "alloc": "#d95926",
+      "unsure": "#199e70"
+    },
+    "call": {
+      "none": "#3d3c38",
+      "logic": "#303d4e",
+      "alloc": "#4c362e",
+      "unsure": "#2b4237"
+    },
+    "panic": {
+      "unwrap": "#9fc8fc",
+      "str-boundary": "#81b8fe",
+      "overflow": "#62a7ff",
+      "borrow": "#4997f6",
+      "index": "#3987e5",
+      "poison": "#2b7ad7",
+      "divide-by-zero": "#1c6eca",
+      "remainder-by-zero": "#0862bd",
+      "explicit": "#0257aa",
+      "alloc-failure": "#f26f3f",
+      "capacity-overflow": "#d95926",
+      "refcount-overflow": "#c44608",
+      "fmt": "#47be8e",
+      "fn-pointer": "#33ae7f",
+      "unknown": "#199e70",
+      "ub-check": "#0a9165",
+      "null-deref": "#0e835c",
+      "generic-bound": "#107552",
+      "misaligned-ref": "#046948",
+      "dyn-call": "#075c3f",
+      "foreign": "#084f36"
+    }
+  }
+}

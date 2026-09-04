@@ -20,6 +20,13 @@
 //! for the width flame graph tools draw at, which is the picture a viewer
 //! without scripting shows, scaled as a whole to fit.
 //!
+//! The colours are the interactive view's, read from the palette file both
+//! share: three hue families say what kind of panic a frame is, each
+//! category takes a step of its own on its family's hue, and a call is
+//! tinted by the family most of the panics under it belong to. Siblings of
+//! equal width are banded by family, so the many narrow frames read as runs
+//! of one colour rather than confetti.
+//!
 //! The project's mark sits in the corner, at the height of a control, so it
 //! says what drew the file without competing with the title. It links to the
 //! project and names the version, so a file handed on alone still says where
@@ -37,10 +44,24 @@ use std::fmt::Write as _;
 use anyhow::Result;
 
 use crate::{
-    CategorySet, Graph,
+    Category, CategorySet, Graph,
     api::{FlameRow, children_of},
+    palette::{Family, Palette, Theme, ink_on},
     solve::Edges,
 };
+
+/// What the picture shows, and how.
+#[derive(Debug, Clone, Copy)]
+pub struct View {
+    /// Categories assumed impossible.
+    pub suppressed: CategorySet,
+    /// Which optional edges the solver follows.
+    pub edges: Edges,
+    /// Whether runs of single calls fold into one frame.
+    pub fold: bool,
+    /// The colours to draw in.
+    pub theme: Theme,
+}
 
 /// Height of one row of frames.
 const ROW: f64 = 17.0;
@@ -76,28 +97,6 @@ const MIN_LABEL: f64 = 30.0;
 /// be opened.
 const MIN_WIDTH: f64 = 0.1;
 
-/// Colours, matching the interactive view.
-///
-/// Three hues carry identity because an icicle places arbitrary frames side
-/// by side, and only the first three slots of the palette clear the
-/// all-pairs colour vision floors. The exact category is written on the
-/// frame and in its title, never left to colour alone.
-const LOGIC: &str = "#2a78d6";
-const ALLOC: &str = "#eb6834";
-const UNSURE: &str = "#1baf7a";
-const NEUTRAL: &str = "#c9c6bd";
-
-/// Categories drawn as a call rather than a panic.
-fn family(category: Option<&str>) -> &'static str {
-    category.map_or(NEUTRAL, |name| match name {
-        "capacity-overflow" | "alloc-failure" | "refcount-overflow" => ALLOC,
-        "unknown" | "ub-check" | "fmt" | "null-deref" | "misaligned-ref" => {
-            UNSURE
-        }
-        _ => LOGIC,
-    })
-}
-
 /// One laid out frame.
 struct Frame {
     row: usize,
@@ -105,28 +104,27 @@ struct Frame {
     width: f64,
     depth: usize,
     value: usize,
+    /// The family of the panic, or of most of the panics beneath a call.
+    family: Option<Family>,
 }
 
 /// Renders the flame graph as a standalone document.
 ///
 /// # Errors
 ///
-/// Returns an error if the fixpoint does not converge.
-pub fn render(
-    graph: &Graph,
-    suppressed: CategorySet,
-    edges: Edges,
-    fold: bool,
-    out: &mut String,
-) -> Result<()> {
-    let rows = crate::api::flame_rows(graph, suppressed, edges, fold)?;
-    let frames = layout(&rows);
+/// Returns an error if the fixpoint does not converge or the palette file
+/// is not what the drawing expects.
+pub fn render(graph: &Graph, view: View, out: &mut String) -> Result<()> {
+    let palette = Palette::load(view.theme)?;
+    let rows =
+        crate::api::flame_rows(graph, view.suppressed, view.edges, view.fold)?;
+    let frames = layout(&rows, &palette);
     let depth = frames.iter().map(|f| f.depth).max().unwrap_or(0);
     let height = (depth as f64 + 1.0).mul_add(ROW, HEAD + FOOT);
     let total = frames.first().map_or(1, |f| f.value.max(1));
 
-    header(WIDTH, height, out);
-    out.push_str(BRAND);
+    header(WIDTH, height, &palette, out);
+    brand(&palette, out);
     // Whatever belongs to the middle or the right edge is placed as a share
     // of the width, or as an offset back from the edge, so it follows the
     // window rather than the width the file was fitted for.
@@ -141,7 +139,7 @@ pub fn render(
         out,
         "<text id=\"subtitle\" x=\"50%\" y=\"38\" text-anchor=\"middle\" \
          class=\"note\">{}</text>",
-        escape(&policy(suppressed))
+        escape(&policy(view))
     );
     // The zoom control stays at the left, where flame graphs keep it, after
     // the mark.
@@ -183,7 +181,7 @@ pub fn render(
     );
     for frame in &frames {
         let row = &rows[frame.row];
-        draw(frame, row, total, out);
+        draw(frame, row, total, &palette, out);
     }
     out.push_str("</svg>\n");
 
@@ -192,8 +190,8 @@ pub fn render(
 }
 
 /// The assumptions the picture was drawn under, written out.
-fn policy(suppressed: CategorySet) -> String {
-    let names = suppressed.names();
+fn policy(view: View) -> String {
+    let names = view.suppressed.names();
     if names.is_empty() {
         return "assuming nothing impossible".to_owned();
     }
@@ -201,12 +199,14 @@ fn policy(suppressed: CategorySet) -> String {
 }
 
 /// Places every frame, widest first so the heavy paths lead.
-fn layout(rows: &[FlameRow]) -> Vec<Frame> {
+fn layout(rows: &[FlameRow], palette: &Palette) -> Vec<Frame> {
     let mut children = children_of(rows);
 
     // Values accumulate from the leaves, so a frame is exactly as wide as
-    // the panics reachable through it. Computed bottom up without recursion,
-    // by walking the frames in reverse discovery order.
+    // the panics reachable through it, and with them the share of each
+    // family, so a call can take the colour of what most of its panics are.
+    // Computed bottom up without recursion, by walking the frames in
+    // reverse discovery order.
     let mut order = Vec::with_capacity(rows.len());
     let mut stack = vec![0usize];
     while let Some(id) = stack.pop() {
@@ -216,18 +216,39 @@ fn layout(rows: &[FlameRow]) -> Vec<Frame> {
         }
     }
     let mut value = vec![0usize; rows.len()];
+    let mut share = vec![[0usize; Family::ALL.len()]; rows.len()];
     for id in order.iter().rev() {
         let kids = children.get(id).map(Vec::as_slice).unwrap_or_default();
-        value[*id] = if kids.is_empty() {
-            rows[*id].value.max(1)
+        if kids.is_empty() {
+            // A leaf is a panic and counts for its category's family. One
+            // without a category is a call with nothing under it, which
+            // the tree does not produce; it keeps its width and joins no
+            // family.
+            value[*id] = rows[*id].value.max(1);
+            if let Some(family) = family_of(&rows[*id], palette) {
+                share[*id][family as usize] = value[*id];
+            }
         } else {
-            kids.iter().map(|k| value[*k]).sum()
-        };
+            value[*id] = kids.iter().map(|k| value[*k]).sum();
+            for kid in kids {
+                let theirs = share[*kid];
+                for (mine, weight) in share[*id].iter_mut().zip(theirs) {
+                    *mine += weight;
+                }
+            }
+        }
     }
+    let family: Vec<Option<Family>> =
+        share.iter().map(|weights| dominant(*weights)).collect();
+    // Widest first; then by family, so the many siblings of equal width
+    // form bands of one colour rather than confetti; then by name, so the
+    // order is stable.
+    let rank = |id: usize| family[id].map_or(Family::ALL.len(), |f| f as usize);
     for list in children.values_mut() {
         list.sort_by(|a, b| {
             value[*b]
                 .cmp(&value[*a])
+                .then_with(|| rank(*a).cmp(&rank(*b)))
                 .then_with(|| rows[*a].name.cmp(&rows[*b].name))
         });
     }
@@ -244,6 +265,7 @@ fn layout(rows: &[FlameRow]) -> Vec<Frame> {
             width,
             depth,
             value: value[id],
+            family: family[id],
         });
         let mut at = x;
         for kid in children.get(&id).into_iter().flatten() {
@@ -259,6 +281,28 @@ fn layout(rows: &[FlameRow]) -> Vec<Frame> {
     frames
 }
 
+/// The category a frame is a panic of, if it is one.
+fn category_of(row: &FlameRow) -> Option<Category> {
+    row.category.and_then(|name| name.parse().ok())
+}
+
+/// The family of the panic a frame is, if it is one.
+fn family_of(row: &FlameRow, palette: &Palette) -> Option<Family> {
+    category_of(row).map(|category| palette.family(category))
+}
+
+/// The family most of the panics beneath a frame belong to, or none where
+/// nothing beneath it has one. A tie goes to the family listed first.
+fn dominant(share: [usize; Family::ALL.len()]) -> Option<Family> {
+    let mut best: Option<(Family, usize)> = None;
+    for (family, weight) in Family::ALL.into_iter().zip(share) {
+        if weight > 0 && best.is_none_or(|(_, most)| weight > most) {
+            best = Some((family, weight));
+        }
+    }
+    best.map(|(family, _)| family)
+}
+
 /// A distance across the frames, as the share of their width it takes.
 ///
 /// Frames are placed in these shares rather than at pixels, which is what
@@ -268,7 +312,13 @@ fn percent(units: f64) -> f64 {
 }
 
 /// Writes one frame.
-fn draw(frame: &Frame, row: &FlameRow, total: usize, out: &mut String) {
+fn draw(
+    frame: &Frame,
+    row: &FlameRow,
+    total: usize,
+    palette: &Palette,
+    out: &mut String,
+) {
     let y = (frame.depth as f64).mul_add(ROW, HEAD);
     let width = (frame.width - GAP).max(0.6);
     let share = 100.0 * frame.value as f64 / total as f64;
@@ -281,6 +331,17 @@ fn draw(frame: &Frame, row: &FlameRow, total: usize, out: &mut String) {
     } else {
         format!(", through {} more calls", row.elided.len())
     };
+    // A panic takes its category's own step, which can be deep enough to
+    // need the light ink; a call takes the tint of what lies beneath it,
+    // which is always light enough for the ink the styling gives labels.
+    let category = category_of(row);
+    let fill = category.map_or_else(
+        || palette.call(frame.family),
+        |category| palette.panic(category),
+    );
+    let ink = category.map_or_else(String::new, |_| {
+        format!(" style=\"fill:{}\"", ink_on(fill))
+    });
 
     // The same sentence labels the frame for the script and for a reader
     // hovering it with scripting off, so it is built once. Only the name can
@@ -308,15 +369,17 @@ fn draw(frame: &Frame, row: &FlameRow, total: usize, out: &mut String) {
     let _ = writeln!(
         out,
         "<rect x=\"{:.4}%\" y=\"{y:.1}\" width=\"{:.4}%\" \
-         height=\"{:.1}\" fill=\"{}\"{} rx=\"2\"/>",
+         height=\"{:.1}\" fill=\"{fill}\"{} rx=\"2\"/>",
         percent(frame.x),
         percent(width),
         ROW - GAP,
-        family(row.category),
         if row.cleanup {
-            " stroke=\"#8a5a00\" stroke-dasharray=\"3 2\""
+            format!(
+                " stroke=\"{}\" stroke-dasharray=\"3 2\"",
+                palette.colours().gate
+            )
         } else {
-            ""
+            String::new()
         }
     );
     let label = if width > MIN_LABEL {
@@ -327,7 +390,7 @@ fn draw(frame: &Frame, row: &FlameRow, total: usize, out: &mut String) {
     };
     let _ = writeln!(
         out,
-        "<text x=\"{:.4}%\" dx=\"4\" y=\"{:.1}\" class=\"l\">{label}</text>",
+        "<text x=\"{:.4}%\" dx=\"4\" y=\"{:.1}\" class=\"l\"{ink}>{label}</text>",
         percent(frame.x),
         y + ROW / 2.0 + 3.0,
     );
@@ -384,7 +447,7 @@ fn escape(text: &str) -> String {
 /// once the file is open, which lets the frames spread to the window at
 /// their own text size; without the script it stays, and the drawing is
 /// scaled as a whole to fit.
-fn header(width: f64, height: f64, out: &mut String) {
+fn header(width: f64, height: f64, palette: &Palette, out: &mut String) {
     let _ = writeln!(out, "<?xml version=\"1.0\" standalone=\"no\"?>");
     let _ = writeln!(
         out,
@@ -392,64 +455,86 @@ fn header(width: f64, height: f64, out: &mut String) {
          viewBox=\"0 0 {width:.0} {height:.0}\" \
          xmlns=\"http://www.w3.org/2000/svg\" onload=\"init()\">"
     );
-    out.push_str(STYLE);
+    style(palette, out);
     out.push_str(SCRIPT);
     let _ = writeln!(
         out,
-        "<rect width=\"100%\" height=\"100%\" fill=\"#fcfcfb\"/>"
+        "<rect width=\"100%\" height=\"100%\" fill=\"{}\"/>",
+        palette.colours().page
     );
 }
 
-/// The project's mark and name, for the corner of the picture.
+/// Writes the project's mark and name into the corner of the picture.
 ///
 /// This is the lockup the interactive view shows, drawn at the height of a
-/// control so it reads as a signature rather than a heading, and linked to
-/// the project. Its tooltip names the version, so a reader handed the file
-/// alone can still find where it came from.
-const BRAND: &str = concat!(
-    "<a class=\"brand\" href=\"",
-    env!("CARGO_PKG_REPOSITORY"),
-    "\" target=\"_blank\">\n<title>Drawn by PanicGraph ",
-    env!("CARGO_PKG_VERSION"),
-    "</title>\n",
+/// control so it reads as a signature rather than a heading, in the ink of
+/// the theme, and linked to the project. Its tooltip names the version, so
+/// a reader handed the file alone can still find where it came from.
+fn brand(palette: &Palette, out: &mut String) {
+    let ink = &palette.colours().brand;
+    let _ = writeln!(
+        out,
+        "<a class=\"brand\" href=\"{}\" target=\"_blank\">\n\
+         <title>Drawn by PanicGraph {}</title>",
+        env!("CARGO_PKG_REPOSITORY"),
+        env!("CARGO_PKG_VERSION")
+    );
     // The lockup is drawn in a 300 by 64 box, shown here 26 high.
-    "<g fill=\"none\" transform=\"translate(10 5) scale(0.40625)\">\n",
-    "<path d=\"M6 14H58M6 32H58M6 50H58\" stroke=\"#2E2B27\" \
-     stroke-opacity=\"0.32\" stroke-width=\"2\"/>\n",
-    "<path d=\"M13 14H26V32H44V50\" stroke=\"#2E2B27\" stroke-width=\"4.5\" \
-     stroke-linecap=\"square\"/>\n",
-    "<circle cx=\"13\" cy=\"14\" r=\"3.5\" fill=\"#2E2B27\"/>\n",
-    "<circle cx=\"44\" cy=\"50\" r=\"7\" fill=\"#E8A33D\"/>\n",
-    "<circle cx=\"44\" cy=\"50\" r=\"7\" fill=\"none\" stroke=\"#2E2B27\" \
-     stroke-width=\"3\"/>\n",
-    "<text x=\"76\" y=\"42\" fill=\"#2E2B27\">PanicGraph</text>\n",
-    "</g>\n</a>\n",
-);
+    let _ = writeln!(
+        out,
+        "<g fill=\"none\" transform=\"translate(10 5) scale(0.40625)\">\n\
+         <path d=\"M6 14H58M6 32H58M6 50H58\" stroke=\"{ink}\" \
+         stroke-opacity=\"0.32\" stroke-width=\"2\"/>\n\
+         <path d=\"M13 14H26V32H44V50\" stroke=\"{ink}\" \
+         stroke-width=\"4.5\" stroke-linecap=\"square\"/>\n\
+         <circle cx=\"13\" cy=\"14\" r=\"3.5\" fill=\"{ink}\"/>\n\
+         <circle cx=\"44\" cy=\"50\" r=\"7\" fill=\"#E8A33D\"/>\n\
+         <circle cx=\"44\" cy=\"50\" r=\"7\" fill=\"none\" stroke=\"{ink}\" \
+         stroke-width=\"3\"/>\n\
+         <text x=\"76\" y=\"42\" fill=\"{ink}\">PanicGraph</text>\n\
+         </g>\n</a>"
+    );
+}
 
-/// Styling, kept inside the document so the file stands alone.
-const STYLE: &str = r#"<style>
-  text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .title { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 17px;
-    font-weight: 600; fill: #0b0b0b; cursor: pointer; }
-  .note, .detail, .ctl { font-family: ui-sans-serif, system-ui, sans-serif;
-    font-size: 12px; fill: #78766f; }
-  .detail { fill: #0b0b0b; }
-  .ctl { fill: #0b0b0b; cursor: pointer; display: none; }
-  .ctl.on { display: inline; }
-  .ctl:hover { text-decoration: underline; }
-  .brand text { font-family: "Space Grotesk", "Helvetica Neue", Helvetica,
+/// Writes the styling, kept inside the document so the file stands alone,
+/// in the theme's colours.
+fn style(palette: &Palette, out: &mut String) {
+    let c = palette.colours();
+    let _ = write!(
+        out,
+        "<style>
+  text {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
+  .title {{ font-family: ui-sans-serif, system-ui, sans-serif; font-size: 17px;
+    font-weight: 600; fill: {ink}; cursor: pointer; }}
+  .note, .detail, .ctl {{ font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 12px; fill: {muted}; }}
+  .detail {{ fill: {ink}; }}
+  .ctl {{ fill: {ink}; cursor: pointer; display: none; }}
+  .ctl.on {{ display: inline; }}
+  .ctl:hover {{ text-decoration: underline; }}
+  .brand text {{ font-family: \"Space Grotesk\", \"Helvetica Neue\", Helvetica,
     Arial, sans-serif; font-size: 34px; font-weight: 600;
-    letter-spacing: -0.8px; }
-  .brand:hover { opacity: 0.7; }
-  .l { font-size: 12px; fill: #0b0b0b; pointer-events: none; }
-  .f rect { stroke-width: 1; }
-  .f:hover rect { opacity: 0.72; cursor: pointer; }
-  .parent rect { opacity: 0.28; }
-  .hide { display: none; }
-  /* Magenta belongs to no category, so a match is never read as one. */
-  .match rect { fill: #e600e6; }
+    letter-spacing: -0.8px; }}
+  .brand:hover {{ opacity: 0.7; }}
+  .l {{ font-size: 12px; fill: {label}; pointer-events: none; }}
+  .f rect {{ stroke-width: 1; }}
+  .f:hover rect {{ opacity: 0.72; cursor: pointer; }}
+  .parent rect {{ opacity: 0.28; }}
+  .hide {{ display: none; }}
+  /* The match colour belongs to no category, so a match is never read as
+     one, and its label takes the ink that reads on it whatever the frame
+     had before. */
+  .match rect {{ fill: {matched}; }}
+  .match text {{ fill: {match_ink} !important; }}
 </style>
-"#;
+",
+        ink = c.ink,
+        muted = c.muted,
+        label = c.label,
+        matched = c.matched,
+        match_ink = ink_on(&c.matched),
+    );
+}
 
 /// The script that makes the picture explorable.
 ///

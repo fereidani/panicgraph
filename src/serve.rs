@@ -18,7 +18,9 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use flate2::{Compression, write::GzEncoder};
 
-use crate::{CategorySet, Graph, api, parse_selector, solve::Edges, util::Set};
+use crate::{
+    CategorySet, Graph, api, palette, parse_selector, solve::Edges, util::Set,
+};
 
 /// Largest request head accepted, which is ample for a local browser.
 const MAX_HEAD_BYTES: u64 = 16 * 1024;
@@ -74,6 +76,8 @@ const LOCKUP_SVG: &str = include_str!("../assets/panicgraph-lockup.svg");
 /// The wordmark, in the two themes the view offers.
 const LOCKUP_DARK_SVG: &str =
     include_str!("../assets/panicgraph-lockup-dark.svg");
+/// The colours, read by the view from the same file the drawing embeds.
+const PALETTE_JSON: &str = palette::SOURCE;
 
 /// Everything a request handler needs.
 struct State {
@@ -312,6 +316,7 @@ fn route(
     static INDEX: OnceLock<Vec<u8>> = OnceLock::new();
     static LOCKUP: OnceLock<Vec<u8>> = OnceLock::new();
     static LOCKUP_DARK: OnceLock<Vec<u8>> = OnceLock::new();
+    static PALETTE: OnceLock<Vec<u8>> = OnceLock::new();
 
     match path {
         "/" | "/index.html" => out.asset(HTML, &INDEX, INDEX_HTML),
@@ -322,6 +327,7 @@ fn route(
         "/panicgraph-lockup-dark.svg" => {
             out.asset(SVG, &LOCKUP_DARK, LOCKUP_DARK_SVG)
         }
+        "/palette.json" => out.asset(JSON, &PALETTE, PALETTE_JSON),
         "/api/graph" => out.json(&api::graph(&state.graph)),
         "/api/solve" => out.result(
             suppressed_from(query)

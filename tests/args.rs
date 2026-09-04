@@ -219,3 +219,32 @@ fn shortcuts_choose_the_rendering() {
         );
     }
 }
+
+#[cfg(feature = "svg")]
+#[test]
+fn the_theme_goes_with_the_drawing() {
+    use panicgraph::palette::Theme;
+
+    assert_eq!(parse(&["--svg"]).expect("valid").theme, Theme::Light);
+    assert_eq!(
+        parse(&["--svg", "--dark"]).expect("valid").theme,
+        Theme::Dark
+    );
+    assert_eq!(
+        parse(&["--svg", "--theme", "dark"]).expect("valid").theme,
+        Theme::Dark
+    );
+    assert_eq!(
+        parse(&["--format", "svg", "--theme", "light"])
+            .expect("valid")
+            .theme,
+        Theme::Light
+    );
+    let err = parse(&["--dark"]).expect_err("colours without a drawing");
+    assert!(
+        err.to_string().contains("--svg"),
+        "the message says what to add: {err}"
+    );
+    assert!(parse(&["--svg", "--theme", "light", "--dark"]).is_err());
+    assert!(parse(&["--svg", "--theme", "sepia"]).is_err());
+}

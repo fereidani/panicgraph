@@ -167,3 +167,16 @@ fn an_escape_before_a_multibyte_character_is_answered() {
         "a malformed escape must be answered, not dropped"
     );
 }
+
+#[test]
+fn the_palette_is_served_from_the_file_the_drawing_embeds() {
+    let addr = start();
+    let reply = get(addr, "/palette.json", false);
+    assert!(reply.has("content-type: application/json"));
+    assert_eq!(reply.body, panicgraph::palette::SOURCE.as_bytes());
+    let value: serde_json::Value =
+        serde_json::from_slice(&reply.body).expect("the palette is JSON");
+    for key in ["families", "light", "dark"] {
+        assert!(value.get(key).is_some(), "the palette has no {key}");
+    }
+}
