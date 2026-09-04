@@ -322,8 +322,13 @@ alone.
 
 `--svg` is short for `--format svg`. `--dark` draws the file in the dark
 colours of the interactive view, which `--theme light` and `--theme dark`
-name in full. `--only` narrows the drawing to the categories named, as it
-does the report, and the picture says so under its title.
+name in full. Every policy flag applies to the drawing as it does to the
+report: `--only` narrows it to the categories named, `--all-crates` draws
+dependencies too, `--closures parent` folds closures into the functions
+they are written in, `--generics instantiated` draws what the build's own
+instantiations do, and `--verify` writes the artifact's verdict on each
+panic. What the drawing was narrowed or widened to is written under its
+title.
 
 Frames are coloured as in the interactive view: three hue families say what
 kind of panic a frame is, each category takes a step of its own on its
