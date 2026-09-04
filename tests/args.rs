@@ -199,3 +199,23 @@ fn serving_is_refused_where_there_is_nothing_to_serve() {
         "the analysis is what the view shows"
     );
 }
+
+#[test]
+fn shortcuts_choose_the_rendering() {
+    let args = parse(&["--json"]).expect("the shortcut is known");
+    assert_eq!(args.format, Format::Json);
+    assert!(
+        parse(&["--json", "--format", "human"]).is_err(),
+        "the shortcut and the long form cannot disagree"
+    );
+    #[cfg(feature = "svg")]
+    {
+        let args = parse(&["--svg"]).expect("the shortcut is known");
+        assert_eq!(args.format, Format::Svg);
+        assert!(parse(&["--svg", "--json"]).is_err());
+        assert!(
+            parse(&["--svg", "kinds"]).is_err(),
+            "a drawing is of the graph"
+        );
+    }
+}

@@ -79,6 +79,15 @@ pub struct Cli {
     /// How to render the result.
     #[arg(long, value_enum, default_value_t = Format::Human, global = true)]
     pub format: Format,
+
+    /// Print machine readable JSON; the same as `--format json`.
+    #[arg(long, global = true, conflicts_with = "format")]
+    pub json: bool,
+
+    /// Draw a standalone flame graph; the same as `--format svg`.
+    #[cfg(feature = "svg")]
+    #[arg(long, global = true, conflicts_with_all = ["format", "json"])]
+    pub svg: bool,
 }
 
 /// Which crate, and how it is built.
@@ -485,6 +494,7 @@ impl Cli {
         #[cfg(feature = "serve")]
         let listen = self.listen.as_deref().map(listen_addr).transpose()?;
         let only = self.policy.only.as_deref().map(selector).transpose()?;
+        let format = self.rendering();
         let command = self.command.unwrap_or(Command::Analyze);
         // A drawing is a picture of the whole graph, so it is the report
         // and nothing else. Rendering prose instead would answer a question
@@ -499,10 +509,11 @@ impl Cli {
                 command.name()
             );
         }
-        if self.format == Format::Svg && !matches!(command, Command::Analyze) {
+        #[cfg(feature = "svg")]
+        if format == Format::Svg && !matches!(command, Command::Analyze) {
             bail!(
-                "`--format svg` draws the whole graph, so it belongs \
-                 to the analysis rather than to `{}`",
+                "`--svg` draws the whole graph, so it belongs to the \
+                 analysis rather than to `{}`",
                 command.name()
             );
         }
@@ -524,7 +535,7 @@ impl Cli {
             ),
             with_tests: self.scope.with_tests,
             generics: self.policy.generics,
-            format: self.format,
+            format,
             static_only: self.policy.static_only,
             candidates: self.policy.candidates,
             verify: self.policy.verify,
@@ -535,6 +546,17 @@ impl Cli {
             #[cfg(feature = "serve")]
             listen,
         })
+    }
+}
+
+impl Cli {
+    /// The rendering asked for, counting the shortcuts.
+    const fn rendering(&self) -> Format {
+        #[cfg(feature = "svg")]
+        if self.svg {
+            return Format::Svg;
+        }
+        if self.json { Format::Json } else { self.format }
     }
 }
 
