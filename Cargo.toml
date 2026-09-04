@@ -3,7 +3,7 @@
 
 [package]
 name = "panicgraph"
-version = "0.1.12"
+version = "0.2.0"
 edition = "2024"
 authors = ["Khashayar Fereidani <info@fereidani.com>"]
 license = "MIT OR Apache-2.0"
