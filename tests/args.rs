@@ -2,7 +2,7 @@
 
 use panicgraph::{
     Category, CategorySet, StdMode,
-    args::{self, Command, Format},
+    args::{self, Closures, Command, Format, Generics},
 };
 
 /// Parses a borrowed argument list.
@@ -247,4 +247,34 @@ fn the_theme_goes_with_the_drawing() {
     );
     assert!(parse(&["--svg", "--theme", "light", "--dark"]).is_err());
     assert!(parse(&["--svg", "--theme", "sepia"]).is_err());
+}
+
+#[test]
+fn the_selection_reads_the_policy_flags() {
+    let args = parse(&[
+        "--all-crates",
+        "--closures",
+        "parent",
+        "--generics",
+        "instantiated",
+        "--only",
+        "unwrap",
+    ])
+    .expect("every flag is known");
+    let selection = args.selection();
+    assert!(selection.all_crates);
+    assert_eq!(selection.closures, Closures::Parent);
+    assert_eq!(selection.generics, Generics::Instantiated);
+    assert!(
+        selection
+            .only
+            .expect("--only was given")
+            .contains(Category::Unwrap)
+    );
+
+    let plain = parse(&[]).expect("valid").selection();
+    assert!(!plain.all_crates);
+    assert_eq!(plain.closures, Closures::Separate);
+    assert_eq!(plain.generics, Generics::Written);
+    assert!(plain.only.is_none());
 }

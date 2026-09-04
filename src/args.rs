@@ -11,7 +11,7 @@ use clap::{Args as Group, Parser, Subcommand, ValueEnum};
 
 #[cfg(feature = "svg")]
 use crate::palette::Theme;
-use crate::{CategorySet, StdMode, parse_selector};
+use crate::{CategorySet, StdMode, parse_selector, select::Selection};
 
 /// Trailing help that explains the shared vocabulary once.
 const SELECTOR_HELP: &str = "\
@@ -496,6 +496,19 @@ pub struct Args {
     /// When set, serve an interactive view on this address.
     #[cfg(feature = "serve")]
     pub listen: Option<SocketAddr>,
+}
+
+impl Args {
+    /// Which functions show under these settings, and under what names.
+    #[must_use]
+    pub const fn selection(&self) -> Selection {
+        Selection {
+            all_crates: self.all_crates,
+            closures: self.closures,
+            generics: self.generics,
+            only: self.only,
+        }
+    }
 }
 
 impl Cli {

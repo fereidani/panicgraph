@@ -6,7 +6,7 @@ use anyhow::Result;
 
 use crate::{
     Body, Category, CategorySet, FuncId, Graph, Solution, Terminal,
-    args::{Args, Closures, Format, Generics},
+    args::{Args, Format},
     util::Map,
     verify::{Missed, Verdict, Verdicts},
     witness,
@@ -23,15 +23,6 @@ pub(crate) struct Finding<'a> {
     /// them separately would print the same line several times.
     pub ids: Vec<FuncId>,
     pub categories: CategorySet,
-    /// What the body read as written raises, with its parameters open.
-    written: CategorySet,
-    /// What the instantiations the build makes raise, and whether there
-    /// are any.
-    instantiated: Option<CategorySet>,
-    /// Whether the crate's own build has the function at all. A name seen
-    /// only in a test crate is a test's own generic helper, not a function
-    /// of the crate.
-    owned: bool,
 }
 
 impl Finding<'_> {
@@ -98,40 +89,23 @@ fn verdict_of(
 /// Every function the report considers, with what it reports under, which
 /// may be nothing at all.
 ///
-/// A function that reports nothing still matters: an instantiation of a
-/// generic function that raises nothing is what the instantiation view
-/// reads instead of the body as written.
+/// Which functions those are, and under what names, is the selection's
+/// call, made once for every rendering so the report and the drawing
+/// agree.
 fn considered<'a>(
     graph: &'a Graph,
     solution: &'a Solution,
     args: &'a Args,
 ) -> impl Iterator<Item = (FuncId, &'a Body, CategorySet)> {
-    graph.iter().filter_map(move |(id, body)| {
-        if body.opaque || !(args.all_crates || body.local) {
-            return None;
-        }
-        let enabled = solution.enabled(id);
-        let categories =
-            args.only.map_or(enabled, |only| enabled.intersection(only));
-        Some((id, body, categories))
+    let selection = args.selection();
+    selection.functions(graph).map(move |(id, body)| {
+        (id, body, selection.shown(solution.enabled(id)))
     })
 }
 
 /// The name a body reports under.
-///
-/// A closure is not an addressable function of the crate's own interface,
-/// so the parent view folds it into the function it is written in. The
-/// separate view stays the default because it is the precise one: a panic
-/// contained by a catch belongs to the closure, not to its caller.
 pub(crate) fn reported_name<'a>(body: &'a Body, args: &Args) -> &'a str {
-    match args.closures {
-        Closures::Separate => &body.display,
-        Closures::Parent => body
-            .display
-            .split("::{closure")
-            .next()
-            .unwrap_or(&body.display),
-    }
+    args.selection().name(body)
 }
 
 /// Whether anything at all would be reported under these settings.
@@ -147,10 +121,10 @@ pub fn any_finding(graph: &Graph, solution: &Solution, args: &Args) -> bool {
 /// Selects the functions worth reporting, one entry per name.
 ///
 /// The report and the gate both group here, so a function that reports
-/// under one name cannot be gated under another. A generic function is
-/// read as written and once per instantiation, and which of those the
-/// name reports is the caller's choice: everything, or the instantiations
-/// alone where there are any.
+/// under one name cannot be gated under another. Every body the selection
+/// keeps under a name contributes what it raises, so a generic function
+/// reports what its written body and its instantiations raise together,
+/// or what the instantiations alone do, as the selection decides.
 pub(crate) fn collect<'a>(
     graph: &'a Graph,
     solution: &'a Solution,
@@ -170,33 +144,27 @@ pub(crate) fn collect<'a>(
                 name,
                 ids: Vec::new(),
                 categories: CategorySet::EMPTY,
-                written: CategorySet::EMPTY,
-                instantiated: None,
-                owned: false,
             });
             findings.len().saturating_sub(1)
         };
         let Some(finding) = findings.get_mut(at) else {
             continue;
         };
-        finding.ids.push(id);
-        finding.owned |= !body.from_tests;
-        if body.key.is_open() {
-            finding.written = finding.written.union(categories);
+        // The first body stands for the name, so the body that bears the
+        // name itself takes that place ahead of the closures folded into it.
+        let bears_name = body.display == name;
+        let first_does_not = finding
+            .ids
+            .first()
+            .is_some_and(|&first| graph.body(first).display != name);
+        if bears_name && first_does_not {
+            finding.ids.insert(0, id);
         } else {
-            let held = finding.instantiated.unwrap_or(CategorySet::EMPTY);
-            finding.instantiated = Some(held.union(categories));
+            finding.ids.push(id);
         }
+        finding.categories = finding.categories.union(categories);
     }
-    for finding in &mut findings {
-        finding.categories = match (args.generics, finding.instantiated) {
-            (Generics::Instantiated, Some(instantiated)) => instantiated,
-            (_, instantiated) => finding
-                .written
-                .union(instantiated.unwrap_or(CategorySet::EMPTY)),
-        };
-    }
-    findings.retain(|finding| finding.owned && !finding.categories.is_empty());
+    findings.retain(|finding| !finding.categories.is_empty());
     findings.sort_by(|a, b| a.name.cmp(b.name));
     findings
 }

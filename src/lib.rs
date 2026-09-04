@@ -27,6 +27,7 @@ pub mod check;
 pub mod palette;
 pub mod report;
 pub mod run;
+pub mod select;
 #[cfg(feature = "serve")]
 pub mod serve;
 #[cfg(feature = "svg")]
