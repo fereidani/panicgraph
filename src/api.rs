@@ -321,7 +321,7 @@ pub fn flame(
     edges: Edges,
     fold: bool,
 ) -> Result<Value> {
-    let rows = flame_rows(g, suppressed, edges, fold)?;
+    let rows = flame_rows(g, suppressed, None, edges, fold)?;
     Ok(json!({ "nodes": rows }))
 }
 
@@ -351,19 +351,26 @@ pub struct FlameRow {
 
 /// Builds the tree, optionally folding runs of single calls.
 ///
+/// A selection narrows what is drawn, not what is assumed: the solver runs
+/// under the policy alone, so a path is kept or dropped for the same reasons
+/// as in the report, and only the categories selected are then drawn.
+///
 /// # Errors
 ///
 /// Returns an error if the fixpoint does not converge.
 pub fn flame_rows(
     g: &Graph,
     suppressed: CategorySet,
+    only: Option<CategorySet>,
     edges: Edges,
     fold: bool,
 ) -> Result<Vec<FlameRow>> {
     let solution = solved(g, suppressed, edges)?;
     let mut tree = Tree::new();
     for (id, _) in g.locals() {
-        for category in solution.enabled(id).iter() {
+        let enabled = solution.enabled(id);
+        let shown = only.map_or(enabled, |only| enabled.intersection(only));
+        for category in shown.iter() {
             let Some(path) = witness::find(g, &solution, id, category) else {
                 continue;
             };

@@ -22,6 +22,7 @@ fn body(name: &str, category: Category) -> Body {
 fn view() -> View {
     View {
         suppressed: CategorySet::EMPTY,
+        only: None,
         edges: Edges::default(),
         fold: true,
         theme: Theme::Light,
@@ -243,6 +244,33 @@ fn the_assumptions_are_written_on_the_picture() {
     );
     assert!(assumed.contains("alloc-failure"));
     parse(&assumed);
+}
+
+#[test]
+fn a_selection_narrows_what_is_drawn_and_is_written_on_the_picture() {
+    let bodies = || {
+        vec![
+            body("parse", Category::Unwrap),
+            body("read", Category::Index),
+        ]
+    };
+    let all = render(bodies());
+    assert!(all.contains("unwrap panic") && all.contains("index panic"));
+
+    let some = render_view(
+        bodies(),
+        View {
+            only: Some(CategorySet::single(Category::Unwrap)),
+            ..view()
+        },
+    );
+    assert!(some.contains("unwrap panic"), "the selection is drawn");
+    assert!(!some.contains("index panic"), "the rest is not");
+    assert!(
+        some.contains("showing only: unwrap"),
+        "the picture says what it was narrowed to"
+    );
+    parse(&some);
 }
 
 #[test]

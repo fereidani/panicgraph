@@ -54,6 +54,7 @@ fn dispatch() -> Result<u8> {
             let graph = Graph::from_artifacts(run::collect(&args)?);
             let view = panicgraph::svg::View {
                 suppressed: args.suppress,
+                only: args.only,
                 edges: edges_of(&args),
                 fold: true,
                 theme: args.theme,

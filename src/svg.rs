@@ -55,6 +55,8 @@ use crate::{
 pub struct View {
     /// Categories assumed impossible.
     pub suppressed: CategorySet,
+    /// When set, the only categories drawn.
+    pub only: Option<CategorySet>,
     /// Which optional edges the solver follows.
     pub edges: Edges,
     /// Whether runs of single calls fold into one frame.
@@ -116,8 +118,13 @@ struct Frame {
 /// is not what the drawing expects.
 pub fn render(graph: &Graph, view: View, out: &mut String) -> Result<()> {
     let palette = Palette::load(view.theme)?;
-    let rows =
-        crate::api::flame_rows(graph, view.suppressed, view.edges, view.fold)?;
+    let rows = crate::api::flame_rows(
+        graph,
+        view.suppressed,
+        view.only,
+        view.edges,
+        view.fold,
+    )?;
     let frames = layout(&rows, &palette);
     let depth = frames.iter().map(|f| f.depth).max().unwrap_or(0);
     let height = (depth as f64 + 1.0).mul_add(ROW, HEAD + FOOT);
@@ -139,7 +146,7 @@ pub fn render(graph: &Graph, view: View, out: &mut String) -> Result<()> {
         out,
         "<text id=\"subtitle\" x=\"50%\" y=\"38\" text-anchor=\"middle\" \
          class=\"note\">{}</text>",
-        escape(&policy(view))
+        escape(&policy(&view))
     );
     // The zoom control stays at the left, where flame graphs keep it, after
     // the mark.
@@ -189,13 +196,28 @@ pub fn render(graph: &Graph, view: View, out: &mut String) -> Result<()> {
     Ok(())
 }
 
-/// The assumptions the picture was drawn under, written out.
-fn policy(view: View) -> String {
+/// The assumptions the picture was drawn under, and what it was narrowed
+/// to, written out.
+fn policy(view: &View) -> String {
     let names = view.suppressed.names();
-    if names.is_empty() {
-        return "assuming nothing impossible".to_owned();
+    let mut text = if names.is_empty() {
+        "assuming nothing impossible".to_owned()
+    } else {
+        format!("assuming impossible: {}", names.join(", "))
+    };
+    if let Some(only) = view.only {
+        let shown = only.names();
+        let _ = write!(
+            text,
+            "; showing only: {}",
+            if shown.is_empty() {
+                "nothing".to_owned()
+            } else {
+                shown.join(", ")
+            }
+        );
     }
-    format!("assuming impossible: {}", names.join(", "))
+    text
 }
 
 /// Places every frame, widest first so the heavy paths lead.
