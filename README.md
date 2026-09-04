@@ -76,7 +76,8 @@ cargo install panicgraph --version VERSION --no-default-features -F serve
 ```
 
 `VERSION` stands for the release you want, which `cargo search panicgraph`
-prints and `panicgraph --version` reports for a machine that already has one.
+prints and `panicgraph -v` reports for a machine that already has one, as
+does `--version`; the first line of `panicgraph --help` names it as well.
 Use `--path .` in place of `panicgraph --version VERSION` to build the same
 thing from a checkout.
 
