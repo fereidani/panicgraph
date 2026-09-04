@@ -160,6 +160,15 @@ fn build(
     if let Some(pkg) = &args.package {
         cmd.arg("--package").arg(pkg);
     }
+    if args.features.all {
+        cmd.arg("--all-features");
+    }
+    if args.features.no_default {
+        cmd.arg("--no-default-features");
+    }
+    if !args.features.named.is_empty() {
+        cmd.arg("--features").arg(args.features.named.join(","));
+    }
     if args.std_mode == StdMode::Full {
         cmd.arg("-Z")
             .arg("build-std=core,alloc,std")
@@ -219,12 +228,13 @@ fn prepare(root: &Path, driver: &Path, args: &Args) -> Result<Layout> {
     // those would silently report one crate's panics against another's.
     let base = root.join("target").join("panicgraph");
     let slot = format!(
-        "{}-{}-{}{}{}",
+        "{}-{}-{}{}{}{}",
         args.profile,
         args.std_mode.name(),
         args.package.as_deref().unwrap_or("all"),
         mir_opt_suffix(args),
         if args.with_tests { "-tests" } else { "" },
+        feature_suffix(args),
     );
     let (target, shared) = analysis_target(root, args)?;
     let layout = Layout {
@@ -384,6 +394,24 @@ fn analysis_target(root: &Path, args: &Args) -> Result<(PathBuf, bool)> {
             .map_or_else(|| (local.clone(), false), |tree| (tree, true)),
         StdMode::Shipped => (local, false),
     })
+}
+
+/// What a build with a chosen set of features is named apart by.
+///
+/// The features change which code exists, so results built with one set
+/// are never read as another's. The name is written with the characters
+/// a path is safe to hold; the default set names nothing.
+fn feature_suffix(args: &Args) -> String {
+    if args.features.is_default() {
+        return String::new();
+    }
+    let safe: String = args
+        .features
+        .describe()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("-f-{safe}")
 }
 
 /// What a build at a chosen MIR optimization level is named apart by.

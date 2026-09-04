@@ -351,6 +351,13 @@ fn header(graph: &Graph, args: &Args, found: usize, out: &mut String) {
             let _ = writeln!(out, "    mir opt level      {level}");
         }
     }
+    if !args.features.is_default() {
+        let _ = writeln!(
+            out,
+            "    features           {}",
+            args.features.describe()
+        );
+    }
     let suppressed = if args.suppress.is_empty() {
         "nothing".to_owned()
     } else {

@@ -113,6 +113,22 @@ pub struct Scope {
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=4), global = true)]
     pub mir_opt_level: Option<u8>,
 
+    /// Cargo features to build the crate with, comma or space separated.
+    ///
+    /// Code behind a feature is only analysed when the feature is on, and
+    /// a check can depend on one, so the report names the features and a
+    /// baseline records them.
+    #[arg(long, value_name = "LIST", global = true)]
+    pub features: Option<String>,
+
+    /// Build the crate with every feature on.
+    #[arg(long, global = true)]
+    pub all_features: bool,
+
+    /// Build the crate without its default features.
+    #[arg(long, global = true)]
+    pub no_default_features: bool,
+
     /// Build the crate's test targets as well, so the instantiations they
     /// make of its generic functions join the analysis.
     ///
@@ -253,6 +269,61 @@ pub struct Check {
     pub fail_on_unknown: bool,
 }
 
+/// Which cargo features the crate is built with.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Features {
+    /// The features named on the command line, sorted and without repeats
+    /// so that one selection has one name.
+    pub named: Vec<String>,
+    /// Whether every feature is on.
+    pub all: bool,
+    /// Whether the default features are off.
+    pub no_default: bool,
+}
+
+impl Features {
+    /// Reads a selection off the command line.
+    fn new(list: Option<&str>, all: bool, no_default: bool) -> Self {
+        let mut named: Vec<String> = list
+            .unwrap_or_default()
+            .split([',', ' '])
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect();
+        named.sort();
+        named.dedup();
+        Self {
+            named,
+            all,
+            no_default,
+        }
+    }
+
+    /// Whether the crate is built the way cargo builds it unasked.
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        self.named.is_empty() && !self.all && !self.no_default
+    }
+
+    /// The selection as one word, for the report and for telling one
+    /// build's results from another's.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        if self.all {
+            parts.push("all");
+        }
+        if self.no_default {
+            parts.push("no-default");
+        }
+        parts.extend(self.named.iter().map(String::as_str));
+        if parts.is_empty() {
+            return "default".to_owned();
+        }
+        parts.join("+")
+    }
+}
+
 /// How generic functions report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Generics {
@@ -374,6 +445,8 @@ pub struct Args {
     pub std_mode: StdMode,
     /// The compiler's MIR optimization level, when one was asked for.
     pub mir_opt_level: Option<u8>,
+    /// Which cargo features the crate is built with.
+    pub features: Features,
     /// Build the test targets too, for the instantiations they make.
     pub with_tests: bool,
     /// How generic functions report.
@@ -442,6 +515,11 @@ impl Cli {
             profile: self.scope.profile,
             std_mode,
             mir_opt_level: self.scope.mir_opt_level,
+            features: Features::new(
+                self.scope.features.as_deref(),
+                self.scope.all_features,
+                self.scope.no_default_features,
+            ),
             with_tests: self.scope.with_tests,
             generics: self.policy.generics,
             format: self.format,

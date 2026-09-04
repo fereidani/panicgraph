@@ -65,6 +65,26 @@ fn unknown_category_is_rejected_with_its_name() {
 }
 
 #[test]
+fn features_are_read_sorted_and_named() {
+    let args = parse(&["--features", "serde, b a"]).expect("valid");
+    assert_eq!(args.features.named, vec!["a", "b", "serde"]);
+    assert!(!args.features.is_default());
+    assert_eq!(args.features.describe(), "a+b+serde");
+
+    let args = parse(&["--all-features"]).expect("valid");
+    assert!(args.features.all);
+    assert_eq!(args.features.describe(), "all");
+
+    let args =
+        parse(&["--no-default-features", "--features", "x"]).expect("valid");
+    assert_eq!(args.features.describe(), "no-default+x");
+
+    let args = parse(&[]).expect("valid");
+    assert!(args.features.is_default());
+    assert_eq!(args.features.describe(), "default");
+}
+
+#[test]
 fn unknown_flag_is_rejected() {
     assert!(parse(&["--wat"]).is_err());
 }

@@ -247,6 +247,7 @@ pub fn write_baseline(
         "profile": args.profile,
         "std_mode": args.std_mode.name(),
         "mir_opt_level": args.mir_opt_level,
+        "features": args.features.describe(),
         "suppressed": args.suppress.names(),
         "closures": args.closures.name(),
         "generics": args.generics.name(),
@@ -380,6 +381,15 @@ fn settings_agree(doc: &Value, args: &Args) -> Result<()> {
         "it was written at {}, not {}",
         describe_level(level),
         describe_level(args.mir_opt_level)
+    );
+    let features = doc
+        .get("features")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    ensure!(
+        features == args.features.describe(),
+        "it was written with the {features} features, not {}",
+        args.features.describe()
     );
     let recorded = doc.get("suppressed").and_then(Value::as_array).map_or(
         CategorySet::EMPTY,
