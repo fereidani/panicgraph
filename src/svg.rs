@@ -59,10 +59,15 @@ const FOOT: f64 = 34.0;
 /// in a viewer, and it is the width the flame graph tools readers know draw
 /// at.
 const WIDTH: f64 = 1200.0;
+/// Space kept clear at either side of the frames, as flame graphs keep it,
+/// so the first and the last stand off the edge of the window.
+const PAD: f64 = 10.0;
+/// Width the frames span, which is the picture less the space at its sides.
+const SPAN: f64 = WIDTH - 2.0 * PAD;
 /// Rough width of one character at the label size, for fitting text.
-const CHAR: f64 = 5.9;
+const CHAR: f64 = 7.2;
 /// Narrowest frame that can carry a label.
-const MIN_LABEL: f64 = 28.0;
+const MIN_LABEL: f64 = 30.0;
 /// Narrowest frame that is drawn at all, at the width the picture is fitted
 /// for.
 ///
@@ -142,7 +147,7 @@ pub fn render(
     // the mark.
     let _ = writeln!(
         out,
-        "<text id=\"unzoom\" x=\"150\" y=\"22\" class=\"ctl\">Reset \
+        "<text id=\"unzoom\" x=\"160\" y=\"22\" class=\"ctl\">Reset \
          Zoom</text>"
     );
     let _ = writeln!(
@@ -170,12 +175,17 @@ pub fn render(
         height - 12.0
     );
 
-    out.push_str("<g id=\"frames\">\n");
+    // The frames sit on a sheet of their own, set in from the sides by the
+    // margin flame graphs keep, and placed as shares of its width.
+    let _ = writeln!(
+        out,
+        "<svg id=\"frames\" x=\"{PAD:.0}\" width=\"{SPAN:.0}\">"
+    );
     for frame in &frames {
         let row = &rows[frame.row];
         draw(frame, row, total, out);
     }
-    out.push_str("</g>\n");
+    out.push_str("</svg>\n");
 
     out.push_str("</svg>\n");
     Ok(())
@@ -223,7 +233,7 @@ fn layout(rows: &[FlameRow]) -> Vec<Frame> {
     }
 
     let root = value.first().copied().unwrap_or(1).max(1);
-    let scale = WIDTH / root as f64;
+    let scale = SPAN / root as f64;
     let mut frames = Vec::with_capacity(rows.len());
     let mut work = vec![(0usize, 0.0f64, 0usize)];
     while let Some((id, x, depth)) = work.pop() {
@@ -249,12 +259,12 @@ fn layout(rows: &[FlameRow]) -> Vec<Frame> {
     frames
 }
 
-/// A distance across the drawing, as the share of the width it takes.
+/// A distance across the frames, as the share of their width it takes.
 ///
 /// Frames are placed in these shares rather than at pixels, which is what
 /// lets them stretch to the window.
 fn percent(units: f64) -> f64 {
-    100.0 * units / WIDTH
+    100.0 * units / SPAN
 }
 
 /// Writes one frame.
@@ -402,8 +412,8 @@ const BRAND: &str = concat!(
     "\" target=\"_blank\">\n<title>Drawn by PanicGraph ",
     env!("CARGO_PKG_VERSION"),
     "</title>\n",
-    // The lockup is drawn in a 300 by 64 box, shown here 24 high.
-    "<g fill=\"none\" transform=\"translate(10 6) scale(0.375)\">\n",
+    // The lockup is drawn in a 300 by 64 box, shown here 26 high.
+    "<g fill=\"none\" transform=\"translate(10 5) scale(0.40625)\">\n",
     "<path d=\"M6 14H58M6 32H58M6 50H58\" stroke=\"#2E2B27\" \
      stroke-opacity=\"0.32\" stroke-width=\"2\"/>\n",
     "<path d=\"M13 14H26V32H44V50\" stroke=\"#2E2B27\" stroke-width=\"4.5\" \
@@ -419,10 +429,10 @@ const BRAND: &str = concat!(
 /// Styling, kept inside the document so the file stands alone.
 const STYLE: &str = r#"<style>
   text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .title { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 15px;
+  .title { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 17px;
     font-weight: 600; fill: #0b0b0b; cursor: pointer; }
   .note, .detail, .ctl { font-family: ui-sans-serif, system-ui, sans-serif;
-    font-size: 11px; fill: #78766f; }
+    font-size: 12px; fill: #78766f; }
   .detail { fill: #0b0b0b; }
   .ctl { fill: #0b0b0b; cursor: pointer; display: none; }
   .ctl.on { display: inline; }
@@ -431,7 +441,7 @@ const STYLE: &str = r#"<style>
     Arial, sans-serif; font-size: 34px; font-weight: 600;
     letter-spacing: -0.8px; }
   .brand:hover { opacity: 0.7; }
-  .l { font-size: 10px; fill: #0b0b0b; pointer-events: none; }
+  .l { font-size: 12px; fill: #0b0b0b; pointer-events: none; }
   .f rect { stroke-width: 1; }
   .f:hover rect { opacity: 0.72; cursor: pointer; }
   .parent rect { opacity: 0.28; }
@@ -450,23 +460,24 @@ const STYLE: &str = r#"<style>
 const SCRIPT: &str = r#"<script type="text/ecmascript"><![CDATA[
 var frames = [], base = [], detail = null, note = null;
 var unzoombtn = null, searchbtn = null, matchedtxt = null;
-var width = 0, pixel = 1, searching = "";
+var sheet = null, width = 0, pad = 0, pixel = 1, searching = "";
 
 function init() {
-  var svg = document.documentElement;
-  /* The frames are placed as shares of the width, so with the viewBox gone
-     they spread to the window while the text keeps its size. The viewBox
-     is read first: it names the width the file was laid out at, which is
-     the unit every position below is written in. */
-  width = svg.viewBox.baseVal.width;
-  svg.removeAttribute("viewBox");
+  sheet = document.getElementById("frames");
+  /* The frames are placed as shares of their sheet's width, so with the
+     viewBox gone they spread to the window while the text keeps its size.
+     The sheet is read first: its width names the width the file was laid
+     out at, which is the unit every position below is written in, and its
+     offset the margin kept at either side. */
+  width = +sheet.getAttribute("width");
+  pad = +sheet.getAttribute("x");
+  document.documentElement.removeAttribute("viewBox");
   detail = document.getElementById("detail");
   note = document.getElementById("note");
   unzoombtn = document.getElementById("unzoom");
   searchbtn = document.getElementById("search");
   matchedtxt = document.getElementById("matched");
-  frames = Array.prototype.slice.call(
-    document.getElementById("frames").children);
+  frames = Array.prototype.slice.call(sheet.children);
   frames.forEach(function (g) {
     var x = +g.getAttribute("data-x"), w = +g.getAttribute("data-w");
     base.push({
@@ -572,16 +583,20 @@ function percent(units) {
 /* Writes the label a frame has room for, in the pixels it has now. */
 function fit(g, w) {
   var px = w * pixel;
-  g.getElementsByTagName("text")[0].textContent = px <= 28 ? "" :
-    tail(g.getAttribute("data-name"), Math.floor((px - 8) / 5.9),
+  g.getElementsByTagName("text")[0].textContent = px <= 30 ? "" :
+    tail(g.getAttribute("data-name"), Math.floor((px - 8) / 7.2),
       +g.getAttribute("data-more"));
 }
 
-/* Fits every label to the room its frame has in the window as it stands.
-   Runs once the file is open and again whenever the window changes width,
-   which the labels written into the file could not know about. */
+/* Sizes the sheet to the window less the margin at either side, and fits
+   every label to the room its frame then has. Runs once the file is open
+   and again whenever the window changes width, which the labels written
+   into the file could not know about. */
 function refit() {
-  pixel = document.documentElement.getBoundingClientRect().width / width;
+  var px = document.documentElement.getBoundingClientRect().width - 2 * pad;
+  px = Math.max(px, 1);
+  sheet.setAttribute("width", px.toFixed(1));
+  pixel = px / width;
   frames.forEach(function (g, j) {
     if (!base[j].hidden) fit(g, base[j].cw);
   });

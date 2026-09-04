@@ -237,6 +237,10 @@ fn the_picture_is_as_wide_as_the_window() {
         "and names the width it was fitted for, which a viewer without \
          scripting scales as a whole"
     );
+    assert!(
+        out.contains("<svg id=\"frames\" x=\"10\" width=\"1180\">"),
+        "the frames keep the margin flame graphs keep at either side"
+    );
 
     // Every frame is placed as a share of the width, never at a pixel, so
     // it stretches with the window, and every frame has a label element to
