@@ -306,7 +306,8 @@ the loopback interface only; opening it more widely has to be asked for with
 For something to attach to a report, write a standalone flame graph instead:
 
 ```
-panicgraph --format svg > panics.svg
+panicgraph --svg > panics.svg
+panicgraph --svg --dark > panics.svg
 ```
 
 The file carries its own styling and behaviour, so it opens from disk with
@@ -319,6 +320,18 @@ made, scaled as a whole to fit. The mark in the corner links to the project
 and names the version that drew the file, for a reader handed the picture
 alone.
 
+`--svg` is short for `--format svg`. `--dark` draws the file in the dark
+colours of the interactive view, which `--theme light` and `--theme dark`
+name in full. `--only` narrows the drawing to the categories named, as it
+does the report, and the picture says so under its title.
+
+Frames are coloured as in the interactive view: three hue families say what
+kind of panic a frame is, each category takes a step of its own on its
+family's hue, and a call is tinted by the family most of the panics under
+it belong to. Both read `assets/palette.json`, so a category is the same
+colour in the file and in the view, and changing a colour there changes it
+in both.
+
 Clicking a frame zooms into it: the path it sits on stays in view as full
 width bars and everything the frame does not contain goes, so what is left
 is a picture of one path. `ctrl-F` searches the frames with a regular
@@ -329,7 +342,8 @@ on as it stands. The policy the graph was drawn under is written under the
 title, because a flame graph of what can panic says nothing definite without
 the assumptions behind it.
 
-Machine readable output is available everywhere with `--format json`.
+Machine readable output is available everywhere with `--json`, short for
+`--format json`.
 
 ## Checking findings against the compiled artifact
 
