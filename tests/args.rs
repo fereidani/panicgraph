@@ -69,6 +69,41 @@ fn unknown_flag_is_rejected() {
     assert!(parse(&["--wat"]).is_err());
 }
 
+/// What clap stops parsing with, when it stops to print something.
+fn stops_with(argv: &[&str]) -> Option<(clap::error::ErrorKind, String)> {
+    let err = parse(argv).err()?;
+    let clap = err.downcast_ref::<clap::Error>()?;
+    Some((clap.kind(), clap.to_string()))
+}
+
+#[test]
+fn the_version_is_printed_for_either_letter_and_the_long_flag() {
+    for flag in ["-v", "-V", "--version"] {
+        let (kind, text) = stops_with(&[flag]).expect("the flag is known");
+        assert_eq!(kind, clap::error::ErrorKind::DisplayVersion, "{flag}");
+        assert!(
+            text.contains(env!("CARGO_PKG_VERSION")),
+            "{flag} should print the version, printed: {text}"
+        );
+    }
+}
+
+#[test]
+fn the_help_names_the_version() {
+    let (kind, text) = stops_with(&["--help"]).expect("help is known");
+    assert_eq!(kind, clap::error::ErrorKind::DisplayHelp);
+    let first = text.lines().next().unwrap_or_default();
+    assert_eq!(
+        first,
+        format!("panicgraph {}", env!("CARGO_PKG_VERSION")),
+        "the first line of the help names the release"
+    );
+    assert!(
+        text.contains("-v, --version"),
+        "the version flag is listed: {text}"
+    );
+}
+
 #[test]
 fn flags_needing_values_are_checked() {
     assert!(parse(&["--profile"]).is_err());

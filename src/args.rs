@@ -28,14 +28,36 @@ EXIT CODES
   2  the tool could not complete
 ";
 
+/// The layout of the help text, with the version named on the first line
+/// so that the help says which release it describes.
+const HELP_TEMPLATE: &str = "\
+{before-help}{name} {version}
+{about-with-newline}
+{usage-heading} {usage}
+
+{all-args}{after-help}";
+
 /// Reports which functions can panic, why, and through what call path.
 #[derive(Debug, Parser)]
 #[command(name = "panicgraph", version, about, long_about = None)]
-#[command(after_help = SELECTOR_HELP)]
+#[command(after_help = SELECTOR_HELP, help_template = HELP_TEMPLATE)]
+#[command(disable_version_flag = true)]
 pub struct Cli {
     /// What to do. Reports the findings when omitted.
     #[command(subcommand)]
     pub command: Option<Command>,
+
+    /// Print the version.
+    // Declared by hand rather than left to the default so that the short
+    // form is the lower case letter as well as the upper case one.
+    #[arg(
+        short = 'v',
+        short_alias = 'V',
+        long,
+        action = clap::ArgAction::Version,
+        global = true
+    )]
+    pub version: (),
 
     #[command(flatten)]
     pub scope: Scope,
