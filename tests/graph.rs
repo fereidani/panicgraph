@@ -2,9 +2,57 @@
 
 mod support;
 
-use panicgraph::{Category, FuncKey, Graph};
+use panicgraph::{Body, Category, FuncKey, Graph, select::Selection};
 
 use crate::support::{BodyBuilder, artifact};
+
+/// A generic function's body from the crate's own build and its copy from
+/// a test build, under one key.
+fn own_and_test_copy() -> (Body, Body) {
+    let own = BodyBuilder::new("generic:first_of")
+        .panics(Category::Index)
+        .build();
+    let mut copy = own.clone();
+    copy.from_tests = true;
+    (own, copy)
+}
+
+/// Whether the selection names the function the key belongs to.
+fn shown(graph: &Graph, key: &str) -> bool {
+    let id = graph
+        .id_of(&FuncKey(key.to_owned()))
+        .expect("the key should be in the graph");
+    Selection::default()
+        .functions(graph)
+        .any(|(shown, _)| shown == id)
+}
+
+#[test]
+fn the_crate_own_body_beats_a_test_copy_whichever_comes_first() {
+    for test_copy_first in [true, false] {
+        let (own, copy) = own_and_test_copy();
+        let artifacts = if test_copy_first {
+            vec![artifact(vec![copy]), artifact(vec![own])]
+        } else {
+            vec![artifact(vec![own]), artifact(vec![copy])]
+        };
+        let graph = Graph::from_artifacts(artifacts);
+        assert_eq!(graph.len(), 1, "one key is one body");
+        let id = graph
+            .id_of(&FuncKey("generic:first_of".to_owned()))
+            .expect("the key should be in the graph");
+        assert!(
+            !graph.body(id).from_tests,
+            "the crate's own build must stand for the function, with the \
+             test copy merged {}",
+            if test_copy_first { "first" } else { "second" }
+        );
+        assert!(
+            shown(&graph, "generic:first_of"),
+            "a function the crate's own build carries is reported"
+        );
+    }
+}
 
 #[test]
 fn a_pointer_candidate_unwinds_into_the_cleanup_its_call_does() {

@@ -380,6 +380,37 @@ fn a_build_whose_panics_abort_catches_nothing() {
 }
 
 #[test]
+fn reading_the_tests_keeps_the_generic_functions() {
+    // The test build compiles the generic functions again, and its copies
+    // must not replace the crate's own, which the report names.
+    let reported = analyse_fixture("release", &["--with-tests"]);
+    for (function, category) in [
+        ("must_assert_generic", "explicit"),
+        ("must_generic_size_divide", "divide-by-zero"),
+        ("must_generic", "generic-bound"),
+        ("must_pick_any", "generic-bound"),
+    ] {
+        let categories = found(&reported, function).unwrap_or_else(|| {
+            panic!(
+                "{function} can panic with {category} and was not reported \
+                 once the tests were read"
+            )
+        });
+        assert!(
+            categories.iter().any(|c| c == category),
+            "{function} can panic with {category}, but reading the tests \
+             reported {categories:?}"
+        );
+    }
+    assert!(
+        reported
+            .iter()
+            .all(|(function, _)| !function.contains("tests::")),
+        "the tests themselves are not reported, got {reported:?}"
+    );
+}
+
+#[test]
 fn a_panic_every_call_reaches_is_reported_as_always() {
     let doc = support::analyse_fixture_json("release", &[]);
     let findings = doc["findings"].as_array().cloned().unwrap_or_default();

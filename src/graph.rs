@@ -147,11 +147,15 @@ impl Graph {
             let existing = &mut self.bodies[id.index()];
             // A real body always beats a placeholder, whichever crate each
             // was seen in, and between two of a kind a local definition
-            // beats a copy observed from a downstream crate.
+            // beats a copy observed from a downstream crate. The crate's own
+            // build also beats a test build, whose copies the selection hides.
             let upgrade = match (existing.opaque, body.opaque) {
                 (true, false) => true,
                 (false, true) => false,
-                _ => !existing.local && body.local,
+                _ => {
+                    (body.local, !body.from_tests)
+                        > (existing.local, !existing.from_tests)
+                }
             };
             if upgrade {
                 *existing = body;

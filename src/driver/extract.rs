@@ -308,13 +308,14 @@ impl<'tcx> Extractor<'tcx> {
     /// and are reported as its own. A closure is judged by the function it
     /// is written in, so one inside a test stays out. An integration test
     /// may be named after the package it tests, so there the library is
-    /// only ever the crate linked in, never the test crate itself.
+    /// only ever the crate linked in, never the test crate itself. A generic
+    /// body as written is the library build's to report.
     fn reported(&self, inst: Instance<'tcx>) -> bool {
         let did = inst.def_id();
         if !self.tcx.sess.opts.test {
             return did.is_local();
         }
-        if self.integration && did.is_local() {
+        if (self.integration && did.is_local()) || inst.args.has_param() {
             return false;
         }
         let root = self.tcx.typeck_root_def_id(did);

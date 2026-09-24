@@ -1706,3 +1706,14 @@ pub fn clean_index_under_referenced_length(
 pub fn must_index_after_le(a: usize, b: usize, t: &[u8; 4]) -> u8 {
     if a > b { 0 } else { t[a] }
 }
+
+/// Instantiates the generic functions above, for `--with-tests`.
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn instantiates_the_generic_functions() {
+        super::must_assert_generic(&[1u8]);
+        assert_eq!(super::must_generic_size_divide::<u32>(8), 2);
+        assert_eq!(super::must_generic(3u8), "3");
+    }
+}
