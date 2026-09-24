@@ -7,6 +7,8 @@
 
 use std::cmp::Ordering::Less;
 
+use rustc_abi::FieldIdx;
+use rustc_index::IndexSlice;
 use rustc_middle::{
     mir::{self, BinOp},
     ty::{self, Instance, Ty, TyCtxt, TypeVisitableExt, TypingEnv},
@@ -69,64 +71,109 @@ impl<'tcx> Folder<'_, 'tcx> {
                     .length_of(state, operand)
                     .map_or_else(Fact::default, Self::measuring);
             }
-            // A place has an address, so a pointer taken of one is never
-            // null however the place was reached. Taking one of everything
-            // another points at leaves a slice as long as that one was.
+            // A reference is never null. Taking one of everything another
+            // points at leaves a slice as long as that one was.
             mir::Rvalue::Ref(_, _, place)
-            | mir::Rvalue::RawPtr(_, place)
             | mir::Rvalue::Reborrow(_, _, place) => {
                 return Fact {
                     address: true,
                     ..self.reborrowed(state, place)
                 };
             }
+            mir::Rvalue::RawPtr(_, place) => {
+                return Fact {
+                    address: self.addressed(state, place),
+                    ..self.reborrowed(state, place)
+                };
+            }
             // Reading the discriminant of an enum the walk has settled is
             // what folds the match below it.
             mir::Rvalue::Discriminant(place) => self.tag_read(state, place),
-            mir::Rvalue::Aggregate(kind, fields) => match &**kind {
-                mir::AggregateKind::Adt(did, variant, args, ..) => {
-                    return Fact {
-                        tag: self.tag_of(*did, args, *variant),
-                        ..Fact::default()
-                    };
-                }
-                // A fat pointer is built from a thin one and what it points
-                // at, and for a slice that is how many elements it holds.
-                mir::AggregateKind::RawPtr(..) => {
-                    let Some(meta) = fields.iter().nth(1) else {
-                        return Fact::default();
-                    };
-                    let held = self.fact(state, meta).value;
-                    // A slice as long as the length of another is as long
-                    // as that other, which is what settles the check a copy
-                    // between the two writes.
-                    let paired = match held {
-                        Some(Value::Length(of)) => Some(of),
-                        _ => None,
-                    };
-                    // A slice cut to a length is exactly that long, so
-                    // one cut to the same length again is as long as it.
-                    let spans = match meta {
-                        mir::Operand::Copy(from) | mir::Operand::Move(from) => {
-                            from.as_local().filter(|of| !self.escapes(*of))
-                        }
-                        _ => None,
-                    };
-                    return Fact {
-                        extent: held.and_then(Value::bounds),
-                        paired,
-                        spans,
-                        ..Fact::default()
-                    };
-                }
-                _ => return Fact::default(),
-            },
+            mir::Rvalue::Aggregate(kind, fields) => {
+                return self.aggregate(state, kind, fields);
+            }
             _ => None,
         };
         Fact {
             value,
             ..Fact::default()
         }
+    }
+
+    /// What is known about a value built from its parts.
+    fn aggregate(
+        &self,
+        state: &State<'tcx>,
+        kind: &mir::AggregateKind<'tcx>,
+        fields: &IndexSlice<FieldIdx, mir::Operand<'tcx>>,
+    ) -> Fact<'tcx> {
+        match kind {
+            mir::AggregateKind::Adt(did, variant, args, ..) => Fact {
+                tag: self.tag_of(*did, args, *variant),
+                ..Fact::default()
+            },
+            // A fat pointer is built from a thin one and what it points at,
+            // and for a slice that is how many elements it holds.
+            mir::AggregateKind::RawPtr(..) => {
+                let Some(meta) = fields.iter().nth(1) else {
+                    return Fact::default();
+                };
+                let held = self.fact(state, meta).value;
+                // A slice as long as the length of another is as long as
+                // that other, which is what settles the check a copy between
+                // the two writes.
+                let paired = match held {
+                    Some(Value::Length(of)) => Some(of),
+                    _ => None,
+                };
+                // A slice cut to a length is exactly that long, so one cut
+                // to the same length again is as long as it.
+                let spans = match meta {
+                    mir::Operand::Copy(from) | mir::Operand::Move(from) => {
+                        from.as_local().filter(|of| !self.escapes(*of))
+                    }
+                    _ => None,
+                };
+                Fact {
+                    extent: held.and_then(Value::bounds),
+                    paired,
+                    spans,
+                    ..Fact::default()
+                }
+            }
+            _ => Fact::default(),
+        }
+    }
+
+    /// Whether a raw pointer taken of a place is an address.
+    ///
+    /// Each dereference on the way must go through a reference, a box, or a
+    /// raw pointer the walk knows to be an address, since
+    /// `&raw mut (*p).first` of a null `p` is null.
+    fn addressed(&self, state: &State<'tcx>, place: &mir::Place<'tcx>) -> bool {
+        place.iter_projections().all(|(through, element)| {
+            if element != mir::ProjectionElem::Deref {
+                return true;
+            }
+            let Some(ty) = self
+                .monomorphize(through.ty(&self.mir.local_decls, self.tcx).ty)
+            else {
+                return false;
+            };
+            match ty.kind() {
+                ty::Ref(..) => true,
+                ty::Adt(def, _) => def.is_box(),
+                ty::RawPtr(..) => {
+                    through.projection.is_empty()
+                        && self
+                            .slot_of(&mir::Place::from(through.local))
+                            .is_some_and(|slot| {
+                                Self::known_at(state, slot).address
+                            })
+                }
+                _ => false,
+            }
+        })
     }
 
     /// How long a slice a reborrow of a whole pointee is.
@@ -362,9 +409,9 @@ impl<'tcx> Folder<'_, 'tcx> {
     /// It is only recorded where the sum stayed inside its type, so the
     /// claim is the arithmetic one rather than what the machine wraps to.
     /// The range of the value shows that where it has one; where it has
-    /// none, being ordered under a slice does instead, since a slice of
-    /// sized elements holds at most half the addresses there are and a
-    /// value under its length has that much room above it.
+    /// none, being ordered under a referenced slice does instead, since a
+    /// slice of sized elements holds at most half the addresses there are
+    /// and a value under its length has that much room above it.
     fn raised(
         &self,
         state: &State<'tcx>,
@@ -411,6 +458,9 @@ impl<'tcx> Folder<'_, 'tcx> {
 
     /// Whether the slice behind a local has elements that take up space,
     /// which is what bounds how long it can be.
+    ///
+    /// Only a reference bounds it: safe code can build a raw slice pointer
+    /// of any length.
     fn sized_elements(&self, of: mir::Local) -> bool {
         let Some(decl) = self.mir.local_decls.get(of) else {
             return false;
@@ -418,7 +468,7 @@ impl<'tcx> Folder<'_, 'tcx> {
         let Some(ty) = self.monomorphize(decl.ty) else {
             return false;
         };
-        let (ty::Ref(_, inner, _) | ty::RawPtr(inner, _)) = ty.kind() else {
+        let ty::Ref(_, inner, _) = ty.kind() else {
             return false;
         };
         match inner.kind() {

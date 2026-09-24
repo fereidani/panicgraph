@@ -637,6 +637,31 @@ pub fn must_nonnull_of_argument(p: *mut u8) -> std::ptr::NonNull<u8> {
     std::ptr::NonNull::new(p).unwrap()
 }
 
+/// Starts with its only field, so a pointer to the field is a pointer to
+/// the whole.
+#[repr(C)]
+pub struct Head {
+    pub first: usize,
+}
+
+/// Reaches `unwrap`: the first field of a null `p` is at null.
+///
+/// # Safety
+///
+/// None needed: the pointer is never read through.
+pub unsafe fn must_nonnull_of_raw_field(
+    p: *mut Head,
+) -> std::ptr::NonNull<usize> {
+    std::ptr::NonNull::new(unsafe { &raw mut (*p).first }).unwrap()
+}
+
+/// Clean. A field reached through a reference is never at null.
+pub fn clean_nonnull_of_referenced_field(
+    h: &mut Head,
+) -> std::ptr::NonNull<usize> {
+    std::ptr::NonNull::new(&raw mut h.first).unwrap()
+}
+
 /// Clean. The guard is written against a literal, which reads the same in
 /// every instantiation, so a generic body does not hide it.
 pub fn clean_generic_guard<T>(_marker: &T, a: u64, b: u64) -> u64 {
@@ -1586,6 +1611,56 @@ pub fn clean_deque_index_guard(
 /// Clean. A string's bytes are as many as its length says.
 pub fn clean_string_index_guard(s: &String, at: usize) -> u8 {
     if at >= s.len() { 0 } else { s.as_bytes()[at] }
+}
+
+/// Reaches `index`. A raw slice pointer may claim any length, so `at + 1`
+/// can wrap to zero and pass the guard with `at` past the end of `v`.
+///
+/// # Safety
+///
+/// None needed: the pointer is only measured, never read through.
+pub unsafe fn must_index_under_raw_length(
+    p: *const [u8],
+    v: &[u8],
+    at: usize,
+) -> u8 {
+    if at <= p.len() {
+        let next = at + 1;
+        if next <= v.len() {
+            return v[at];
+        }
+    }
+    0
+}
+
+/// Reaches `index`: the direct write after the guard changes what `p`
+/// reads.
+pub fn must_index_after_write_under_pointer(v: &[u8; 4], start: usize) -> u8 {
+    let mut at = start;
+    let p = std::hint::black_box(&raw mut at);
+    // SAFETY: `p` points at `at`, which is alive and initialised throughout.
+    if unsafe { *p } < 4 {
+        at = start.wrapping_add(100);
+        // SAFETY: as above.
+        return v[unsafe { *p }];
+    }
+    0
+}
+
+/// Clean. A referenced slice spans at most half the address space, so
+/// `at + 1` cannot wrap.
+pub fn clean_index_under_referenced_length(
+    w: &[u8],
+    v: &[u8],
+    at: usize,
+) -> u8 {
+    if at <= w.len() {
+        let next = at + 1;
+        if next <= v.len() {
+            return v[at];
+        }
+    }
+    0
 }
 
 /// Reaches `index`. A guard read backwards proves nothing: failing `a > b`

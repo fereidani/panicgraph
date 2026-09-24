@@ -28,6 +28,8 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_divide_narrowed", "divide-by-zero"),
     ("must_push", "capacity-overflow"),
     ("must_push", "alloc-failure"),
+    ("must_index_under_raw_length", "index"),
+    ("must_index_after_write_under_pointer", "index"),
     ("must_rethrow", "explicit"),
     ("must_lock", "poison"),
     ("must_write", "fmt"),
@@ -62,6 +64,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_unwrap_wrong_arm", "unwrap"),
     ("must_match_panic", "explicit"),
     ("must_nonnull_of_argument", "unwrap"),
+    ("must_nonnull_of_raw_field", "unwrap"),
     ("must_generic_size_divide", "divide-by-zero"),
     ("must_take_indexed", "index"),
     ("must_pass_unguarded", "index"),
@@ -217,6 +220,8 @@ const MUST_BE_CLEAN_IN_RELEASE: &[&str] = &[
     "clean_range_between_guards",
     "clean_index_under_chained_bound",
     "clean_index_of_paired_slice",
+    "clean_index_under_referenced_length",
+    "clean_nonnull_of_referenced_field",
 ];
 
 /// The functions that cannot panic and that the analysis cannot yet say so

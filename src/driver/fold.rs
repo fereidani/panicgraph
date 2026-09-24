@@ -630,6 +630,19 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
         sweep_indexed(state, &self.places, place.local);
         if place.is_indirect() {
             self.sweep_aliased(state);
+        } else if self.escapes(place.local) {
+            // A pointer may alias this local, so a fact read through any
+            // pointer may describe the value this write replaced.
+            self.sweep_pointees(state);
+        }
+    }
+
+    /// Forgets every place read through a pointer.
+    fn sweep_pointees(&self, state: &mut State<'tcx>) {
+        for (slot, path) in self.places.each() {
+            if path.behind_pointer() {
+                forget(state, slot);
+            }
         }
     }
 
