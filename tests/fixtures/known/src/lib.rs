@@ -368,6 +368,14 @@ pub fn must_always_stub() -> u32 {
     unimplemented!()
 }
 
+/// Reaches `explicit`, but not on every call: quitting exits first.
+pub fn must_panic_unless_quitting(quit: bool) -> u32 {
+    if quit {
+        std::process::exit(0)
+    }
+    panic!("not quitting")
+}
+
 /// The panicking target a reified pointer can name.
 fn loud_pointer_target() -> u8 {
     panic!("via pointer")

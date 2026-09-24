@@ -133,6 +133,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_after_call_that_cannot_return", "explicit"),
     ("at_most_ten", "explicit"),
     ("must_always_stub", "explicit"),
+    ("must_panic_unless_quitting", "explicit"),
 ];
 
 /// The panics each function must *not* be reported with.
@@ -438,6 +439,10 @@ fn a_panic_every_call_reaches_is_reported_as_always() {
     assert!(
         always_of("must_after_call_that_cannot_return").is_empty(),
         "a panic reached through a call is the callee's to call always"
+    );
+    assert!(
+        always_of("must_panic_unless_quitting").is_empty(),
+        "an argument that ends the process first avoids the panic"
     );
 }
 

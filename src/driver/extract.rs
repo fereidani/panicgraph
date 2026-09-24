@@ -454,6 +454,12 @@ impl<'tcx> Extractor<'tcx> {
         mir: &mir::Body<'tcx>,
         reach: &fold::Reach,
     ) {
+        let mut raises = vec![false; mir.basic_blocks.len()];
+        for bb in &raw.site_blocks {
+            if let Some(slot) = raises.get_mut(bb.as_usize()) {
+                *slot = true;
+            }
+        }
         for (index, site) in raw.sites.iter_mut().enumerate() {
             let fires = raw.site_fires.get(index).copied().unwrap_or(false);
             let Some(&bb) = raw.site_blocks.get(index) else {
@@ -463,7 +469,7 @@ impl<'tcx> Extractor<'tcx> {
             // site in one is never the whole story of a call.
             site.certain = fires
                 && !mir.basic_blocks[bb].is_cleanup
-                && unavoidable(mir, reach, bb);
+                && unavoidable(mir, reach, bb, &raises);
         }
     }
 

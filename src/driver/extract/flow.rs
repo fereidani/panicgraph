@@ -43,12 +43,14 @@ pub(super) fn resuming(mir: &mir::Body<'_>) -> Vec<bool> {
 /// Every path from the entry through live blocks is followed while it
 /// avoids the block. Reaching a way out of the body shows the block can
 /// be got round, and so does closing a loop, since a loop the walk cannot
-/// prove finite might spin instead. The walk enters each block once, so
-/// it is bounded by the edges of the body.
+/// prove finite might spin instead. A call that never returns is a way out
+/// too, unless `raises` marks it as one of the body's own panics. The walk
+/// enters each block once, so it is bounded by the edges of the body.
 pub(super) fn unavoidable(
     mir: &mir::Body<'_>,
     reach: &fold::Reach,
     avoid: BasicBlock,
+    raises: &[bool],
 ) -> bool {
     const NEW: u8 = 0;
     const OPEN: u8 = 1;
@@ -75,6 +77,11 @@ pub(super) fn unavoidable(
                 | TerminatorKind::TailCall { .. }
                 | TerminatorKind::Yield { .. }
         ) {
+            return false;
+        }
+        if matches!(term.kind, TerminatorKind::Call { target: None, .. })
+            && !raises.get(bb.as_usize()).copied().unwrap_or(false)
+        {
             return false;
         }
         let Some(succ) = term.successors().nth(next) else {
