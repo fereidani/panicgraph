@@ -147,6 +147,8 @@ pub fn graph(bodies: Vec<Body>) -> Graph {
         reified: Vec::new(),
         coerced: Vec::new(),
         krate: "test".to_owned(),
+        source: None,
+        test: false,
         config: BuildConfig {
             rustc: "test".to_owned(),
             profile: "release".to_owned(),

@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::{Artifact, StdMode, args::Args};
+use crate::{Artifact, StdMode, args::Args, util::Set};
 
 /// The toolchain this tool was built with.
 ///
@@ -73,29 +73,31 @@ pub fn collect(args: &Args) -> Result<Vec<Artifact>> {
     let workspace = Workspace::locate(args)?;
     let layout = prepare(&workspace.root, &driver, args)?;
 
-    build(args, &driver, &workspace, &layout, false)?;
-    let mut artifacts = load(&layout.out)?;
+    let mut units = build(args, &driver, &workspace, &layout, false)?;
+    let mut artifacts = load(&layout.out, &units)?;
 
     if artifacts.is_empty() {
         // Cargo recompiles nothing when the build is already current, so the
         // wrapper never runs and records nothing. Discarding the analysis
         // build is the only way to observe a crate that is already cached.
         clear(&layout.target)?;
-        build(args, &driver, &workspace, &layout, false)?;
-        artifacts = load(&layout.out)?;
+        units = build(args, &driver, &workspace, &layout, false)?;
+        artifacts = load(&layout.out, &units)?;
     }
 
     if args.with_tests {
         // The tests need the dev-dependencies and may not build at all,
         // and what they add is more instantiations rather than the crate
         // itself, so a failure is said and the analysis goes on without.
-        if let Err(err) = build(args, &driver, &workspace, &layout, true) {
-            eprintln!(
+        match build(args, &driver, &workspace, &layout, true) {
+            Err(err) => eprintln!(
                 "warning: the test targets could not be built, so their \
                  instantiations are left out: {err:#}"
-            );
-        } else {
-            artifacts = load(&layout.out)?;
+            ),
+            Ok(tested) => {
+                units.extend(tested);
+                artifacts = load(&layout.out, &units)?;
+            }
         }
     }
 
@@ -226,16 +228,22 @@ fn rustc_version() -> Result<Option<String>> {
     Ok((!line.is_empty()).then_some(line))
 }
 
-/// Runs one analysis build, of the crate itself or of its test targets.
+/// A compilation: its crate root, and whether it builds a test harness.
+type Unit = (PathBuf, bool);
+
+/// Runs one analysis build, of the crate itself or of its test targets,
+/// and returns its compilations, fresh ones included.
 fn build(
     args: &Args,
     driver: &Path,
     workspace: &Workspace,
     layout: &Layout,
     tests: bool,
-) -> Result<()> {
+) -> Result<Set<Unit>> {
     let mut cmd = cargo(&workspace.root);
     cmd.arg("build")
+        .arg("--message-format")
+        .arg("json-render-diagnostics")
         .arg("--profile")
         .arg(cargo_profile(&args.profile))
         .arg("--target-dir")
@@ -285,17 +293,51 @@ fn build(
         cmd.env("LD_LIBRARY_PATH", path);
     }
 
+    // The JSON messages would otherwise land in the report on standard
+    // output; progress and diagnostics stay on standard error.
     let mut child = cmd
+        .stdout(std::process::Stdio::piped())
         .spawn()
         .context("could not run cargo; is it on the PATH?")?;
     // Closing the writing end at once is what makes the pipe read as
     // empty: nothing is ever written, and a reader sees the end.
     drop(child.stdin.take());
+    let mut messages = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        std::io::Read::read_to_string(&mut out, &mut messages)
+            .context("could not read what cargo reported")?;
+    }
     let status = child.wait().context("could not wait for cargo")?;
     if !status.success() {
         bail!("the analysis build failed; the errors above are from cargo");
     }
-    Ok(())
+    Ok(units_in(&messages))
+}
+
+/// The compilations a build's messages name.
+fn units_in(messages: &str) -> Set<Unit> {
+    let mut units = Set::default();
+    for line in messages.lines() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line)
+        else {
+            continue;
+        };
+        if message["reason"] != "compiler-artifact" {
+            continue;
+        }
+        let Some(source) = message["target"]["src_path"].as_str() else {
+            continue;
+        };
+        let test = message["profile"]["test"].as_bool().unwrap_or(false);
+        units.insert((comparable(Path::new(source)), test));
+    }
+    units
+}
+
+/// The canonical form of a path, or the path itself when it cannot be
+/// resolved.
+fn comparable(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Name of the marker written into every directory this version owns.
@@ -308,8 +350,8 @@ const SLOT_MARKER: &str = ".panicgraph-slot";
 /// Creates the directories the analysis build writes into.
 ///
 /// Artifacts are deliberately kept between runs. Each is named after the
-/// crate that produced it, so cargo rewrites exactly the ones it recompiles
-/// and the rest stay valid.
+/// cargo target that produced it, so cargo rewrites exactly the ones it
+/// recompiles and the rest stay valid.
 fn prepare(root: &Path, driver: &Path, args: &Args) -> Result<Layout> {
     // Artifacts are kept between runs, so the directory has to separate
     // every input that changes what they describe. The standard library mode
@@ -557,13 +599,16 @@ fn shared_build_dir(args: &Args) -> Result<Option<PathBuf>> {
     ))))
 }
 
-/// Reads every artifact in a directory.
+/// Reads the artifacts in a directory that describe this build.
+///
+/// A removed or renamed target leaves its artifact behind, so an artifact
+/// naming a source is read only when it names one of `units`.
 ///
 /// The names are read in sorted order rather than the order the filesystem
 /// hands them out. The merge order decides which instantiation of a generic
 /// function names the location a report prints, so leaving it to the
 /// filesystem would let two machines describe the same build differently.
-fn load(dir: &Path) -> Result<Vec<Artifact>> {
+fn load(dir: &Path, units: &Set<Unit>) -> Result<Vec<Artifact>> {
     let mut paths: Vec<PathBuf> = Vec::new();
     for entry in fs::read_dir(dir)
         .with_context(|| format!("could not read {}", dir.display()))?
@@ -581,7 +626,12 @@ fn load(dir: &Path) -> Result<Vec<Artifact>> {
             .with_context(|| format!("could not read {}", path.display()))?;
         let artifact: Artifact = serde_json::from_slice(&text)
             .with_context(|| format!("could not parse {}", path.display()))?;
-        out.push(artifact);
+        let current = artifact.source.as_deref().is_none_or(|source| {
+            units.contains(&(comparable(Path::new(source)), artifact.test))
+        });
+        if current {
+            out.push(artifact);
+        }
     }
     Ok(out)
 }

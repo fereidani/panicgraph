@@ -362,6 +362,13 @@ pub struct BuildConfig {
 pub struct Artifact {
     /// The crate this artifact was produced from.
     pub krate: String,
+    /// The crate root, as an absolute path. With [`Artifact::test`] it names
+    /// the cargo target the artifact describes.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Whether the crate was compiled as a test harness.
+    #[serde(default)]
+    pub test: bool,
     /// The build configuration in force.
     pub config: BuildConfig,
     /// The function bodies observed while compiling this crate.

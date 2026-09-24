@@ -23,7 +23,11 @@ mod state;
 mod summary;
 mod value;
 
-use std::{path::PathBuf, process::Command};
+use std::{
+    hash::{DefaultHasher, Hash, Hasher},
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use panicgraph::{Artifact, BuildConfig, StdMode};
 use rustc_driver::{Callbacks, Compilation};
@@ -80,17 +84,25 @@ fn emit(tcx: TyCtxt<'_>) -> std::io::Result<()> {
     std::fs::create_dir_all(&dir)?;
 
     let krate = tcx.crate_name(LOCAL_CRATE).to_string();
+    let source = tcx
+        .sess
+        .io
+        .input
+        .opt_path()
+        .and_then(|input| std::path::absolute(input).ok());
+    let test = tcx.sess.opts.test;
+    let path = dir.join(artifact_name(tcx, source.as_deref(), test));
     let extraction = Extractor::new(tcx).run();
     let artifact = Artifact {
-        krate: krate.clone(),
+        krate,
+        source: source.map(|at| at.to_string_lossy().into_owned()),
+        test,
         config: build_config(tcx),
         bodies: extraction.bodies,
         reified: extraction.reified,
         coerced: extraction.coerced,
     };
 
-    let stamp = tcx.stable_crate_id(LOCAL_CRATE).as_u64();
-    let path = dir.join(format!("{krate}-{stamp:016x}.json"));
     let json = serde_json::to_vec(&artifact).map_err(std::io::Error::other)?;
     if let Err(err) = std::fs::write(&path, json) {
         // A write that failed must not leave the previous build's answer
@@ -112,6 +124,26 @@ fn emit(tcx: TyCtxt<'_>) -> std::io::Result<()> {
         return Err(err);
     }
     Ok(())
+}
+
+/// The file name for this compilation's artifact, one per cargo target.
+///
+/// The stable crate id changes with the version and the dependencies, so a
+/// name built from it would leave the previous build's artifact behind.
+fn artifact_name(tcx: TyCtxt<'_>, source: Option<&Path>, test: bool) -> String {
+    let Some(source) = source else {
+        // Only a crate read from standard input has no path, and cargo
+        // never builds one.
+        let stamp = tcx.stable_crate_id(LOCAL_CRATE).as_u64();
+        return format!("{}-{stamp:016x}.json", tcx.crate_name(LOCAL_CRATE));
+    };
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    test.hash(&mut hasher);
+    for kind in tcx.crate_types() {
+        format!("{kind:?}").hash(&mut hasher);
+    }
+    format!("target-{:016x}.json", hasher.finish())
 }
 
 /// Records the settings that change which panics exist.
