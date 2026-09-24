@@ -606,3 +606,35 @@ fn verdicts_are_written_on_the_panics_when_the_artifact_was_checked() {
     );
     parse(&checked);
 }
+
+#[test]
+fn the_calls_followed_are_written_under_the_title() {
+    let plain = render(vec![body("f", Category::Index)]);
+    assert!(
+        !plain.contains("left out") && !plain.contains("candidate targets"),
+        "the default edges say nothing"
+    );
+    let narrowed = render_view(
+        vec![body("f", Category::Index)],
+        View {
+            edges: Edges {
+                follow_inexact: false,
+                candidates: false,
+            },
+            ..view()
+        },
+    );
+    assert!(narrowed.contains("calls through objects and pointers left out"));
+    let widened = render_view(
+        vec![body("f", Category::Index)],
+        View {
+            edges: Edges {
+                follow_inexact: true,
+                candidates: true,
+            },
+            ..view()
+        },
+    );
+    assert!(widened.contains("candidate targets of those calls followed"));
+    parse(&widened);
+}

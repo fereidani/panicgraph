@@ -242,6 +242,12 @@ fn policy(view: &View) -> String {
     if selection.generics == Generics::Instantiated {
         text.push_str("; generic functions as instantiated");
     }
+    if !view.edges.follow_inexact {
+        text.push_str("; calls through objects and pointers left out");
+    }
+    if view.edges.candidates {
+        text.push_str("; candidate targets of those calls followed");
+    }
     text
 }
 
