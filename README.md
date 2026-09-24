@@ -243,8 +243,10 @@ panicgraph check --baseline panicgraph.json
 
 A function absent from the record fails. So does one already recorded that
 has gained a panic it did not have before, which a record of names alone
-would miss. Functions that stop panicking are reported so the file can be
-refreshed rather than drifting.
+would miss. Functions are recorded under their crate, so two crates of a
+workspace can each have a `main` without one standing in for the other.
+Functions that stop panicking are reported so the file can be refreshed
+rather than drifting.
 
 ### In a workflow
 

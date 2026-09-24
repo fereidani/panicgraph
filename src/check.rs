@@ -20,6 +20,10 @@ use crate::{
 /// The format version written into a baseline.
 const BASELINE_VERSION: u32 = 2;
 
+/// The categories a baseline records, keyed by crate and function name. An
+/// entry from an older baseline has an empty crate.
+pub type Recorded = Map<(String, String), Vec<String>>;
+
 /// One function that can panic.
 #[derive(Debug, Clone)]
 pub struct Finding {
@@ -150,16 +154,23 @@ pub fn run(
     }
 
     if let Some(known) = &baseline {
-        let live: Set<&str> = outcome
+        // Each name is live under its crate and under no crate, which is how
+        // an entry from an older baseline names it.
+        let live: Set<(&str, &str)> = outcome
             .findings
             .iter()
-            .map(|f| f.function.as_str())
+            .flat_map(|f| {
+                let name = f.function.as_str();
+                [(f.krate.as_str(), name), ("", name)]
+            })
             .collect();
         outcome.fixed = known
             .iter()
-            .filter(|(name, _)| !live.contains(name.as_str()))
+            .filter(|((krate, name), _)| {
+                !live.contains(&(krate.as_str(), name.as_str()))
+            })
             .filter(|(_, recorded)| in_view(args.only, recorded))
-            .map(|(name, _)| name.clone())
+            .map(|((_, name), _)| name.clone())
             .collect();
         outcome.fixed.sort();
     }
@@ -190,13 +201,17 @@ fn in_view(only: Option<CategorySet>, recorded: &[String]) -> bool {
 }
 
 /// Whether a finding is absent from the baseline, or has grown a category.
-fn is_new(known: &Map<String, Vec<String>>, finding: &Finding) -> bool {
-    known.get(&finding.function).is_none_or(|recorded| {
-        finding
-            .categories
-            .iter()
-            .any(|category| !recorded.contains(category))
-    })
+/// An entry with no crate matches the name in any crate.
+fn is_new(known: &Recorded, finding: &Finding) -> bool {
+    known
+        .get(&(finding.krate.clone(), finding.function.clone()))
+        .or_else(|| known.get(&(String::new(), finding.function.clone())))
+        .is_none_or(|recorded| {
+            finding
+                .categories
+                .iter()
+                .any(|category| !recorded.contains(category))
+        })
 }
 
 /// Every local function that can panic under the solved policy.
@@ -255,6 +270,7 @@ pub fn write_baseline(
         "static_only": args.static_only,
         "candidates": args.candidates,
         "findings": findings.iter().map(|f| json!({
+            "crate": f.krate,
             "function": f.function,
             "categories": f.categories,
         })).collect::<Vec<_>>(),
@@ -269,10 +285,7 @@ pub fn write_baseline(
 /// # Errors
 ///
 /// Returns an error if the file is missing, unreadable, or not a baseline.
-pub fn read_baseline(
-    path: &Path,
-    args: &Args,
-) -> Result<Map<String, Vec<String>>> {
+pub fn read_baseline(path: &Path, args: &Args) -> Result<Recorded> {
     let text = fs::read_to_string(path).with_context(|| {
         format!(
             "could not read {}; write one with `panicgraph baseline {}`",
@@ -314,6 +327,17 @@ pub fn read_baseline(
         let name = entry.get("function").and_then(Value::as_str).with_context(
             || format!("finding {at} in {} names no function", path.display()),
         )?;
+        // Older baselines name no crate.
+        let krate = entry
+            .get("crate")
+            .map_or(Some(""), Value::as_str)
+            .with_context(|| {
+                format!(
+                    "{name} in {} names a crate that is not a name",
+                    path.display()
+                )
+            })?
+            .to_owned();
         let list = entry
             .get("categories")
             .and_then(Value::as_array)
@@ -331,7 +355,7 @@ pub fn read_baseline(
             categories.push(category.to_owned());
         }
         ensure!(
-            out.insert(name.to_owned(), categories).is_none(),
+            out.insert((krate, name.to_owned()), categories).is_none(),
             "{name} is recorded twice in {}",
             path.display()
         );

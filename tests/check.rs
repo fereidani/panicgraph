@@ -134,8 +134,78 @@ fn a_baseline_round_trips() {
     let read = check::read_baseline(&file, &args).expect("and read back");
     assert_eq!(read.len(), 2);
     assert_eq!(
-        read.get("parse").map(Vec::as_slice),
+        read.get(&("test".to_owned(), "parse".to_owned()))
+            .map(Vec::as_slice),
         Some(&["unwrap".to_owned()][..])
+    );
+    let _ = std::fs::remove_file(&file);
+}
+
+/// A function of the given name in the given crate.
+fn body_in(krate: &str, name: &str, category: Option<Category>) -> Body {
+    let mut made = body(name, category);
+    krate.clone_into(&mut made.krate);
+    made.key = FuncKey(format!("{krate}::{name}"));
+    made
+}
+
+#[test]
+fn a_baseline_tells_functions_of_one_name_in_two_crates_apart() {
+    let file = std::env::temp_dir().join("panicgraph-baseline-two-crates.json");
+    let (args, _) = gate(&[]);
+    let both = vec![
+        body_in("first", "main", Some(Category::Unwrap)),
+        body_in("second", "main", Some(Category::Index)),
+    ];
+    check::write_baseline(&file, &args, &outcome(both.clone(), &[]).findings)
+        .expect("the baseline should be written");
+    assert_eq!(
+        check::read_baseline(&file, &args)
+            .expect("two crates may each record a function of one name")
+            .len(),
+        2
+    );
+
+    let path = file.to_string_lossy().into_owned();
+    assert!(
+        !outcome(both, &["--baseline", &path]).failed(),
+        "nothing changed, so nothing is new"
+    );
+
+    // A third crate's `main` is new.
+    let grown = vec![
+        body_in("first", "main", Some(Category::Unwrap)),
+        body_in("second", "main", Some(Category::Index)),
+        body_in("third", "main", Some(Category::Unwrap)),
+    ];
+    let result = outcome(grown, &["--baseline", &path]);
+    assert_eq!(result.violations.len(), 1);
+    assert_eq!(result.violations[0].finding.krate, "third");
+    let _ = std::fs::remove_file(&file);
+}
+
+#[test]
+fn a_baseline_entry_naming_no_crate_stands_for_the_name_anywhere() {
+    // Baselines written before entries named their crate still gate.
+    let file = std::env::temp_dir().join("panicgraph-baseline-no-crate.json");
+    let (args, _) = gate(&[]);
+    check::write_baseline(&file, &args, &outcome(sample(), &[]).findings)
+        .expect("the baseline should be written");
+    let written = std::fs::read_to_string(&file).expect("and be readable");
+    let older = written.replace("\"crate\": \"test\",", "");
+    assert_ne!(older, written, "the entries should have named their crate");
+    std::fs::write(&file, older).expect("the file should be written");
+
+    let path = file.to_string_lossy().into_owned();
+    assert!(
+        !outcome(sample(), &["--baseline", &path]).failed(),
+        "an entry without a crate still admits the function it names"
+    );
+    let mut fixed = sample();
+    fixed[0] = body("parse", None);
+    assert_eq!(
+        outcome(fixed, &["--baseline", &path]).fixed,
+        vec!["parse".to_owned()]
     );
     let _ = std::fs::remove_file(&file);
 }
