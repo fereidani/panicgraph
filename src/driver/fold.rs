@@ -664,13 +664,13 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
             TerminatorKind::Assert {
                 cond,
                 expected,
+                msg,
                 target,
                 unwind,
-                ..
             } => self.assertion(
                 bb,
                 (cond, *expected, *target),
-                *unwind,
+                (msg.is_optional_overflow_check(), *unwind),
                 state,
                 reach,
                 work,
@@ -1366,16 +1366,24 @@ impl<'a, 'tcx> Folder<'a, 'tcx> {
     }
 
     /// Follows an `Assert`, recording it when its condition cannot fail.
+    ///
+    /// Without overflow checks, codegen drops an overflow assertion and the
+    /// arithmetic wraps, so the assertion never fails and proves nothing.
     fn assertion(
         &self,
         bb: BasicBlock,
         assert: (&mir::Operand<'tcx>, bool, BasicBlock),
-        unwind: UnwindAction,
+        (optional, unwind): (bool, UnwindAction),
         state: State<'tcx>,
         reach: &mut Reach,
         work: &mut Work<'tcx>,
     ) {
         let (cond, expected, target) = assert;
+        if optional && !self.tcx.sess.overflow_checks() {
+            mark(&mut reach.settled, bb, true);
+            work.merge(target, state);
+            return;
+        }
         // Passing the check proves what it was testing, which is what makes
         // a second division by the same divisor free.
         let proved = self.subject_of(bb, cond, &state);
