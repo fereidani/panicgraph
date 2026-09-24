@@ -186,7 +186,10 @@ unwrap_opt can panic with `unwrap`:
 ```
 
 For a deeper path this prints each call in turn, marking the ones that run
-only while an earlier panic is unwinding.
+only while an earlier panic is unwinding. When a name covers several
+bodies, such as a generic function and its instantiations, or a function and
+its closures under `--closures parent`, each panic is explained through a
+body that reaches it.
 
 A finding every call reaches is marked `(always)` in the report, and
 `always` in the machine readable one: no path through the function returns

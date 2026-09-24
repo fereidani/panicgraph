@@ -7,6 +7,7 @@ use anyhow::Result;
 use crate::{
     Body, Category, CategorySet, FuncId, Graph, Solution, Terminal,
     args::{Args, Format},
+    select::Selection,
     util::Map,
     verify::{Missed, Verdict, Verdicts},
     witness,
@@ -451,33 +452,101 @@ fn github(
     }
 }
 
-/// Explains one function's panics for a machine.
+/// What `why` says about one function.
+struct Explanation<'a> {
+    /// The body the query matched first, which names the function.
+    body: &'a Body,
+    /// How many bodies the query matched.
+    matched: usize,
+    /// Whether the query matched more than one function.
+    ambiguous: bool,
+    /// How many bodies report together under the function's name.
+    bodies: usize,
+    /// What those bodies raise between them under the policy.
+    categories: CategorySet,
+    /// A shortest path to each, from a body that reaches it.
+    paths: Vec<(Category, witness::Witness)>,
+}
+
+/// Finds the function a query names and a path to each of its panics.
 ///
-/// The same walk the prose takes, written as the path itself: every hop
-/// names the callee it reaches and the edge it was resolved through, and
-/// the ending says what raises.
+/// The closest match names the function, and every body the report shows
+/// under that name is searched, so each panic the report lists is explained.
+fn explain<'a>(
+    graph: &'a Graph,
+    solution: &Solution,
+    selection: Selection,
+    name: &str,
+) -> Option<Explanation<'a>> {
+    let matches = graph.find_by_display(name);
+    let &first = matches.first()?;
+    let body = graph.body(first);
+    let ids = selection.namesakes(graph, first);
+    let categories = ids.iter().fold(CategorySet::EMPTY, |set, id| {
+        set.union(solution.enabled(*id))
+    });
+    let paths = categories
+        .iter()
+        .filter_map(|category| {
+            witness::find_any(graph, solution, &ids, category)
+                .map(|path| (category, path))
+        })
+        .collect();
+    Some(Explanation {
+        body,
+        matched: matches.len(),
+        ambiguous: matches
+            .iter()
+            .any(|&other| graph.body(other).display != body.display),
+        bodies: ids.len(),
+        categories,
+        paths,
+    })
+}
+
+/// Explains how one function reaches each panic it can raise.
 ///
 /// # Errors
 ///
-/// Returns an error if the document cannot be serialized.
-pub fn why_json(
+/// Returns an error if the JSON document cannot be serialized.
+pub fn why(
     graph: &Graph,
     solution: &Solution,
+    args: &Args,
     name: &str,
     out: &mut String,
 ) -> Result<()> {
-    let matches = graph.find_by_display(name);
-    let doc = match matches.first() {
+    let selection = args.selection();
+    let found = explain(graph, solution, selection, name);
+    if args.format == Format::Json {
+        return why_json(graph, selection, name, found, out);
+    }
+    why_prose(graph, selection, name, found, out);
+    Ok(())
+}
+
+/// Explains one function's panics for a machine.
+///
+/// The same walk the prose takes, written as the path itself: every path
+/// names the body it starts in, every hop names the callee it reaches and
+/// the edge it was resolved through, and the ending says what raises.
+fn why_json(
+    graph: &Graph,
+    selection: Selection,
+    name: &str,
+    found: Option<Explanation<'_>>,
+    out: &mut String,
+) -> Result<()> {
+    let doc = match found {
         None => serde_json::json!({ "query": name, "matched": 0 }),
-        Some(&id) => {
-            let body = graph.body(id);
-            let paths: Vec<serde_json::Value> = solution
-                .enabled(id)
+        Some(found) => {
+            let paths: Vec<serde_json::Value> = found
+                .paths
                 .iter()
-                .filter_map(|category| {
-                    let path = witness::find(graph, solution, id, category)?;
-                    Some(serde_json::json!({
+                .map(|(category, path)| {
+                    serde_json::json!({
                         "category": category.name(),
+                        "from": graph.body(path.root).display,
                         "hops": path
                             .hops
                             .iter()
@@ -490,17 +559,18 @@ pub fn why_json(
                                     .map(ToString::to_string),
                             }))
                             .collect::<Vec<_>>(),
-                        "ending": ending(graph, &path),
-                    }))
+                        "ending": ending(graph, path),
+                    })
                 })
                 .collect();
             serde_json::json!({
                 "query": name,
-                "matched": matches.len(),
-                "function": body.display,
-                "crate": body.krate,
-                "location": body.loc.as_ref().map(ToString::to_string),
-                "categories": solution.enabled(id).names(),
+                "matched": found.matched,
+                "function": selection.name(found.body),
+                "crate": found.body.krate,
+                "location": found.body.loc.as_ref().map(ToString::to_string),
+                "bodies": found.bodies,
+                "categories": found.categories.names(),
                 "paths": paths,
             })
         }
@@ -541,56 +611,50 @@ fn ending(graph: &Graph, path: &witness::Witness) -> serde_json::Value {
     }
 }
 
-/// Explains how one function reaches a panic.
-pub fn why(graph: &Graph, solution: &Solution, name: &str, out: &mut String) {
-    let matches = graph.find_by_display(name);
-    let Some(&id) = matches.first() else {
+/// Explains how one function reaches each panic it can raise, in prose.
+fn why_prose(
+    graph: &Graph,
+    selection: Selection,
+    name: &str,
+    found: Option<Explanation<'_>>,
+    out: &mut String,
+) {
+    let Some(found) = found else {
         let _ = writeln!(out, "No function matching `{name}` was analysed.");
         return;
     };
-    let body = graph.body(id);
-    if matches.len() > 1 {
-        let same = matches
-            .iter()
-            .filter(|&&other| graph.body(other).display == body.display)
-            .count();
-        if same == matches.len() {
-            let _ = writeln!(
-                out,
-                "`{name}` names {same} instantiations of the same function; \
-                 explaining one.\n"
-            );
-        } else {
-            let _ = writeln!(
-                out,
-                "`{name}` matched {} functions; explaining `{}`.\n",
-                matches.len(),
-                body.display
-            );
-        }
+    let function = selection.name(found.body);
+    if found.ambiguous {
+        let _ = writeln!(
+            out,
+            "`{name}` matched {} functions; explaining `{function}`.\n",
+            found.matched
+        );
+    }
+    if found.bodies > 1 {
+        let _ = writeln!(
+            out,
+            "`{function}` has {} bodies; each panic below is shown from one \
+             that reaches it.\n",
+            found.bodies
+        );
     }
 
-    let categories = solution.enabled(id);
-    if categories.is_empty() {
-        let _ =
-            writeln!(out, "{} cannot panic under this policy.", body.display);
+    if found.categories.is_empty() {
+        let _ = writeln!(out, "{function} cannot panic under this policy.");
         return;
     }
 
-    for category in categories.iter() {
-        let Some(path) = witness::find(graph, solution, id, category) else {
-            continue;
-        };
-        let _ =
-            writeln!(out, "{} can panic with `{category}`:\n", body.display);
-        let _ = writeln!(out, "  {}", body.display);
+    for (category, path) in &found.paths {
+        let _ = writeln!(out, "{function} can panic with `{category}`:\n");
+        let _ = writeln!(out, "  {}", graph.body(path.root).display);
         for hop in &path.hops {
             if let Some(loc) = &hop.loc {
                 let _ = writeln!(out, "      at {loc}  [{}]", hop.kind.name());
             }
             let _ = writeln!(out, "  -> {}", graph.body(hop.callee).display);
         }
-        describe_terminal(graph, &path, out);
+        describe_terminal(graph, path, out);
         out.push('\n');
     }
 }
@@ -710,7 +774,7 @@ pub fn suppressed_hint(
     if args.suppress.is_empty() {
         return Ok(None);
     }
-    let hidden = solution.cleared_by_suppression(graph)?;
+    let hidden = solution.cleared_by_suppression(graph, args.selection())?;
     Ok((hidden > 0).then(|| {
         format!(
             "{hidden} local functions panic only through suppressed \

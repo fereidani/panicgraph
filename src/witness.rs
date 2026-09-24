@@ -42,6 +42,8 @@ pub enum Terminal {
 /// A path from a root function to a reachable panic.
 #[derive(Debug, Clone)]
 pub struct Witness {
+    /// The function the path starts in.
+    pub root: FuncId,
     /// The calls traversed, in order, from the root.
     pub hops: Vec<Hop>,
     /// The function the path ends at.
@@ -80,11 +82,7 @@ pub fn find(
         // A function with no recorded body is the source of whichever
         // category stands for code the analysis could not read.
         if body.opaque && category == body.unreadable() {
-            return Some(Witness {
-                hops: rebuild(&came_from, root, id),
-                func: id,
-                terminal: Terminal::Opaque,
-            });
+            return Some(path_to(&came_from, root, id, Terminal::Opaque));
         }
 
         let activity = solution.activity(graph, id);
@@ -94,11 +92,7 @@ pub fn find(
                 && site.category == category
                 && !solution.policy().suppressed.contains(category)
             {
-                return Some(Witness {
-                    hops: rebuild(&came_from, root, id),
-                    func: id,
-                    terminal: Terminal::Site(i),
-                });
+                return Some(path_to(&came_from, root, id, Terminal::Site(i)));
             }
         }
 
@@ -109,11 +103,12 @@ pub fn find(
                 && solution.follows(call)
         });
         if let Some((i, _)) = unresolved {
-            return Some(Witness {
-                hops: rebuild(&came_from, root, id),
-                func: id,
-                terminal: Terminal::Unresolved(i),
-            });
+            return Some(path_to(
+                &came_from,
+                root,
+                id,
+                Terminal::Unresolved(i),
+            ));
         }
 
         for (i, call) in body.calls.iter().enumerate() {
@@ -145,6 +140,35 @@ pub fn find(
     }
 
     None
+}
+
+/// Finds a shortest path to a panic of `category` from the first root that
+/// reaches one, or `None` when none does.
+#[must_use]
+pub fn find_any(
+    graph: &Graph,
+    solution: &Solution,
+    roots: &[FuncId],
+    category: Category,
+) -> Option<Witness> {
+    roots
+        .iter()
+        .find_map(|&root| find(graph, solution, root, category))
+}
+
+/// The path the search found to `func`, ending there for `terminal`.
+fn path_to(
+    came_from: &Map<FuncId, Hop>,
+    root: FuncId,
+    func: FuncId,
+    terminal: Terminal,
+) -> Witness {
+    Witness {
+        root,
+        hops: rebuild(came_from, root, func),
+        func,
+        terminal,
+    }
 }
 
 /// Walks predecessor links back to the root and returns them in call order.

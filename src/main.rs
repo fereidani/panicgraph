@@ -67,12 +67,7 @@ fn dispatch() -> Result<u8> {
         Command::Analyze => analyze(&args, &mut out)?,
         Command::Why { function } => {
             let (graph, solution) = solve(&args)?;
-            match args.format {
-                panicgraph::args::Format::Json => {
-                    report::why_json(&graph, &solution, function, &mut out)?;
-                }
-                _ => report::why(&graph, &solution, function, &mut out),
-            }
+            report::why(&graph, &solution, &args, function, &mut out)?;
             EXIT_CLEAN
         }
         Command::Check(gate) => gate_check(&args, gate, &mut out)?,

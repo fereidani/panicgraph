@@ -137,21 +137,28 @@ pub fn solve(
         "summary": {
             "analysed": g.len(),
             "can_panic": dirty,
-            "clean_by_suppression": solution.cleared_by_suppression(g)?,
+            "clean_by_suppression": solution
+                .cleared_by_suppression(g, Selection::default())?,
         },
         "counterfactual": counterfactual(g, &solution, dirty)?,
     }))
 }
 
-/// How many local functions can panic under a solution.
+/// How many functions the view draws can panic, counted by name.
 fn local_dirty(g: &Graph, solution: &Solution) -> usize {
-    g.locals().filter(|(id, _)| !solution.is_clean(*id)).count()
+    Selection::default()
+        .raised(g, |id| solution.enabled(id))
+        .values()
+        .filter(|raised| !raised.is_empty())
+        .count()
 }
 
-/// How many local functions reach one category under a solution.
+/// How many functions the view draws reach one category, counted by name.
 fn local_reaching(g: &Graph, solution: &Solution, kind: Category) -> usize {
-    g.locals()
-        .filter(|(id, _)| solution.enabled(*id).contains(kind))
+    Selection::default()
+        .raised(g, |id| solution.enabled(id))
+        .values()
+        .filter(|raised| raised.contains(kind))
         .count()
 }
 
@@ -236,7 +243,10 @@ pub fn why(
     let root = FuncId::from_index(node);
     let solution = solved(g, suppressed, edges)?;
 
-    let Some(path) = witness::find(g, &solution, root, category) else {
+    // The view names a function by its first body, but the flame graph
+    // merges every body of that name, so all of them are searched.
+    let roots = Selection::default().namesakes(g, root);
+    let Some(path) = witness::find_any(g, &solution, &roots, category) else {
         return Ok(json!({ "found": false }));
     };
     let hops: Vec<Value> = path
@@ -258,7 +268,7 @@ pub fn why(
     Ok(json!({
         "found": true,
         "category": category.name(),
-        "root": g.body(root).display,
+        "root": g.body(path.root).display,
         "hops": hops,
         "func": path.func.index(),
         "func_display": g.body(path.func).display,
@@ -344,6 +354,9 @@ pub struct FlameRow {
     pub category: Option<&'static str>,
     /// How the call was resolved, or the kind of ending.
     pub kind: &'static str,
+    /// A function frame's whole name, which the view asks to have
+    /// explained; `name` holds only the last segment of the path.
+    pub full: Option<String>,
     /// Whether it runs only while an earlier panic unwinds.
     pub cleanup: bool,
     /// Calls folded into this frame.
@@ -484,6 +497,7 @@ impl Tree {
             name,
             category,
             kind,
+            full: None,
             cleanup: false,
             elided: Vec::new(),
             value: 0,
@@ -515,6 +529,9 @@ impl Tree {
             at = self.node(Some(at), segment.clone(), None, kind);
             self.rows[at].value += 1;
         }
+        // A closure's path may have made this frame a module segment first.
+        self.rows[at].kind = "function";
+        self.rows[at].full = Some(display.to_owned());
         for hop in &path.hops {
             let callee = g.body(hop.callee);
             let name = selection.name(callee);

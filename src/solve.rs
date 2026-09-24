@@ -14,6 +14,7 @@ use crate::{
     category::{ALL, Category, CategorySet, Termination},
     graph::{FuncId, Graph},
     model::{Body, CallSite, Guard, UnwindOrigin},
+    select::Selection,
 };
 
 /// Which optional edges the solver follows.
@@ -320,18 +321,24 @@ impl Solution {
         self.policy.follows(call)
     }
 
-    /// How many local functions are clean only because of the policy.
+    /// How many functions the selection shows are clean only because of the
+    /// policy.
     ///
     /// A function that raises nothing whatever is assumed is not one the
     /// suppression cleared, so the answer is the difference between two
     /// solutions rather than a count of the clean ones. That costs a second
     /// fixpoint over the graph, which is why callers ask for it only when
-    /// they are about to say something about it.
+    /// they are about to say something about it. Functions are counted by
+    /// the names the report prints.
     ///
     /// # Errors
     ///
     /// Returns an error if the second fixpoint does not converge.
-    pub fn cleared_by_suppression(&self, graph: &Graph) -> Result<usize> {
+    pub fn cleared_by_suppression(
+        &self,
+        graph: &Graph,
+        selection: Selection,
+    ) -> Result<usize> {
         let bare = Solver::new(
             graph,
             Policy {
@@ -340,9 +347,14 @@ impl Solution {
             },
         )
         .solve()?;
-        Ok(graph
-            .locals()
-            .filter(|(id, _)| self.is_clean(*id) && !bare.is_clean(*id))
+        let now = selection.raised(graph, |id| self.enabled(id));
+        let before = selection.raised(graph, |id| bare.enabled(id));
+        Ok(now
+            .iter()
+            .filter(|(name, raised)| {
+                raised.is_empty()
+                    && before.get(*name).is_some_and(|held| !held.is_empty())
+            })
             .count())
     }
 }

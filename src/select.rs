@@ -112,6 +112,47 @@ impl Selection {
         })
     }
 
+    /// What each shown function raises across its bodies, keyed by crate and
+    /// name, so a total counts functions the way the report does.
+    pub fn raised<'a>(
+        &self,
+        graph: &'a Graph,
+        enabled: impl Fn(FuncId) -> CategorySet,
+    ) -> Map<(&'a str, &'a str), CategorySet> {
+        let mut out: Map<(&str, &str), CategorySet> = Map::default();
+        for (id, body) in self.functions(graph) {
+            let held = out
+                .entry((body.krate.as_str(), self.name(body)))
+                .or_default();
+            *held = held.union(self.shown(enabled(id)));
+        }
+        out
+    }
+
+    /// The bodies reported under the same name as `id`, with `id` first.
+    ///
+    /// The report merges a generic function's written body with its
+    /// instantiations, and under `--closures parent` a function with its
+    /// closures. A body the selection does not show matches every body of
+    /// its name in the graph.
+    #[must_use]
+    pub fn namesakes(&self, graph: &Graph, id: FuncId) -> Vec<FuncId> {
+        let body = graph.body(id);
+        let named = |(_, other): &(FuncId, &Body)| {
+            other.krate == body.krate && self.name(other) == self.name(body)
+        };
+        let mut ids: Vec<FuncId> = self
+            .functions(graph)
+            .filter(named)
+            .map(|(at, _)| at)
+            .collect();
+        if ids.is_empty() {
+            ids = graph.iter().filter(named).map(|(at, _)| at).collect();
+        }
+        ids.sort_by_key(|other| *other != id);
+        ids
+    }
+
     /// Whether one body of a name shows, given what is known of the name.
     fn keeps(&self, body: &Body, known: Named) -> bool {
         let yields = self.generics == Generics::Instantiated
