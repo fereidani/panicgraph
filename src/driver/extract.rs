@@ -1,8 +1,8 @@
 //! Walks MIR and records what each function can panic with, and who it calls.
 
 use panicgraph::{
-    Body, CallSite, EdgeKind, FuncKey, Guard, Loc, OPEN_PREFIX, PanicSite,
-    Reified, UnwindOrigin,
+    Body, CallSite, Category, EdgeKind, FuncKey, Guard, Loc, OPEN_PREFIX,
+    PanicSite, Reified, Termination, UnwindOrigin,
     util::{Map, Set},
 };
 use rustc_hir::def_id::DefId;
@@ -401,7 +401,12 @@ impl<'tcx> Extractor<'tcx> {
                 TerminatorKind::Call {
                     func,
                     args,
-                    unwind,
+                    fn_span,
+                    ..
+                }
+                | TerminatorKind::TailCall {
+                    func,
+                    args,
                     fn_span,
                     ..
                 } => {
@@ -412,9 +417,13 @@ impl<'tcx> Extractor<'tcx> {
                         // is reachable through this edge.
                         continue;
                     }
+                    // A tail call replaces this frame, so an unwind out of
+                    // the callee goes straight on to the caller.
+                    let unwind = term.kind.unwind().copied();
+                    let unwind = unwind.unwrap_or(UnwindAction::Continue);
                     let mut info = info;
                     info.span = *fn_span;
-                    let at = At::new(bb, self.unwind_of(*unwind), info);
+                    let at = At::new(bb, self.unwind_of(unwind), info);
                     let ty = func.ty(&mir.local_decls, self.tcx);
                     self.push_call(&mut raw, cx, at, ty, args, mir);
                 }
@@ -422,6 +431,14 @@ impl<'tcx> Extractor<'tcx> {
                     let at = At::new(bb, self.unwind_of(*unwind), info);
                     let ty = place.ty(&mir.local_decls, self.tcx).ty;
                     self.push_drop(&mut raw, cx, at, ty);
+                }
+                // Only assembly declared `may_unwind` has somewhere to
+                // unwind to, and its code cannot be read.
+                TerminatorKind::InlineAsm { unwind, .. }
+                    if !matches!(unwind, UnwindAction::Unreachable) =>
+                {
+                    let at = At::new(bb, self.unwind_of(*unwind), info);
+                    self.push_assembly(&mut raw, at);
                 }
                 _ => {}
             }
@@ -471,6 +488,21 @@ impl<'tcx> Extractor<'tcx> {
                 && !mir.basic_blocks[bb].is_cleanup
                 && unavoidable(mir, reach, bb, &raises);
         }
+    }
+
+    /// Records inline assembly that may unwind as code with no Rust body.
+    fn push_assembly(&self, raw: &mut Raw<'tcx>, at: At) {
+        let site = PanicSite {
+            category: Category::Foreign,
+            termination: Termination::Unwind,
+            reason: "runs inline assembly that may unwind".to_owned(),
+            sink: None,
+            loc: self.loc_of(at.span),
+            guard: Guard::default(),
+            certain: false,
+            terminates: false,
+        };
+        raw.add_site(at, site, false);
     }
 
     /// Records a compiler inserted check as a panic site.

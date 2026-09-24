@@ -201,7 +201,11 @@ pub fn analyse_fixture(
     profile: &str,
     extra: &[&str],
 ) -> Vec<(String, Vec<String>)> {
-    let report = analyse_fixture_json(profile, extra);
+    findings(&analyse_fixture_json(profile, extra))
+}
+
+/// The categories a json report gives each function.
+pub fn findings(report: &serde_json::Value) -> Vec<(String, Vec<String>)> {
     let findings = report["findings"]
         .as_array()
         .expect("the report should list findings");
@@ -249,9 +253,19 @@ pub fn analyse_fixture_json(
     profile: &str,
     extra: &[&str],
 ) -> serde_json::Value {
+    analyse_json(&fixture_dir(), profile, extra)
+}
+
+/// Analyses a fixture crate with nothing suppressed and returns the raw
+/// json report.
+pub fn analyse_json(
+    dir: &Path,
+    profile: &str,
+    extra: &[&str],
+) -> serde_json::Value {
     let mut args = vec!["--profile", profile, "--suppress", "", "--json"];
     args.extend_from_slice(extra);
-    let output = run_on_fixture(&args);
+    let output = run_on(dir, &args);
     serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
         panic!(
             "the report should be json: {err}\n{}",
@@ -262,8 +276,13 @@ pub fn analyse_fixture_json(
 
 /// Where the known fixture crate lives.
 pub fn fixture_dir() -> PathBuf {
+    fixture("known")
+}
+
+/// Where a fixture crate lives.
+pub fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("known")
+        .join(name)
 }

@@ -74,7 +74,8 @@ pub enum Category {
     /// A standard library precondition check, present only in a build that
     /// has undefined behaviour checks turned on.
     UbCheck = 16,
-    /// A call into foreign code, which has no Rust body to read.
+    /// A call into foreign code, or inline assembly that may unwind, which
+    /// has no Rust body to read.
     Foreign = 17,
     /// A call or a drop through a trait object, whose target set the
     /// analysis does not resolve.
@@ -161,7 +162,9 @@ impl Category {
             Self::MisalignedRef => "reference from a misaligned pointer",
             Self::Unknown => "unclassified panic",
             Self::UbCheck => "standard library precondition check",
-            Self::Foreign => "call into foreign code, which has no Rust body",
+            Self::Foreign => {
+                "foreign code or inline assembly, which has no Rust body"
+            }
             Self::DynCall => {
                 "call or drop through a trait object, target set unresolved"
             }
