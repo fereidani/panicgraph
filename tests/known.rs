@@ -28,11 +28,17 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_divide_narrowed", "divide-by-zero"),
     ("must_push", "capacity-overflow"),
     ("must_push", "alloc-failure"),
+    ("must_insert_into_map", "capacity-overflow"),
+    ("must_index_through_oom", "index"),
+    ("must_index_through_precondition_check", "index"),
     ("must_index_under_raw_length", "index"),
     ("must_index_after_write_under_pointer", "index"),
     ("must_rethrow", "explicit"),
     ("must_lock", "poison"),
     ("must_write", "fmt"),
+    ("must_unwrap_poisoned", "poison"),
+    ("must_unwrap_result_of_format", "unwrap"),
+    ("must_unwrap_option_of_poison", "unwrap"),
     ("must_rc_clone", "refcount-overflow"),
     ("must_slice_str", "str-boundary"),
     ("must_borrow", "borrow"),
@@ -151,6 +157,12 @@ const MUST_NOT_PANIC: &[(&str, &str)] = &[
     ("must_modulo_length", "index"),
     ("must_copy_into_prefix", "explicit"),
     ("must_after_call_that_cannot_return", "index"),
+    ("must_insert_into_map", "explicit"),
+    ("must_index_through_oom", "alloc-failure"),
+    ("must_index_through_precondition_check", "ub-check"),
+    ("must_unwrap_poisoned", "unwrap"),
+    ("must_unwrap_result_of_format", "fmt"),
+    ("must_unwrap_option_of_poison", "poison"),
 ];
 
 /// The functions that must be reported with nothing at all in a release
@@ -379,6 +391,29 @@ fn a_build_whose_panics_abort_catches_nothing() {
             "{function} reaches {category} when panics abort, but was \
              reported with {categories:?}"
         );
+    }
+}
+
+#[test]
+fn an_unwrap_is_named_by_the_error_it_discards_inlined_or_not() {
+    // A release build inlines these unwraps and a debug build calls them;
+    // either way the discarded error names the panic.
+    for profile in ["release", "debug"] {
+        let reported = analyse_fixture(profile, &[]);
+        for (function, category, not) in [
+            ("must_lock", "poison", "unwrap"),
+            ("must_unwrap_poisoned", "poison", "unwrap"),
+            ("must_unwrap_result_of_format", "unwrap", "fmt"),
+            ("must_unwrap_option_of_poison", "unwrap", "poison"),
+        ] {
+            let categories = found(&reported, function).unwrap_or_default();
+            assert!(
+                categories.iter().any(|c| c == category)
+                    && !categories.iter().any(|c| c == not),
+                "{function} discards what makes it {category} rather than \
+                 {not}, but a {profile} build reported {categories:?}"
+            );
+        }
     }
 }
 

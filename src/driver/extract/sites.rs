@@ -56,11 +56,13 @@ impl<'tcx> Extractor<'tcx> {
     }
 
     /// Records the panics a call into an entry point raises.
+    ///
+    /// An explicit panic written in a funnel takes the funnel's category.
     pub(super) fn push_sink(
         &self,
         raw: &mut Raw<'tcx>,
         cx: Work<'tcx>,
-        at: At,
+        (at, funnel): (At, Option<Category>),
         callee: Instance<'tcx>,
         operands: &[Spanned<mir::Operand<'tcx>>],
         sink: Sink,
@@ -71,6 +73,10 @@ impl<'tcx> Extractor<'tcx> {
             |msg| format!("panics with \"{msg}\""),
         );
         for (category, termination) in sink.raises() {
+            let category = match funnel {
+                Some(named) if category == Category::Explicit => named,
+                _ => category,
+            };
             let site = PanicSite {
                 category,
                 termination,
@@ -113,6 +119,22 @@ impl<'tcx> Extractor<'tcx> {
             out.push_str("...");
         }
         Some(out)
+    }
+
+    /// Sharpens an unwrap by the error type the `Result` method it is
+    /// written in discards, whether that method was called or inlined.
+    pub(super) fn refine_unwrap(
+        &self,
+        cx: Work<'tcx>,
+        origin: Instance<'tcx>,
+        sink: Sink,
+    ) -> Sink {
+        let Some(error) = SinkTable::discarded_error(self.tcx, origin) else {
+            return sink;
+        };
+        instantiate(self.tcx, cx.inst, cx.env, error).map_or(sink, |error| {
+            SinkTable::refine_unwrap(self.tcx, error, sink)
+        })
     }
 
     /// Records the edges of the unwind catching intrinsic.

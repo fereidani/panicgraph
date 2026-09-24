@@ -1,7 +1,11 @@
 //! What a body's control flow says about the panics it raises.
 
-use rustc_middle::mir::{self, BasicBlock, TerminatorKind};
+use rustc_middle::{
+    mir::{self, BasicBlock, TerminatorKind},
+    ty::Instance,
+};
 
+use super::{At, Work};
 use crate::fold;
 
 /// Which blocks of a body can reach an `UnwindResume`, by block index.
@@ -35,6 +39,34 @@ pub(super) fn resuming(mir: &mir::Body<'_>) -> Vec<bool> {
         }
     }
     out
+}
+
+/// The function a terminator was written in: the instance of the innermost
+/// inlined scope around it, or else the body being read.
+///
+/// An inlined instance is expressed in the generic arguments of the body it
+/// was inlined into.
+pub(super) fn written_in<'tcx>(
+    cx: Work<'tcx>,
+    at: At,
+    mir: &mir::Body<'tcx>,
+) -> Instance<'tcx> {
+    let mut scope = at.scope;
+    // Parent links form a tree toward the root scope, so the walk takes at
+    // most one step per scope in the body.
+    for _ in 0..=mir.source_scopes.len() {
+        let Some(data) = mir.source_scopes.get(scope) else {
+            break;
+        };
+        if let Some((inst, _)) = data.inlined {
+            return inst;
+        }
+        let Some(parent) = data.parent_scope else {
+            break;
+        };
+        scope = parent;
+    }
+    cx.inst
 }
 
 /// Whether every execution of a body that gets past its entry runs one

@@ -17,10 +17,15 @@ use rustc_middle::{
 use rustc_span::Spanned;
 
 use self::{
-    flow::{resuming, unavoidable},
+    flow::{resuming, unavoidable, written_in},
     sites::classify_assert,
 };
-use crate::{fold, read::instantiate, sinks::SinkTable, summary::Cache};
+use crate::{
+    fold,
+    read::instantiate,
+    sinks::{Sink, SinkTable},
+    summary::Cache,
+};
 
 mod candidates;
 mod flow;
@@ -587,8 +592,11 @@ impl<'tcx> Extractor<'tcx> {
         };
 
         if let Some(sink) = self.sinks.get(self.tcx, callee.def_id()) {
-            let sink = SinkTable::refine_unwrap(self.tcx, cx.inst.args, sink);
-            self.push_sink(raw, cx, at, callee, operands, sink);
+            let origin = written_in(cx, at, mir);
+            let sink = self.refine_unwrap(cx, origin, sink);
+            let funnel = SinkTable::funnel(self.tcx, origin.def_id())
+                .map(Sink::category);
+            self.push_sink(raw, cx, (at, funnel), callee, operands, sink);
             return;
         }
 

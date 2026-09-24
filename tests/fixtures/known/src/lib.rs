@@ -148,6 +148,37 @@ pub fn must_push(v: &mut Vec<u8>, x: u8) {
     v.push(x);
 }
 
+/// Reaches `capacity-overflow` and never `explicit`, which is how
+/// hashbrown's `capacity_overflow` funnel raises it.
+pub fn must_insert_into_map(
+    m: &mut std::collections::HashMap<u32, u32>,
+    k: u32,
+) {
+    m.insert(k, 1);
+}
+
+/// Indexes, though it is named like an allocation funnel.
+#[inline(never)]
+pub fn oom(v: &[u8], i: usize) -> u8 {
+    v[i]
+}
+
+/// Reaches `index` through the function above.
+pub fn must_index_through_oom(v: &[u8], i: usize) -> u8 {
+    oom(v, i)
+}
+
+/// Indexes, though it is named like a standard library precondition check.
+#[inline(never)]
+pub fn precondition_check(v: &[u8], i: usize) -> u8 {
+    v[i]
+}
+
+/// Reaches `index` through the function above.
+pub fn must_index_through_precondition_check(v: &[u8], i: usize) -> u8 {
+    precondition_check(v, i)
+}
+
 /// Reaches `explicit`. Raising a caught payload again is a panic in its own
 /// right, named rather than reported as a call into unknown code.
 pub fn must_rethrow(r: Result<u8, Box<dyn std::any::Any + Send>>) -> u8 {
@@ -170,6 +201,26 @@ pub fn must_write(x: u32) -> String {
     let mut s = String::new();
     write!(s, "{x}").unwrap();
     s
+}
+
+/// Reaches `poison`, not `unwrap`, whether or not the unwrap is inlined.
+pub fn must_unwrap_poisoned(r: Result<u8, std::sync::PoisonError<u8>>) -> u8 {
+    r.unwrap()
+}
+
+/// Reaches `unwrap`, not `fmt`: the formatting error is the value, and the
+/// error the unwrap discards is a byte.
+pub fn must_unwrap_result_of_format(
+    r: Result<Result<(), std::fmt::Error>, u8>,
+) -> Result<(), std::fmt::Error> {
+    r.unwrap()
+}
+
+/// Reaches `unwrap`, not `poison`: an empty option discards no error.
+pub fn must_unwrap_option_of_poison(
+    o: Option<std::sync::PoisonError<u8>>,
+) -> std::sync::PoisonError<u8> {
+    o.unwrap()
 }
 
 /// Reaches `refcount-overflow`: cloning aborts when the strong count would
