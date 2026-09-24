@@ -324,6 +324,11 @@ impl<'tcx> Folder<'_, 'tcx> {
         let Some(callee) = self.target(func) else {
             return Found::default();
         };
+        // Extraction records a call to a panic entry point as the panic
+        // itself, so the call must never be dropped as quiet.
+        if SinkTable::is_sink(self.tcx, callee.def_id()) {
+            return Found::default();
+        }
         let mir = self.tcx.instance_mir(callee.def);
         // A shim rearranges what it was passed, so its parameters are not
         // the operands at the call site.
@@ -453,8 +458,9 @@ impl<'tcx> Folder<'_, 'tcx> {
     /// reason: it cannot call back into the program. What it does record is
     /// excluded here in the same terms, so the two halves agree: a panic
     /// entry point, a check on a type's validity, the barrier around a
-    /// caught unwind, and the pair of bodies a const selection chooses
-    /// between.
+    /// caught unwind, the pair of bodies a const selection chooses between,
+    /// and any abort, since the reference counting code raises its overflow
+    /// through one.
     fn defined(
         &self,
         callee: &Folder<'_, 'tcx>,
@@ -487,7 +493,10 @@ impl<'tcx> Folder<'_, 'tcx> {
         }
         let name = self.tcx.item_name(did);
         ty::layout::ValidityRequirement::from_intrinsic(name).is_none()
-            && !matches!(name.as_str(), "catch_unwind" | "const_eval_select")
+            && !matches!(
+                name.as_str(),
+                "catch_unwind" | "const_eval_select" | "abort"
+            )
     }
 
     /// The state a callee is entered with.

@@ -229,6 +229,20 @@ pub fn must_rc_clone(rc: &std::rc::Rc<u32>) -> std::rc::Rc<u32> {
     rc.clone()
 }
 
+/// Clones the counter, which aborts if the count would wrap.
+#[inline(never)]
+fn clone_counted(rc: &std::rc::Rc<u32>) -> std::rc::Rc<u32> {
+    rc.clone()
+}
+
+/// Reaches `refcount-overflow` through the helper, which has the counting
+/// abort inlined.
+pub fn must_rc_clone_through_helper(
+    rc: &std::rc::Rc<u32>,
+) -> std::rc::Rc<u32> {
+    clone_counted(rc)
+}
+
 /// Reaches `str-boundary`: the end is a runtime value that can split a
 /// character.
 pub fn must_slice_str(s: &str, end: usize) -> &str {

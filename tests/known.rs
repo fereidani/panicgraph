@@ -40,6 +40,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_unwrap_result_of_format", "unwrap"),
     ("must_unwrap_option_of_poison", "unwrap"),
     ("must_rc_clone", "refcount-overflow"),
+    ("must_rc_clone_through_helper", "refcount-overflow"),
     ("must_slice_str", "str-boundary"),
     ("must_borrow", "borrow"),
     ("must_dyn", "dyn-call"),
