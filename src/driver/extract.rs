@@ -9,7 +9,10 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::{
     middle::codegen_fn_attrs::CodegenFnAttrFlags,
     mir::{self, AssertKind, BasicBlock, TerminatorKind, UnwindAction},
-    ty::{self, Instance, TyCtxt, TypeVisitableExt, TypingEnv},
+    ty::{
+        self, Instance, TyCtxt, TypeVisitableExt, TypingEnv,
+        print::with_no_trimmed_paths,
+    },
 };
 use rustc_span::Spanned;
 
@@ -691,10 +694,17 @@ impl<'tcx> Extractor<'tcx> {
         }
         if inst.args.has_param() {
             // A symbol name only exists once the generic arguments are
-            // concrete, so a generic body is keyed by its path instead.
+            // concrete, so a generic body is keyed by its crate, its
+            // disambiguated path, and its arguments instead. Two crates may
+            // each define `parse<T>`, and `f::<U>` and `f::<Wrapper<T>>`
+            // resolve their calls differently.
+            let did = inst.def_id();
+            let rendered = with_no_trimmed_paths!(inst.to_string());
             return Some(format!(
-                "{OPEN_PREFIX}{}",
-                self.tcx.def_path_str(inst.def_id())
+                "{OPEN_PREFIX}{}[{:016x}]{} {rendered}",
+                self.tcx.crate_name(did.krate),
+                self.tcx.stable_crate_id(did.krate).as_u64(),
+                self.tcx.def_path(did).to_string_no_crate_verbose(),
             ));
         }
         Some(self.tcx.symbol_name(inst).name.to_owned())

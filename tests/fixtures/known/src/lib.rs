@@ -304,6 +304,32 @@ pub fn must_generic<T: std::fmt::Display>(x: T) -> String {
     x.to_string()
 }
 
+/// A trait whose one implementation panics, for the generic caller below.
+pub trait Pick {
+    fn pick(&self) -> u8;
+}
+
+/// Picks by panicking, whatever it holds.
+pub struct Picky<T>(pub T);
+
+impl<T> Pick for Picky<T> {
+    fn pick(&self) -> u8 {
+        panic!("nothing to pick")
+    }
+}
+
+/// Reaches `explicit`: `Picky<T>::pick` panics whatever `T` is. It comes
+/// before its callee, so the callee is read with these arguments first.
+pub fn must_pick_through_generic<T>(p: &Picky<T>) -> u8 {
+    must_pick_any(p)
+}
+
+/// Reaches `generic-bound`: which `pick` runs is the caller's choice.
+#[inline(never)]
+pub fn must_pick_any<U: Pick>(u: &U) -> u8 {
+    u.pick()
+}
+
 /// A trait with one loud and one quiet implementation, for the candidate
 /// expansion below.
 pub trait Speak {

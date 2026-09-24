@@ -45,6 +45,8 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_modulo_signed", "index"),
     ("must_fn_ptr", "fn-pointer"),
     ("must_generic", "generic-bound"),
+    ("must_pick_through_generic", "explicit"),
+    ("must_pick_any", "generic-bound"),
     ("must_dyn_speak", "dyn-call"),
     ("must_zeroed_ref", "explicit"),
     ("must_panic_literal", "explicit"),
