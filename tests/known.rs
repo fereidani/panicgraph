@@ -44,6 +44,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_index_wrong_slice", "index"),
     ("must_modulo_signed", "index"),
     ("must_fn_ptr", "fn-pointer"),
+    ("must_call_closure_pointer", "fn-pointer"),
     ("must_generic", "generic-bound"),
     ("must_pick_through_generic", "explicit"),
     ("must_pick_any", "generic-bound"),
@@ -460,6 +461,14 @@ fn candidates_expand_dyn_and_pointer_calls() {
         dyn_call.iter().any(|c| c == "dyn-call"),
         "candidates narrow the unknown, they do not close it, got \
          {dyn_call:?}"
+    );
+
+    let closure =
+        found(&reported, "must_call_closure_pointer").unwrap_or_default();
+    assert!(
+        closure.iter().any(|c| c == "explicit"),
+        "a closure made into a pointer of this signature panics, got \
+         {closure:?}"
     );
 
     let pointer = found(&reported, "must_fn_ptr").unwrap_or_default();

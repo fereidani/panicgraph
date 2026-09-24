@@ -381,7 +381,7 @@ impl<'tcx> Extractor<'tcx> {
                 continue;
             }
             for stmt in &data.statements {
-                self.note_reified(&mut raw, cx, stmt);
+                self.note_reified(&mut raw, cx, stmt, mir);
                 self.note_coerced(cx, stmt, mir);
             }
             let Some(term) = &data.terminator else {

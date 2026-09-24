@@ -387,6 +387,20 @@ pub fn reifies_loud() -> fn() -> u8 {
     loud_pointer_target
 }
 
+/// Reaches `fn-pointer`, and `explicit` once candidates are followed: the
+/// only pointer of this signature is a panicking closure.
+pub fn must_call_closure_pointer(f: fn(u16) -> u16, x: u16) -> u16 {
+    f(x)
+}
+
+/// Makes a closure that panics into a pointer.
+pub fn closure_pointer() -> fn(u16) -> u16 {
+    |x| {
+        assert!(x < 8, "x is too big");
+        x
+    }
+}
+
 /// Reaches `explicit`: a zeroed reference is invalid, and the guard on the
 /// instantiation aborts in every build.
 pub fn must_zeroed_ref() -> u8 {

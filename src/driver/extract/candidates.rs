@@ -158,28 +158,45 @@ impl<'tcx> Extractor<'tcx> {
     /// can name it as a candidate.
     ///
     /// Only reachable code is scanned, so a pointer that no execution can
-    /// create never becomes a candidate.
+    /// create never becomes a candidate. A closure coerced to a pointer
+    /// names its `FnOnce` shim.
     pub(super) fn note_reified(
         &mut self,
         raw: &mut Raw<'tcx>,
         cx: Work<'tcx>,
         stmt: &mir::Statement<'tcx>,
+        mir: &mir::Body<'tcx>,
     ) {
         let mir::StatementKind::Assign(pair) = &stmt.kind else {
             return;
         };
         let mir::Rvalue::Cast(
-            mir::CastKind::PointerCoercion(
-                ty::adjustment::PointerCoercion::ReifyFnPointer(_),
-                _,
-            ),
-            mir::Operand::Constant(konst),
+            mir::CastKind::PointerCoercion(coercion, _),
+            operand,
             cast_ty,
         ) = &pair.1
         else {
             return;
         };
-        let Some(inst) = self.fn_constant(cx, konst) else {
+        let inst = match (coercion, operand) {
+            (
+                ty::adjustment::PointerCoercion::ReifyFnPointer(_),
+                mir::Operand::Constant(konst),
+            ) => self.fn_constant(cx, konst),
+            (ty::adjustment::PointerCoercion::ClosureFnPointer(_), _) => self
+                .normalize(cx, operand.ty(&mir.local_decls, self.tcx))
+                .and_then(|closure| match *closure.kind() {
+                    ty::Closure(did, args) => Some(Instance::resolve_closure(
+                        self.tcx,
+                        did,
+                        args,
+                        ty::ClosureKind::FnOnce,
+                    )),
+                    _ => None,
+                }),
+            _ => None,
+        };
+        let Some(inst) = inst else {
             return;
         };
         let Some(sig) = self.normalize(cx, *cast_ty).map(|ty| ty.to_string())
