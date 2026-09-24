@@ -4,7 +4,11 @@
 //! of them reach for is not dead code in the usual sense.
 #![allow(dead_code)]
 
-use std::{path::PathBuf, process::Command};
+use std::{
+    path::{Path, PathBuf},
+    process::{Command, Output},
+    sync::{Mutex, PoisonError},
+};
 
 use panicgraph::{
     Artifact, Body, BuildConfig, CallSite, Category, EdgeKind, FuncKey, Graph,
@@ -184,24 +188,36 @@ pub fn analyse_fixture(
         .collect()
 }
 
+/// Runs the front end on the known fixture crate, one run at a time.
+pub fn run_on_fixture(args: &[&str]) -> Output {
+    run_on(&fixture_dir(), args)
+}
+
+/// Runs the front end on a fixture crate, one run at a time.
+///
+/// A run with a new driver discards the fixture's build tree, which would
+/// break a concurrent run still compiling into it.
+pub fn run_on(dir: &Path, args: &[&str]) -> Output {
+    static TURN: Mutex<()> = Mutex::new(());
+    // A test that panicked while holding the lock left the tree intact.
+    let _turn = TURN.lock().unwrap_or_else(PoisonError::into_inner);
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_panicgraph"));
+    Command::new(&exe)
+        .arg("--manifest-dir")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("the front end should run")
+}
+
 /// Analyses the known fixture crate and returns the raw json report.
 pub fn analyse_fixture_json(
     profile: &str,
     extra: &[&str],
 ) -> serde_json::Value {
-    let exe = PathBuf::from(env!("CARGO_BIN_EXE_panicgraph"));
-    let output = Command::new(&exe)
-        .arg("--manifest-dir")
-        .arg(fixture_dir())
-        .arg("--profile")
-        .arg(profile)
-        .arg("--suppress")
-        .arg("")
-        .arg("--format")
-        .arg("json")
-        .args(extra)
-        .output()
-        .expect("the front end should run");
+    let mut args = vec!["--profile", profile, "--suppress", "", "--json"];
+    args.extend_from_slice(extra);
+    let output = run_on_fixture(&args);
     serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
         panic!(
             "the report should be json: {err}\n{}",

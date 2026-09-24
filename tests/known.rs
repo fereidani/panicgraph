@@ -413,14 +413,7 @@ fn candidates_expand_dyn_and_pointer_calls() {
 
 #[test]
 fn a_static_panic_message_is_quoted_in_the_reason() {
-    let exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_panicgraph"));
-    let output = std::process::Command::new(&exe)
-        .arg("--manifest-dir")
-        .arg(support::fixture_dir())
-        .arg("--suppress")
-        .arg("")
-        .output()
-        .expect("the front end should run");
+    let output = support::run_on_fixture(&["--suppress", ""]);
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(
         text.contains("panics with \"assertion failed: "),
