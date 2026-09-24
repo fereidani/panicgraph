@@ -150,9 +150,9 @@ fn call(callee: &str, guard: Guard) -> CallSite {
     }
 }
 
-/// Builds the graph a set of bodies makes, as one crate's artifact.
-pub fn graph(bodies: Vec<Body>) -> Graph {
-    Graph::from_artifacts(vec![Artifact {
+/// One crate's artifact holding the given bodies.
+pub fn artifact(bodies: Vec<Body>) -> Artifact {
+    Artifact {
         reified: Vec::new(),
         coerced: Vec::new(),
         krate: "test".to_owned(),
@@ -167,7 +167,12 @@ pub fn graph(bodies: Vec<Body>) -> Graph {
             mir_opt_level: None,
         },
         bodies,
-    }])
+    }
+}
+
+/// Builds the graph a set of bodies makes, as one crate's artifact.
+pub fn graph(bodies: Vec<Body>) -> Graph {
+    Graph::from_artifacts(vec![artifact(bodies)])
 }
 
 /// Analyses the known fixture crate through the installed front end and

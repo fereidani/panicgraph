@@ -7,6 +7,7 @@
 use crate::{
     model::{
         Artifact, Body, BuildConfig, CallSite, EdgeKind, FuncKey, Reified,
+        UnwindOrigin,
     },
     util::{Map, Set},
 };
@@ -79,14 +80,18 @@ impl Graph {
     /// A reachable function reified to a pointer of the right signature is
     /// what such a call could be. The edges are marked as candidates, so
     /// following them stays the caller's choice, and the unresolved edge
-    /// stays alongside them either way.
+    /// stays alongside them either way. A candidate unwinds into the same
+    /// cleanup as its call, so every guard naming the call names it too.
     fn expand_fn_pointers(&mut self, reified: &[Reified]) {
         if reified.is_empty() {
             return;
         }
+        let origin = |at: usize| {
+            UnwindOrigin::Call(u32::try_from(at).unwrap_or(u32::MAX))
+        };
         for body in &mut self.bodies {
-            let mut extra: Vec<CallSite> = Vec::new();
-            for call in &body.calls {
+            let mut extra: Vec<(usize, CallSite)> = Vec::new();
+            for (index, call) in body.calls.iter().enumerate() {
                 let Some(sig) = &call.sig else { continue };
                 for target in reified {
                     if &target.sig != sig {
@@ -97,10 +102,21 @@ impl Graph {
                     candidate.callee_display.clone_from(&target.display);
                     candidate.candidate = true;
                     candidate.sig = None;
-                    extra.push(candidate);
+                    extra.push((index, candidate));
                 }
             }
-            body.calls.extend(extra);
+            for (index, candidate) in extra {
+                let (call, added) = (origin(index), origin(body.calls.len()));
+                let guards = body.sites.iter_mut().map(|site| &mut site.guard);
+                let guards = guards
+                    .chain(body.calls.iter_mut().map(|call| &mut call.guard));
+                for guard in
+                    guards.filter(|guard| guard.origins.contains(&call))
+                {
+                    guard.origins.push(added);
+                }
+                body.calls.push(candidate);
+            }
         }
     }
 
