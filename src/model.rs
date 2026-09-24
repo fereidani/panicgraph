@@ -90,6 +90,13 @@ impl EdgeKind {
         matches!(self, Self::Static | Self::Drop)
     }
 
+    /// Returns whether the edge is a call through a vtable or a function
+    /// pointer.
+    #[must_use]
+    pub const fn is_indirect(self) -> bool {
+        matches!(self, Self::Vtable | Self::FnPtr)
+    }
+
     /// The name used in reports.
     #[must_use]
     pub const fn name(self) -> &'static str {

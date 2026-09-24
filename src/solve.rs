@@ -20,8 +20,8 @@ use crate::{
 /// Which optional edges the solver follows.
 #[derive(Debug, Clone, Copy)]
 pub struct Edges {
-    /// Whether to follow edges that are candidates rather than exact,
-    /// namely vtable and function pointer calls.
+    /// Whether to follow vtable and function pointer calls. Generic and
+    /// unresolved calls are always followed, so unread code stays reported.
     pub follow_inexact: bool,
     /// Whether to follow the expanded candidate targets of those calls.
     ///
@@ -65,7 +65,7 @@ impl Policy {
         if call.candidate && !self.edges.candidates {
             return false;
         }
-        self.edges.follow_inexact || call.kind.is_exact()
+        self.edges.follow_inexact || !call.kind.is_indirect()
     }
 }
 

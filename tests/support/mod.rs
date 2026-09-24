@@ -73,6 +73,15 @@ impl BodyBuilder {
         self
     }
 
+    /// Adds a call whose target could not be resolved, of the given kind.
+    pub fn calls_unresolved(mut self, kind: EdgeKind) -> Self {
+        let mut edge = call("<unresolved>", Guard::always());
+        edge.callee = None;
+        edge.kind = kind;
+        self.body.calls.push(edge);
+        self
+    }
+
     /// Adds a call whose unwinding panics are contained, as under a catch.
     pub fn calls_behind_barrier(mut self, callee: &str) -> Self {
         let mut edge = call(callee, Guard::always());

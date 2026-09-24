@@ -321,3 +321,36 @@ fn a_candidate_edge_is_followed_only_when_asked() {
         "asking for candidates follows the edge"
     );
 }
+
+#[test]
+fn ignoring_indirect_calls_keeps_what_the_analysis_could_not_read() {
+    // Only vtable and function pointer calls are indirect; generic and
+    // unresolved calls still stand for code the analysis could not read.
+    let (graph, solution) = solve_with(
+        vec![
+            BodyBuilder::new("caller")
+                .calls_unresolved(panicgraph::EdgeKind::Vtable)
+                .calls_unresolved(panicgraph::EdgeKind::FnPtr)
+                .calls_unresolved(panicgraph::EdgeKind::Generic)
+                .calls_unresolved(panicgraph::EdgeKind::Unresolved)
+                .build(),
+        ],
+        CategorySet::EMPTY,
+        panicgraph::solve::Edges {
+            follow_inexact: false,
+            candidates: false,
+        },
+    );
+    let enabled = solution.enabled(id(&graph, "caller"));
+    assert!(
+        !enabled.contains(Category::DynCall)
+            && !enabled.contains(Category::FnPointer),
+        "indirect calls are ignored, got {enabled:?}"
+    );
+    assert!(
+        enabled.contains(Category::GenericBound)
+            && enabled.contains(Category::Unknown),
+        "a generic call and an unresolved one are not indirect, got \
+         {enabled:?}"
+    );
+}
