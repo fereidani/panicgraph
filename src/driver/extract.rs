@@ -13,7 +13,10 @@ use rustc_middle::{
 };
 use rustc_span::Spanned;
 
-use self::{flow::unavoidable, sites::classify_assert};
+use self::{
+    flow::{resuming, unavoidable},
+    sites::classify_assert,
+};
 use crate::{fold, read::instantiate, sinks::SinkTable, summary::Cache};
 
 mod candidates;
@@ -71,6 +74,8 @@ struct Raw<'tcx> {
     call_blocks: Vec<BasicBlock>,
     unwind_edges: Vec<(UnwindOrigin, BasicBlock)>,
     successors: Vec<Work<'tcx>>,
+    /// Which blocks can unwind out of the body, by block index.
+    resuming: Vec<bool>,
 }
 
 impl Raw<'_> {
@@ -80,8 +85,9 @@ impl Raw<'_> {
     /// The origin names the entry by its position, so the index has to be
     /// read before the push, and every caller has to go through here for
     /// the two vectors to stay in step.
-    fn add_site(&mut self, at: At, site: PanicSite, fires: bool) {
+    fn add_site(&mut self, at: At, mut site: PanicSite, fires: bool) {
         let index = u32::try_from(self.sites.len()).unwrap_or(u32::MAX);
+        site.terminates = !self.leaves(at.unwind);
         self.sites.push(site);
         self.site_blocks.push(at.bb);
         self.site_fires.push(fires);
@@ -89,11 +95,28 @@ impl Raw<'_> {
     }
 
     /// Appends a call edge and the cleanup path unwinding out of it reaches.
-    fn add_call(&mut self, at: At, call: CallSite) {
+    fn add_call(&mut self, at: At, mut call: CallSite) {
         let index = u32::try_from(self.calls.len()).unwrap_or(u32::MAX);
+        call.terminates = !self.leaves(at.unwind);
         self.calls.push(call);
         self.call_blocks.push(at.bb);
         self.record_unwind(UnwindOrigin::Call(index), at.unwind);
+    }
+
+    /// Whether unwinding out of a terminator can leave the function.
+    ///
+    /// The compiler aborts instead in a function that must not unwind, in a
+    /// cleanup block, and on a cleanup path that never resumes.
+    fn leaves(&self, unwind: UnwindAction) -> bool {
+        match unwind {
+            UnwindAction::Continue => true,
+            UnwindAction::Cleanup(target) => self
+                .resuming
+                .get(target.as_usize())
+                .copied()
+                .unwrap_or(true),
+            UnwindAction::Unreachable | UnwindAction::Terminate(_) => false,
+        }
     }
 
     /// Notes that unwinding from `origin` transfers control to a cleanup
@@ -120,6 +143,9 @@ pub struct Extractor<'tcx> {
     /// Whether the crate being compiled is an integration test or a bench,
     /// which links the library rather than being it.
     integration: bool,
+    /// Whether panics unwind in this build. Under `panic = "abort"` no
+    /// cleanup runs and no catch contains anything.
+    unwinds: bool,
     bodies: Vec<Body>,
     seen: Set<String>,
     reified: Vec<Reified>,
@@ -150,6 +176,7 @@ impl<'tcx> Extractor<'tcx> {
                 .map(|name| name.replace('-', "_")),
             // Cargo sets this for integration tests and benches alone.
             integration: std::env::var_os("CARGO_TARGET_TMPDIR").is_some(),
+            unwinds: tcx.sess.panic_strategy().unwinds(),
             bodies: Vec::new(),
             seen: Set::default(),
             reified: Vec::new(),
@@ -341,7 +368,10 @@ impl<'tcx> Extractor<'tcx> {
         };
         let reach =
             fold::reachable(self.tcx, cx.inst, cx.env, mir, &mut self.cache);
-        let mut raw = Raw::default();
+        let mut raw = Raw {
+            resuming: resuming(mir),
+            ..Raw::default()
+        };
         for (bb, data) in mir.basic_blocks.iter_enumerated() {
             if !reach.is_live(bb) {
                 continue;
@@ -361,7 +391,7 @@ impl<'tcx> Extractor<'tcx> {
                         // so the compiler emits no check at all.
                         continue;
                     }
-                    let at = At::new(bb, *unwind, info);
+                    let at = At::new(bb, self.unwind_of(*unwind), info);
                     self.push_assert(&mut raw, at, msg, reach.is_failing(bb));
                 }
                 TerminatorKind::Call {
@@ -380,12 +410,12 @@ impl<'tcx> Extractor<'tcx> {
                     }
                     let mut info = info;
                     info.span = *fn_span;
-                    let at = At::new(bb, *unwind, info);
+                    let at = At::new(bb, self.unwind_of(*unwind), info);
                     let ty = func.ty(&mir.local_decls, self.tcx);
                     self.push_call(&mut raw, cx, at, ty, args, mir);
                 }
                 TerminatorKind::Drop { place, unwind, .. } => {
-                    let at = At::new(bb, *unwind, info);
+                    let at = At::new(bb, self.unwind_of(*unwind), info);
                     let ty = place.ty(&mir.local_decls, self.tcx).ty;
                     self.push_drop(&mut raw, cx, at, ty);
                 }
@@ -394,6 +424,18 @@ impl<'tcx> Extractor<'tcx> {
         }
         Self::settle_certain(&mut raw, mir, &reach);
         raw
+    }
+
+    /// Where unwinding out of a terminator goes in this build.
+    ///
+    /// A standard library body is built to unwind even when this build
+    /// aborts, and then its cleanup never runs.
+    const fn unwind_of(&self, unwind: UnwindAction) -> UnwindAction {
+        if self.unwinds {
+            unwind
+        } else {
+            UnwindAction::Unreachable
+        }
     }
 
     /// Marks the sites every execution of the body raises at.
@@ -446,6 +488,7 @@ impl<'tcx> Extractor<'tcx> {
             loc: self.loc_of(at.span),
             guard: Guard::default(),
             certain: false,
+            terminates: false,
         };
         raw.add_site(at, site, fails);
     }
@@ -475,6 +518,7 @@ impl<'tcx> Extractor<'tcx> {
                 loc: self.loc_of(at.span),
                 guard: Guard::default(),
                 barrier: false,
+                terminates: false,
                 candidate: false,
                 sig: Some(format!("{ty}")),
                 self_ty: None,
@@ -568,6 +612,7 @@ impl<'tcx> Extractor<'tcx> {
             loc: self.loc_of(at.span),
             guard: Guard::default(),
             barrier,
+            terminates: false,
             candidate: false,
             sig: None,
             self_ty: None,

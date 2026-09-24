@@ -191,6 +191,10 @@ pub struct PanicSite {
     /// instead, and the check, where it is one, fails every time.
     #[serde(default)]
     pub certain: bool,
+    /// True when unwinding stops at the function's boundary and aborts, as
+    /// in a nounwind function, a cleanup block, or a `panic = "abort"` build.
+    #[serde(default)]
+    pub terminates: bool,
 }
 
 /// A call from one function to another.
@@ -211,6 +215,10 @@ pub struct CallSite {
     /// because nothing can catch them.
     #[serde(default)]
     pub barrier: bool,
+    /// True when the callee's unwinding panics abort at this call. See
+    /// [`PanicSite::terminates`].
+    #[serde(default)]
+    pub terminates: bool,
     /// True when the callee is one possible target rather than the proven
     /// one. Candidate edges are followed only when asked for.
     #[serde(default)]

@@ -71,6 +71,7 @@ fn sites(body: &Body) -> Vec<Value> {
             json!({
                 "category": s.category.name(),
                 "termination": format!("{:?}", s.termination),
+                "terminates": s.terminates,
                 "reason": s.reason,
                 "sink": s.sink,
                 "loc": s.loc.as_ref().map(ToString::to_string),
@@ -92,6 +93,8 @@ fn calls(graph: &Graph, body: &Body) -> Vec<Value> {
                 "kind": c.kind.name(),
                 "loc": c.loc.as_ref().map(ToString::to_string),
                 "cleanup": !c.guard.normal,
+                "barrier": c.barrier,
+                "terminates": c.terminates,
             })
         })
         .collect()

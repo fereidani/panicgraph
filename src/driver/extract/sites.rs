@@ -45,6 +45,7 @@ impl<'tcx> Extractor<'tcx> {
                 loc: self.loc_of(at.span),
                 guard: Guard::default(),
                 certain: false,
+                terminates: false,
             };
             raw.add_site(at, site, true);
         }
@@ -78,6 +79,7 @@ impl<'tcx> Extractor<'tcx> {
                 loc: self.loc_of(at.span),
                 guard: Guard::default(),
                 certain: false,
+                terminates: false,
             };
             raw.add_site(at, site, true);
         }
@@ -281,6 +283,7 @@ impl<'tcx> Extractor<'tcx> {
                     loc: self.loc_of(at.span),
                     guard: Guard::default(),
                     certain: false,
+                    terminates: false,
                 };
                 raw.add_site(at, site, true);
             }

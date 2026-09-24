@@ -39,6 +39,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_dyn", "dyn-call"),
     ("must_foreign", "foreign"),
     ("must_catch_abort", "alloc-failure"),
+    ("must_catch_across_ffi", "explicit"),
     ("must_index_off_by_one", "index"),
     ("must_index_wrong_slice", "index"),
     ("must_modulo_signed", "index"),
@@ -354,6 +355,24 @@ fn a_debug_build_still_folds_the_guards() {
             categories.iter().any(|c| c == category),
             "{function} can panic with {category}, but a debug build \
              reported {categories:?}"
+        );
+    }
+}
+
+#[test]
+fn a_build_whose_panics_abort_catches_nothing() {
+    // Under `panic = "abort"` a catch contains nothing.
+    let reported = analyse_fixture("abort", &[]);
+    for (function, category) in [
+        ("must_not_catch_explicit", "explicit"),
+        ("must_catch_across_ffi", "explicit"),
+        ("must_catch_abort", "alloc-failure"),
+    ] {
+        let categories = found(&reported, function).unwrap_or_default();
+        assert!(
+            categories.iter().any(|c| c == category),
+            "{function} reaches {category} when panics abort, but was \
+             reported with {categories:?}"
         );
     }
 }

@@ -4,6 +4,39 @@ use rustc_middle::mir::{self, BasicBlock, TerminatorKind};
 
 use crate::fold;
 
+/// Which blocks of a body can reach an `UnwindResume`, by block index.
+///
+/// A cleanup path that aborts instead keeps the panic in the function. The
+/// walk runs backwards from each resumption and marks each block once.
+pub(super) fn resuming(mir: &mir::Body<'_>) -> Vec<bool> {
+    let mut out = vec![false; mir.basic_blocks.len()];
+    let mut stack: Vec<BasicBlock> = Vec::new();
+    for (bb, data) in mir.basic_blocks.iter_enumerated() {
+        let resumes = data.terminator.as_ref().is_some_and(|term| {
+            matches!(term.kind, TerminatorKind::UnwindResume)
+        });
+        if resumes && let Some(slot) = out.get_mut(bb.as_usize()) {
+            *slot = true;
+            stack.push(bb);
+        }
+    }
+    let predecessors = mir.basic_blocks.predecessors();
+    while let Some(bb) = stack.pop() {
+        let Some(from) = predecessors.get(bb) else {
+            continue;
+        };
+        for &pred in from {
+            if let Some(slot) = out.get_mut(pred.as_usize())
+                && !*slot
+            {
+                *slot = true;
+                stack.push(pred);
+            }
+        }
+    }
+    out
+}
+
 /// Whether every execution of a body that gets past its entry runs one
 /// block.
 ///

@@ -99,6 +99,7 @@ impl<'tcx> Extractor<'tcx> {
                 loc: self.loc_of(at.span),
                 guard: Guard::default(),
                 barrier: false,
+                terminates: false,
                 candidate: true,
                 sig: None,
                 self_ty: Some(format!("{}", trait_ref.self_ty())),

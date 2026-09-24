@@ -323,6 +323,93 @@ fn a_candidate_edge_is_followed_only_when_asked() {
 }
 
 #[test]
+fn a_panic_that_cannot_leave_its_function_crosses_a_barrier() {
+    // An `extern "C"` function that panics aborts at its own boundary, so a
+    // catch around a call to it contains nothing.
+    let (graph, solution) = solve(
+        vec![
+            BodyBuilder::new("callback")
+                .panics_without_leaving(Category::Explicit)
+                .build(),
+            BodyBuilder::new("caller")
+                .calls_behind_barrier("callback")
+                .build(),
+        ],
+        CategorySet::EMPTY,
+    );
+    let callback = id(&graph, "callback");
+    assert!(
+        !solution.unwinds(callback),
+        "a panic that aborts at the function's boundary does not unwind \
+         out of it"
+    );
+    assert!(
+        solution
+            .enabled(id(&graph, "caller"))
+            .contains(Category::Explicit),
+        "an abort cannot be caught, so the catch must not contain it"
+    );
+}
+
+#[test]
+fn a_call_that_must_not_unwind_turns_the_callee_unwind_into_an_abort() {
+    let (graph, solution) = solve(
+        vec![
+            BodyBuilder::new("leaf").panics(Category::Index).build(),
+            BodyBuilder::new("guarded")
+                .calls_without_unwinding("leaf")
+                .build(),
+            BodyBuilder::new("caller")
+                .calls_behind_barrier("guarded")
+                .build(),
+        ],
+        CategorySet::EMPTY,
+    );
+    assert!(
+        !solution.unwinds(id(&graph, "guarded")),
+        "nothing unwinds past a call its function must not unwind past"
+    );
+    assert!(
+        solution
+            .enabled(id(&graph, "caller"))
+            .contains(Category::Index),
+        "the index panic aborts on its way out, so no catch contains it"
+    );
+}
+
+#[test]
+fn cleanup_still_runs_before_a_panic_aborts_at_the_boundary() {
+    // The drop runs while the panic unwinds, before the function aborts, so
+    // what it raises is reachable. It sits in a cleanup block, which cannot
+    // unwind.
+    let mut caller = BodyBuilder::new("caller")
+        .panics_without_leaving(Category::Explicit)
+        .calls_without_unwinding("dropper")
+        .build();
+    caller.calls[0].guard = panicgraph::Guard {
+        normal: false,
+        origins: vec![panicgraph::UnwindOrigin::Site(0)],
+    };
+    let (graph, solution) = solve(
+        vec![
+            caller,
+            BodyBuilder::new("dropper").panics(Category::Index).build(),
+        ],
+        CategorySet::EMPTY,
+    );
+    let enabled = solution.enabled(id(&graph, "caller"));
+    assert!(
+        enabled.contains(Category::Index),
+        "the cleanup reached while the panic unwinds still runs, got \
+         {enabled:?}"
+    );
+    assert!(
+        !solution.unwinds(id(&graph, "caller")),
+        "and nothing leaves the function unwinding"
+    );
+}
+
+#[test]
 fn ignoring_indirect_calls_keeps_what_the_analysis_could_not_read() {
     // Only vtable and function pointer calls are indirect; generic and
     // unresolved calls still stand for code the analysis could not read.

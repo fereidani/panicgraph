@@ -159,9 +159,12 @@ impl Eval<'_> {
             {
                 continue;
             }
-            match site.termination {
-                Termination::Unwind => state.unwind.insert(site.category),
-                Termination::Abort => state.abort.insert(site.category),
+            // A panic that cannot unwind out of its function reaches callers
+            // as an abort.
+            if site.termination == Termination::Unwind && !site.terminates {
+                state.unwind.insert(site.category);
+            } else {
+                state.abort.insert(site.category);
             }
         }
 
@@ -170,10 +173,15 @@ impl Eval<'_> {
                 continue;
             }
             let callee = self.callee_state(call);
-            // A barrier contains what unwinds out of the callee. An abort
-            // cannot be caught by anything, so that plane always crosses.
+            // A barrier contains the callee's unwinding panics, and a
+            // terminating call turns them into aborts. Aborts cross every
+            // barrier.
             if !call.barrier {
-                state.unwind = state.unwind.union(callee.unwind);
+                if call.terminates {
+                    state.abort = state.abort.union(callee.unwind);
+                } else {
+                    state.unwind = state.unwind.union(callee.unwind);
+                }
             }
             state.abort = state.abort.union(callee.abort);
         }

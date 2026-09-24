@@ -440,7 +440,10 @@ matching symbol names, which drift between releases.
 Reachability is a fixpoint over the call graph: each function gets the set of
 panic categories it can raise, unioned from everything it calls. Drop glue is
 followed. Suppression removes categories before that propagation runs, and
-cleanup paths are gated on the panic that unwinds into them.
+cleanup paths are gated on the panic that unwinds into them. A panic that
+cannot unwind out of its function reaches callers as an abort, which no
+catch contains. That happens in a function that must not unwind, in a
+cleanup block, and in a build whose panics abort.
 
 Checks that are not in the build are not reported. The standard library ships
 one copy of its MIR for every crate that uses it, so a body can carry an

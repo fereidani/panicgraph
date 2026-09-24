@@ -6,3 +6,8 @@ name = "known"
 version = "0.0.0"
 edition = "2024"
 publish = false
+
+# Panics abort, so no catch contains anything.
+[profile.abort]
+inherits = "release"
+panic = "abort"

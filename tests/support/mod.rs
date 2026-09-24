@@ -90,6 +90,22 @@ impl BodyBuilder {
         self
     }
 
+    /// Adds an unwinding panic that aborts at the function's boundary.
+    pub fn panics_without_leaving(mut self, category: Category) -> Self {
+        let mut raised = site(category, Termination::Unwind, Guard::always());
+        raised.terminates = true;
+        self.body.sites.push(raised);
+        self
+    }
+
+    /// Adds a call where unwinding out of the callee aborts.
+    pub fn calls_without_unwinding(mut self, callee: &str) -> Self {
+        let mut edge = call(callee, Guard::always());
+        edge.terminates = true;
+        self.body.calls.push(edge);
+        self
+    }
+
     /// Adds a panic that aborts rather than unwinds.
     pub fn aborts(mut self, category: Category) -> Self {
         self.body.sites.push(site(
@@ -132,6 +148,7 @@ fn site(
         loc: None,
         guard,
         certain: false,
+        terminates: false,
     }
 }
 
@@ -144,6 +161,7 @@ fn call(callee: &str, guard: Guard) -> CallSite {
         loc: None,
         guard,
         barrier: false,
+        terminates: false,
         candidate: false,
         sig: None,
         self_ty: None,

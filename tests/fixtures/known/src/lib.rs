@@ -218,6 +218,17 @@ pub fn must_catch_abort(x: u32) -> u32 {
     std::panic::catch_unwind(move || *Box::new(x)).unwrap_or(0)
 }
 
+/// Asserts; its ABI cannot unwind, so a failed assertion aborts.
+pub extern "C" fn assert_small_across_ffi(x: u32) -> u32 {
+    assert!(x < 10, "x is too big");
+    x
+}
+
+/// Reaches `explicit` through the catch, which cannot contain an abort.
+pub fn must_catch_across_ffi(x: u32) -> u32 {
+    std::panic::catch_unwind(move || assert_small_across_ffi(x)).unwrap_or(0)
+}
+
 /// Clean. The remainder of anything by eight lies below eight.
 pub fn clean_modulo_index(v: &[u8; 8], i: usize) -> u8 {
     v[i % 8]
