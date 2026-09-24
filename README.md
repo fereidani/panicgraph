@@ -562,14 +562,15 @@ Read these before trusting a clean result.
 - **`unknown` is not `clean`.** It means the analysis could not see inside
   something. `check --fail-on-unknown` refuses to treat the two alike.
 - **Dynamic dispatch is not resolved, only named.** A `dyn Trait` call
-  reports `dyn-call` and a function pointer call reports `fn-pointer`.
-  `--candidates` expands both: every concrete implementation of the trait
-  whose type the reachable code makes into a trait object, and every
-  reachable function reified to a pointer of a matching signature, joins
-  the graph as a candidate edge, so the report shows what the call could
-  actually do. The category stays either way, because
-  candidates narrow the unknown rather than close it, and `--static-only`
-  still drops the edges entirely. A call a generic function makes through
+  reports `dyn-call`, and so does dropping a trait object. A function
+  pointer call reports `fn-pointer`. `--candidates` expands both: every concrete implementation
+  of the trait whose type the reachable code makes into a trait object,
+  and every reachable function or closure made into a pointer of a
+  matching signature, joins the graph as a candidate edge, so the report
+  shows what the call could actually do. The category stays either way,
+  because candidates narrow the unknown rather than close it, and
+  `--static-only` still drops the edges through objects and pointers
+  entirely. A call a generic function makes through
   one of its bounds reports `generic-bound`, since which implementation
   runs is the caller's choice. Each of these names where visibility ended;
   `--suppress assumed` assumes them all, and `check --fail-on-unknown`

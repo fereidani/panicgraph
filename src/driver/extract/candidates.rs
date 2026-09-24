@@ -2,9 +2,10 @@
 //! could run.
 
 use panicgraph::{CallSite, EdgeKind, FuncKey, Guard, Reified};
+use rustc_hir::def_id::DefId;
 use rustc_middle::{
     mir,
-    ty::{self, Instance, TypeVisitableExt},
+    ty::{self, Instance, TypeVisitableExt, TypingEnv},
 };
 
 use super::{At, Extractor, Raw, Work};
@@ -35,14 +36,72 @@ impl<'tcx> Extractor<'tcx> {
             self.generic(raw, at, format!("drop glue for {ty}"));
             return;
         }
-        let glue = Instance::resolve_drop_glue(self.tcx, ty);
         let display = format!("drop glue for {ty}");
+        if let ty::Dynamic(predicates, _) = ty.kind() {
+            // The object's own glue only calls through its vtable and would
+            // read as clean, so the drop is a call through the object like
+            // any of its methods.
+            self.push_edge(raw, at, None, display, EdgeKind::Vtable, false);
+            if let Some(principal) = predicates.principal_def_id() {
+                self.push_drop_candidates(raw, cx, at, principal);
+            }
+            return;
+        }
+        let glue = Instance::resolve_drop_glue(self.tcx, ty);
         let key = self.symbol_of(glue).map(FuncKey);
         self.push_edge(raw, at, key, display, EdgeKind::Drop, false);
         raw.successors.push(Work {
             inst: glue,
             env: cx.env,
         });
+    }
+
+    /// Appends the drop glue of each type implementing the object's trait,
+    /// the candidates a method called through the object would have.
+    fn push_drop_candidates(
+        &self,
+        raw: &mut Raw<'tcx>,
+        cx: Work<'tcx>,
+        at: At,
+        principal: DefId,
+    ) {
+        for impl_did in self.tcx.all_impls(principal) {
+            let self_ty = self
+                .tcx
+                .impl_trait_ref(impl_did)
+                .instantiate_identity()
+                .skip_normalization()
+                .self_ty();
+            if self_ty.has_param()
+                || !self_ty
+                    .needs_drop(self.tcx, TypingEnv::fully_monomorphized())
+            {
+                // A generic impl has no single glue to name; the
+                // unresolved edge already covers it.
+                continue;
+            }
+            let glue = Instance::resolve_drop_glue(self.tcx, self_ty);
+            let Some(key) = self.symbol_of(glue).map(FuncKey) else {
+                continue;
+            };
+            let site = CallSite {
+                callee: Some(key),
+                callee_display: format!("drop glue for {self_ty}"),
+                kind: EdgeKind::Vtable,
+                loc: self.loc_of(at.span),
+                guard: Guard::default(),
+                barrier: false,
+                terminates: false,
+                candidate: true,
+                sig: None,
+                self_ty: Some(format!("{self_ty}")),
+            };
+            raw.add_call(at, site);
+            raw.successors.push(Work {
+                inst: glue,
+                env: cx.env,
+            });
+        }
     }
 
     /// Appends every known implementation a dynamic call could reach.

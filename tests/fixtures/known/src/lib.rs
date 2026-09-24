@@ -363,6 +363,30 @@ pub fn loud_object() -> &'static dyn Speak {
     &Loud
 }
 
+/// Speaks quietly and panics when dropped.
+pub struct Noisy;
+impl Speak for Noisy {
+    fn speak(&self) -> u8 {
+        1
+    }
+}
+impl Drop for Noisy {
+    fn drop(&mut self) {
+        panic!("noisy drop")
+    }
+}
+
+/// Reaches `dyn-call`, and `explicit` once candidates are followed, since
+/// `Noisy` panics in its drop.
+pub fn must_drop_object(s: Box<dyn Speak>) {
+    drop(s);
+}
+
+/// Makes the noisy implementation into an object.
+pub fn noisy_object() -> Box<dyn Speak> {
+    Box::new(Noisy)
+}
+
 /// Clean. Always panics once called, and the report says so.
 pub fn must_always_stub() -> u32 {
     unimplemented!()

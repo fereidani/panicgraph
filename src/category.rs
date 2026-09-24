@@ -76,7 +76,8 @@ pub enum Category {
     UbCheck = 16,
     /// A call into foreign code, which has no Rust body to read.
     Foreign = 17,
-    /// A dynamic call, whose target set the analysis does not resolve.
+    /// A call or a drop through a trait object, whose target set the
+    /// analysis does not resolve.
     DynCall = 18,
     /// A call through a function pointer, whose target is unknown.
     FnPointer = 19,
@@ -161,7 +162,9 @@ impl Category {
             Self::Unknown => "unclassified panic",
             Self::UbCheck => "standard library precondition check",
             Self::Foreign => "call into foreign code, which has no Rust body",
-            Self::DynCall => "dyn trait call with an unresolved target set",
+            Self::DynCall => {
+                "call or drop through a trait object, target set unresolved"
+            }
             Self::FnPointer => "call through a function pointer",
             Self::GenericBound => {
                 "call decided by a caller's choice of generic arguments"

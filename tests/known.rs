@@ -49,6 +49,7 @@ const MUST_PANIC: &[(&str, &str)] = &[
     ("must_pick_through_generic", "explicit"),
     ("must_pick_any", "generic-bound"),
     ("must_dyn_speak", "dyn-call"),
+    ("must_drop_object", "dyn-call"),
     ("must_zeroed_ref", "explicit"),
     ("must_panic_literal", "explicit"),
     ("must_zeroed_chain", "generic-bound"),
@@ -461,6 +462,13 @@ fn candidates_expand_dyn_and_pointer_calls() {
         dyn_call.iter().any(|c| c == "dyn-call"),
         "candidates narrow the unknown, they do not close it, got \
          {dyn_call:?}"
+    );
+
+    let dropped = found(&reported, "must_drop_object").unwrap_or_default();
+    assert!(
+        dropped.iter().any(|c| c == "explicit"),
+        "one type made into an object panics in its drop, so following \
+         candidates must surface it, got {dropped:?}"
     );
 
     let closure =
