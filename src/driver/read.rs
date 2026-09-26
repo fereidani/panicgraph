@@ -11,7 +11,10 @@ use rustc_abi::FieldIdx;
 use rustc_index::IndexSlice;
 use rustc_middle::{
     mir::{self, BinOp},
-    ty::{self, Instance, Ty, TyCtxt, TypeVisitableExt, TypingEnv},
+    ty::{
+        self, Instance, Ty, TyCtxt, TypeVisitableExt, TypingEnv,
+        consts::ConstExt,
+    },
 };
 use rustc_span::DUMMY_SP;
 
